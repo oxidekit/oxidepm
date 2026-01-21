@@ -1,0 +1,13 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: oxidekit/.github/.github/workflows/ci.yml@main
+    with:
+      rust-version: 'stable'
