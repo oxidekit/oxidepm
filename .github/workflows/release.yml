@@ -49,10 +49,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
 
     steps:
       - uses: actions/checkout@v4
