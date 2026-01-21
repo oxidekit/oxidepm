@@ -11,6 +11,26 @@ use crate::error::{Error, Result};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+// Default value functions for serde
+fn default_instances() -> u32 {
+    1
+}
+
+fn default_kill_timeout() -> u64 {
+    DEFAULT_KILL_TIMEOUT_MS
+}
+
+fn default_ignore_patterns() -> Vec<String> {
+    DEFAULT_IGNORE_PATTERNS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn default_stopped_status() -> AppStatus {
+    AppStatus::Stopped
+}
+
 /// Regex pattern for valid app names: only alphanumeric, underscore, and hyphen
 static APP_NAME_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid app name regex")
@@ -140,34 +160,50 @@ pub struct AppSpec {
     pub name: String,
     pub mode: AppMode,
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
     pub watch: bool,
+    #[serde(default = "default_ignore_patterns")]
     pub ignore_patterns: Vec<String>,
+    #[serde(default)]
     pub restart_policy: RestartPolicy,
+    #[serde(default = "default_kill_timeout")]
     pub kill_timeout_ms: u64,
     pub created_at: DateTime<Utc>,
     // Clustering
+    #[serde(default = "default_instances")]
     pub instances: u32,
+    #[serde(default)]
     pub instance_id: Option<u32>,
     // Port management
+    #[serde(default)]
     pub port: Option<u16>,
+    #[serde(default)]
     pub port_range: Option<(u16, u16)>,
     // Health checks
+    #[serde(default)]
     pub health_check: Option<HealthCheck>,
     // Memory limit (auto-restart if exceeded)
+    #[serde(default)]
     pub max_memory_mb: Option<u64>,
     // Startup delay in milliseconds (wait before starting)
+    #[serde(default)]
     pub startup_delay_ms: Option<u64>,
     // Inherit environment from parent process
+    #[serde(default)]
     pub env_inherit: bool,
     // Event hooks
+    #[serde(default)]
     pub hooks: Hooks,
     // Process tags for grouping (use @tag selector syntax)
     #[serde(default)]
     pub tags: Vec<String>,
     // Maximum uptime in seconds before auto-restart (prevents memory leaks)
+    #[serde(default)]
     pub max_uptime_secs: Option<u64>,
 }
 
@@ -436,21 +472,34 @@ impl FromStr for AppStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub app_id: u32,
+    #[serde(default)]
     pub pid: Option<u32>,
+    #[serde(default = "default_stopped_status")]
     pub status: AppStatus,
+    #[serde(default)]
     pub restarts: u32,
+    #[serde(default)]
     pub uptime_secs: u64,
+    #[serde(default)]
     pub cpu_percent: f32,
+    #[serde(default)]
     pub memory_bytes: u64,
+    #[serde(default)]
     pub last_exit_code: Option<i32>,
+    #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
     // Health check status
+    #[serde(default)]
     pub healthy: bool,
+    #[serde(default)]
     pub last_health_check: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub health_check_failures: u32,
     // Port info
+    #[serde(default)]
     pub port: Option<u16>,
     // Instance info for clusters
+    #[serde(default)]
     pub instance_id: Option<u32>,
 }
 
