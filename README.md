@@ -326,22 +326,68 @@ All data stored in `~/.oxidepm/`:
 
 ## Comparison with PM2
 
-| Feature | OxidePM | PM2 |
-|---------|---------|-----|
-| Language | Rust | Node.js |
-| Binary size | ~6.6 MB | ~50 MB (with Node) |
-| Memory usage | ~10 MB | ~50-100 MB |
-| Startup time | Instant | ~1-2s |
-| Node.js support | ✓ | ✓ |
-| Rust/Cargo support | ✓ | ✗ |
-| Watch mode | ✓ | ✓ |
-| Clustering | ✓ | ✓ |
-| Health checks | ✓ | ✓ (Plus) |
-| Web API | ✓ | ✓ (Plus) |
-| TUI dashboard | ✓ | ✓ |
-| Git clone start | ✓ | ✗ |
-| Preflight checks | ✓ | ✗ |
-| Telegram alerts | ✓ | ✗ |
+### Resource Usage
+
+| Metric | OxidePM | PM2 |
+|--------|---------|-----|
+| Binary size | ~7 MB | ~50 MB (requires Node.js runtime) |
+| Daemon memory | ~10 MB | ~50-100 MB |
+| Startup time | Instant (<50ms) | 1-2 seconds |
+| Per-process overhead | Minimal | Higher (Node.js event loop) |
+
+### Feature Comparison
+
+| Feature | OxidePM | PM2 | Notes |
+|---------|:-------:|:---:|-------|
+| **Runtime Support** |
+| Node.js apps | ✅ | ✅ | Both support Node.js natively |
+| npm/yarn/pnpm scripts | ✅ | ✅ | Run package.json scripts |
+| Rust/Cargo projects | ✅ | ❌ | OxidePM auto-builds and runs Cargo projects |
+| Generic commands | ✅ | ✅ | Run any shell command |
+| **Process Management** |
+| Daemon supervision | ✅ | ✅ | Processes persist across terminal sessions |
+| Auto-restart on crash | ✅ | ✅ | Configurable restart policies |
+| Crash-loop protection | ✅ | ✅ | Exponential backoff on repeated crashes |
+| Graceful reload | ✅ | ✅ | Zero-downtime restarts |
+| Clustering | ✅ | ✅ | Run multiple instances |
+| **Developer Experience** |
+| Watch mode | ✅ | ✅ | Auto-restart on file changes |
+| Port conflict detection | ✅ | ❌ | Suggests alternative port when conflict detected |
+| Preflight checks | ✅ | ❌ | Validates deps before starting |
+| Git clone & start | ✅ | ❌ | One command to clone, setup, and run |
+| Auto-setup (`--setup`) | ✅ | ❌ | Installs deps, creates .env from template |
+| Event hooks | ✅ | ✅ | Run scripts on start/stop/crash |
+| **Monitoring** |
+| Status table | ✅ | ✅ | CPU, memory, uptime display |
+| TUI dashboard | ✅ | ✅ | Real-time terminal UI |
+| Log management | ✅ | ✅ | Rotation, tail, follow, grep |
+| Health checks (HTTP) | ✅ | 💰 | PM2 requires Plus subscription |
+| Health checks (Script) | ✅ | 💰 | PM2 requires Plus subscription |
+| **Integrations** |
+| Web API / REST | ✅ | 💰 | PM2 requires Plus subscription |
+| WebSocket real-time | ✅ | 💰 | PM2 requires Plus subscription |
+| Telegram alerts | ✅ | ❌ | Native Telegram bot integration |
+| Systemd/launchd | ✅ | ✅ | Auto-start on boot |
+| **Configuration** |
+| TOML config | ✅ | ❌ | Clean, readable config format |
+| YAML config | ✅ | ✅ | Ecosystem file support |
+| JSON config | ✅ | ✅ | Ecosystem file support |
+| Save/Resurrect | ✅ | ✅ | Save and restore process list |
+
+### Why Choose OxidePM?
+
+**Choose OxidePM if you:**
+- Work with Rust projects (native Cargo support)
+- Want health checks and web API without a subscription
+- Prefer lower resource usage (Rust vs Node.js daemon)
+- Need port conflict detection and preflight checks
+- Want to clone and run projects from git in one command
+
+**Choose PM2 if you:**
+- Need the PM2 ecosystem (pm2.io, container support)
+- Require Windows support
+- Have existing PM2 configurations you don't want to migrate
+- Need PM2-specific features like the APM dashboard
 
 ## Requirements
 
