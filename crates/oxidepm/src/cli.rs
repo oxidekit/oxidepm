@@ -55,7 +55,11 @@ pub enum Commands {
     },
 
     /// Show process status table
-    Status,
+    Status {
+        /// Show extended info (cwd, port)
+        #[arg(long)]
+        more: bool,
+    },
 
     /// Show detailed info for a process
     Show {

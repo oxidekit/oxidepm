@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         Commands::Stop { selector } => stop::execute(&selector).await,
         Commands::Restart { selector } => restart::execute(&selector).await,
         Commands::Delete { selector } => delete::execute(&selector).await,
-        Commands::Status => status::execute().await,
+        Commands::Status { more } => status::execute(more).await,
         Commands::Show { selector } => show::execute(&selector).await,
         Commands::Logs(args) => logs::execute(args).await,
         Commands::Ping => ping::execute().await,

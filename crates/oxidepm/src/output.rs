@@ -132,6 +132,115 @@ pub fn print_status_table(apps: &[AppInfo]) {
     println!("{}", table);
 }
 
+/// Extended status row with cwd and port
+#[derive(Tabled, Serialize)]
+pub struct StatusRowExtended {
+    #[tabled(rename = "id")]
+    pub id: u32,
+    #[tabled(rename = "name")]
+    pub name: String,
+    #[tabled(rename = "mode")]
+    pub mode: String,
+    #[tabled(rename = "pid")]
+    pub pid: String,
+    #[tabled(rename = "↺")]
+    #[serde(rename = "restarts")]
+    pub restarts: String,
+    #[tabled(rename = "status")]
+    pub status: String,
+    #[tabled(rename = "port")]
+    pub port: String,
+    #[tabled(rename = "cwd")]
+    pub cwd: String,
+    #[tabled(rename = "uptime")]
+    pub uptime: String,
+}
+
+impl From<&AppInfo> for StatusRowExtended {
+    fn from(info: &AppInfo) -> Self {
+        let status_colored = match info.state.status {
+            AppStatus::Running => "online".green().to_string(),
+            AppStatus::Stopped => "stopped".red().to_string(),
+            AppStatus::Errored => "errored".red().bold().to_string(),
+            AppStatus::Starting => "starting".yellow().to_string(),
+            AppStatus::Stopping => "stopping".yellow().to_string(),
+            AppStatus::Building => "building".cyan().to_string(),
+        };
+
+        // Get port from state first (actual running port), fall back to spec
+        let port = info
+            .state
+            .port
+            .or(info.spec.port)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        // Shorten cwd for display (show last 2 path components)
+        let cwd = shorten_path(&info.spec.cwd.display().to_string(), 30);
+
+        StatusRowExtended {
+            id: info.spec.id,
+            name: info.spec.name.clone(),
+            mode: info.spec.mode.to_string(),
+            pid: info
+                .state
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            restarts: info.state.restarts.to_string(),
+            status: status_colored,
+            port,
+            cwd,
+            uptime: format_duration(info.state.uptime_secs),
+        }
+    }
+}
+
+/// Shorten a path for display by keeping last components
+fn shorten_path(path: &str, max_len: usize) -> String {
+    if path.len() <= max_len {
+        return path.to_string();
+    }
+
+    // Try to show just the last 2 components
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() >= 2 {
+        let shortened = format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+        if shortened.len() <= max_len {
+            return shortened;
+        }
+    }
+
+    // Just truncate with ellipsis
+    format!("…{}", &path[path.len() - max_len + 1..])
+}
+
+pub fn print_status_table_extended(apps: &[AppInfo]) {
+    if is_json_mode() {
+        // Include cwd and port in JSON output
+        let json_apps: Vec<AppDetailJson> = apps.iter().map(AppDetailJson::from).collect();
+        match serde_json::to_string_pretty(&json_apps) {
+            Ok(json) => println!("{}", json),
+            Err(e) => eprintln!("Error serializing to JSON: {}", e),
+        }
+        return;
+    }
+
+    if apps.is_empty() {
+        println!("No processes running");
+        return;
+    }
+
+    let rows: Vec<StatusRowExtended> = apps.iter().map(StatusRowExtended::from).collect();
+
+    let table = Table::new(rows)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::single(0)).with(Alignment::right()))
+        .to_string();
+
+    println!("{}", table);
+}
+
 /// JSON representation of detailed app info
 #[derive(Serialize)]
 pub struct AppDetailJson {
