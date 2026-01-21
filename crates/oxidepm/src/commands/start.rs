@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use colored::Colorize;
+use dialoguer::Confirm;
 use oxidepm_core::{AppMode, AppSpec, ConfigFile, RestartPolicy, constants};
 use oxidepm_ipc::{Request, Response};
 use std::collections::HashMap;
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::StartArgs;
-use crate::commands::check::{run_preflight_checks, CheckStatus};
+use crate::commands::check::{run_preflight_checks, check_port_conflict, CheckStatus};
 use crate::output::{print_error, print_success};
 
 pub async fn execute(mut args: StartArgs) -> Result<()> {
@@ -104,6 +105,49 @@ pub async fn execute(mut args: StartArgs) -> Result<()> {
                 println!("{}", "Setup complete!".green());
                 println!();
             }
+        }
+
+        // Check for port conflicts (skip if user explicitly provided PORT)
+        let user_provided_port = args.envs.iter().any(|(k, _)| k == "PORT");
+        if !user_provided_port {
+            if let Some(port_check) = check_port_conflict(project_dir) {
+                if port_check.is_in_use {
+                eprintln!("{} Port {} is already in use", "[WARN]".yellow(), port_check.desired_port);
+
+                if let Some(available) = port_check.available_port {
+                    // Try interactive prompt, fall back to suggesting command if not a terminal
+                    let use_alternative = if atty::is(atty::Stream::Stdin) {
+                        Confirm::new()
+                            .with_prompt(format!("Would you like to run on port {} instead?", available))
+                            .default(true)
+                            .interact()
+                            .unwrap_or(false)
+                    } else {
+                        // Non-interactive: suggest command and exit
+                        eprintln!();
+                        eprintln!("To use port {} instead, run:", available);
+                        eprintln!("  {} {} {} {}",
+                            "oxidepm start".cyan(),
+                            target.cyan(),
+                            "--env".cyan(),
+                            format!("PORT={}", available).cyan()
+                        );
+                        bail!("Port {} is in use. Use --env PORT={} to use an alternative port",
+                              port_check.desired_port, available);
+                    };
+
+                    if use_alternative {
+                        // Add PORT env var to use the alternative port
+                        args.envs.push(("PORT".to_string(), available.to_string()));
+                        println!("{} Using port {}", "[OK]".green(), available);
+                    } else {
+                        bail!("Port {} is in use. Free the port or specify a different one with --env PORT=<port>", port_check.desired_port);
+                    }
+                } else {
+                    bail!("Port {} is in use and no available ports found", port_check.desired_port);
+                }
+            }
+        }
         }
     }
 

@@ -4,6 +4,7 @@ use anyhow::Result;
 use colored::Colorize;
 use serde::Serialize;
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -622,6 +623,159 @@ fn run_npm_install(dir: &Path) -> Result<usize> {
         .unwrap_or(0);
 
     Ok(count)
+}
+
+/// Result of port conflict check
+#[derive(Debug)]
+pub struct PortCheckResult {
+    /// The port the app wants to use
+    pub desired_port: u16,
+    /// Whether the port is currently in use
+    pub is_in_use: bool,
+    /// The next available port (if desired port is in use)
+    pub available_port: Option<u16>,
+}
+
+/// Detect the port a project wants to use
+pub fn detect_project_port(dir: &Path) -> Option<u16> {
+    // 1. Check .env file for PORT
+    let env_file = dir.join(".env");
+    if env_file.exists() {
+        if let Ok(content) = fs::read_to_string(&env_file) {
+            if let Some(port) = parse_port_from_env(&content) {
+                return Some(port);
+            }
+        }
+    }
+
+    // 2. Check .env.local
+    let env_local = dir.join(".env.local");
+    if env_local.exists() {
+        if let Ok(content) = fs::read_to_string(&env_local) {
+            if let Some(port) = parse_port_from_env(&content) {
+                return Some(port);
+            }
+        }
+    }
+
+    // 3. Check package.json for start script with --port or PORT
+    let package_json = dir.join("package.json");
+    if package_json.exists() {
+        if let Ok(content) = fs::read_to_string(&package_json) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                // Check scripts.start for port
+                if let Some(start_script) = json.get("scripts").and_then(|s| s.get("start")).and_then(|s| s.as_str()) {
+                    if let Some(port) = parse_port_from_script(start_script) {
+                        return Some(port);
+                    }
+                }
+                // Check scripts.dev for port
+                if let Some(dev_script) = json.get("scripts").and_then(|s| s.get("dev")).and_then(|s| s.as_str()) {
+                    if let Some(port) = parse_port_from_script(dev_script) {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+        // Default port for Node.js projects
+        return Some(3000);
+    }
+
+    // 4. Check Cargo.toml for Rocket, Actix, Axum (common Rust web frameworks)
+    let cargo_toml = dir.join("Cargo.toml");
+    if cargo_toml.exists() {
+        // Rust web apps commonly use 8080
+        // Check if it's a web project by looking for common web framework deps
+        if let Ok(content) = fs::read_to_string(&cargo_toml) {
+            if content.contains("actix-web") || content.contains("axum") ||
+               content.contains("rocket") || content.contains("warp") {
+                return Some(8080);
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse PORT from env file content
+fn parse_port_from_env(content: &str) -> Option<u16> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("PORT=") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if let Ok(port) = value.parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+/// Parse port from npm script (e.g., "PORT=3001 react-scripts start" or "--port 3001")
+fn parse_port_from_script(script: &str) -> Option<u16> {
+    // Check for PORT=XXXX
+    if let Some(idx) = script.find("PORT=") {
+        let rest = &script[idx + 5..];
+        let port_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(port) = port_str.parse::<u16>() {
+            return Some(port);
+        }
+    }
+    // Check for --port XXXX or -p XXXX
+    let words: Vec<&str> = script.split_whitespace().collect();
+    for (i, word) in words.iter().enumerate() {
+        if (*word == "--port" || *word == "-p") && i + 1 < words.len() {
+            if let Ok(port) = words[i + 1].parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+/// Check if a port is currently in use
+pub fn is_port_in_use(port: u16) -> bool {
+    // Check both IPv4 and IPv6 to catch all cases
+    // Try binding to 0.0.0.0 (all IPv4 interfaces) first
+    if TcpListener::bind(("0.0.0.0", port)).is_err() {
+        return true;
+    }
+    // Also check IPv6 on all interfaces
+    if TcpListener::bind(("::", port)).is_err() {
+        return true;
+    }
+    false
+}
+
+/// Find the next available port starting from the given port
+pub fn find_available_port(start_port: u16) -> Option<u16> {
+    for port in start_port..=65535 {
+        if !is_port_in_use(port) {
+            return Some(port);
+        }
+    }
+    None
+}
+
+/// Check for port conflicts and return information
+pub fn check_port_conflict(dir: &Path) -> Option<PortCheckResult> {
+    let desired_port = detect_project_port(dir)?;
+    let is_in_use = is_port_in_use(desired_port);
+
+    let available_port = if is_in_use {
+        find_available_port(desired_port + 1)
+    } else {
+        None
+    };
+
+    Some(PortCheckResult {
+        desired_port,
+        is_in_use,
+        available_port,
+    })
 }
 
 #[cfg(test)]
