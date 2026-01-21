@@ -29,10 +29,23 @@ A fast, modern process manager for Node.js and Rust applications. Built in Rust 
 
 ## Installation
 
+### Quick Install (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/main/scripts/install.sh | sh
+```
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap oxidekit/homebrew-tap
+brew install oxidepm
+```
+
 ### From Source
 
 ```bash
-git clone https://github.com/your-org/oxidepm
+git clone https://github.com/oxidekit/oxidepm
 cd oxidepm
 cargo build --workspace --release
 
@@ -41,9 +54,16 @@ cargo install --path crates/oxidepm
 cargo install --path crates/oxidepmd
 ```
 
-### Binaries
+### Download Binaries
 
-Pre-built binaries for Linux and macOS coming soon.
+Pre-built binaries available on the [Releases page](https://github.com/oxidekit/oxidepm/releases):
+
+| Platform | Architecture | Download |
+|----------|--------------|----------|
+| Linux | x86_64 | `oxidepm-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux | ARM64 | `oxidepm-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS | Intel | `oxidepm-x86_64-apple-darwin.tar.gz` |
+| macOS | Apple Silicon | `oxidepm-aarch64-apple-darwin.tar.gz` |
 
 ## Quick Start
 
