@@ -1,0 +1,19 @@
+[package]
+name = "oxidepm-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Process runners for OxidePM (Node, Cargo, Rust, npm)"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+which = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

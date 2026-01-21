@@ -1,0 +1,9 @@
+//! OxidePM IPC - Inter-process communication via Unix sockets
+
+pub mod client;
+pub mod protocol;
+pub mod server;
+
+pub use client::IpcClient;
+pub use protocol::{Request, Response};
+pub use server::IpcServer;

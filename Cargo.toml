@@ -1,0 +1,110 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oxidepm",
+    "crates/oxidepmd",
+    "crates/oxidepm-core",
+    "crates/oxidepm-ipc",
+    "crates/oxidepm-runtime",
+    "crates/oxidepm-watch",
+    "crates/oxidepm-logs",
+    "crates/oxidepm-db",
+    "crates/oxidepm-web",
+    "crates/oxidepm-health",
+    "crates/oxidepm-tui",
+    "crates/oxidepm-notify",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["net", "codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+dialoguer = "0.11"
+console = "0.15"
+indicatif = "0.17"
+tabled = "0.15"
+colored = "2.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite"] }
+
+# File watching
+notify = "7.0"
+notify-debouncer-mini = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Metrics
+sysinfo = "0.30"
+
+# Web API
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+reqwest = { version = "0.11", features = ["json"] }
+
+# TUI
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Concurrency
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Utils
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+bytes = "1.5"
+dotenvy = "0.15"
+dirs = "5.0"
+which = "6.0"
+glob = "0.3"
+nix = { version = "0.28", features = ["signal", "process"] }
+regex = "1.10"
+once_cell = "1.19"
+
+# Testing
+tempfile = "3.10"
+assert_cmd = "2.0"
+predicates = "3.1"
+
+# Internal crates
+oxidepm-core = { path = "crates/oxidepm-core" }
+oxidepm-ipc = { path = "crates/oxidepm-ipc" }
+oxidepm-runtime = { path = "crates/oxidepm-runtime" }
+oxidepm-watch = { path = "crates/oxidepm-watch" }
+oxidepm-logs = { path = "crates/oxidepm-logs" }
+oxidepm-db = { path = "crates/oxidepm-db" }
+oxidepm-web = { path = "crates/oxidepm-web" }
+oxidepm-health = { path = "crates/oxidepm-health" }
+oxidepm-tui = { path = "crates/oxidepm-tui" }
+oxidepm-notify = { path = "crates/oxidepm-notify" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

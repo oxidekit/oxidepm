@@ -1,0 +1,38 @@
+[package]
+name = "oxidepm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OxidePM CLI - PM2-like process manager for Rust and Node.js"
+
+[[bin]]
+name = "oxidepm"
+path = "src/main.rs"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+oxidepm-ipc = { workspace = true }
+oxidepm-tui = { workspace = true }
+oxidepm-web = { workspace = true }
+oxidepm-health = { workspace = true }
+oxidepm-notify = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tabled = { workspace = true }
+colored = { workspace = true }
+dirs = { workspace = true }
+dotenvy = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }

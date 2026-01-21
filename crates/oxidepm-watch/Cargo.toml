@@ -1,0 +1,18 @@
+[package]
+name = "oxidepm-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Filesystem watcher for OxidePM watch mode"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+notify = { workspace = true }
+glob = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

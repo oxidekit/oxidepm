@@ -1,0 +1,9 @@
+{
+  "name": "test-server",
+  "version": "1.0.0",
+  "description": "Test server for OxidePM testing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

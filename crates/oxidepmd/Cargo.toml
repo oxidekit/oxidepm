@@ -1,0 +1,36 @@
+[package]
+name = "oxidepmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OxidePM daemon - process supervisor"
+
+[[bin]]
+name = "oxidepmd"
+path = "src/main.rs"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+oxidepm-db = { workspace = true }
+oxidepm-ipc = { workspace = true }
+oxidepm-runtime = { workspace = true }
+oxidepm-watch = { workspace = true }
+oxidepm-logs = { workspace = true }
+oxidepm-health = { workspace = true }
+oxidepm-notify = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+nix = { workspace = true }
+sysinfo = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

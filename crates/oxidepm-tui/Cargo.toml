@@ -1,0 +1,19 @@
+[package]
+name = "oxidepm-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Terminal UI dashboard for OxidePM (monit command)"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+oxidepm-ipc = { workspace = true }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

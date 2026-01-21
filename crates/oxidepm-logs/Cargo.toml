@@ -1,0 +1,19 @@
+[package]
+name = "oxidepm-logs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Log management for OxidePM (rotation, streaming)"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

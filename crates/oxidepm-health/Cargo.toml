@@ -1,0 +1,18 @@
+[package]
+name = "oxidepm-health"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Health check system for OxidePM (HTTP + script checks)"
+
+[dependencies]
+oxidepm-core = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
