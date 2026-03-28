@@ -54,6 +54,9 @@ pub enum Request {
 
     /// Describe a process (get what command would run)
     Describe { selector: Selector },
+
+    /// Get Cosmos node status (sync state, lifecycle, block height)
+    CosmosStatus { selector: Selector },
 }
 
 /// IPC Response from daemon to CLI
@@ -113,6 +116,26 @@ pub enum Response {
         cwd: String,
         env: std::collections::HashMap<String, String>,
         mode: String,
+    },
+
+    /// Cosmos node status response
+    CosmosStatus {
+        name: String,
+        /// Lifecycle state (relaying_syncing, validator_active, etc.)
+        lifecycle_state: Option<String>,
+        /// Whether the node is catching up
+        catching_up: Option<bool>,
+        /// Latest block height
+        block_height: Option<u64>,
+        /// Seconds since last block
+        seconds_since_block: Option<u64>,
+        /// Chain ID
+        chain_id: Option<String>,
+        /// Node mode (validator, seed, relay)
+        node_mode: Option<String>,
+        /// Upgrade halt info (if status is upgrade_halted)
+        upgrade_name: Option<String>,
+        upgrade_halt_height: Option<u64>,
     },
 }
 

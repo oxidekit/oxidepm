@@ -119,6 +119,7 @@ impl Daemon {
             Request::Reload { selector } => h.reload(selector).await,
             Request::Flush { selector } => h.flush(selector).await,
             Request::Describe { selector } => h.describe(selector).await,
+            Request::CosmosStatus { selector } => h.cosmos_status(selector).await,
             Request::Kill => {
                 // Save before killing
                 let _ = h.save().await;

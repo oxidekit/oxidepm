@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
         Commands::Flush { selector } => flush::execute(&selector).await,
         Commands::Describe { target } => describe::execute(&target).await,
         Commands::Check(args) => check::execute(args).await,
+        Commands::CosmosStatus { selector } => cosmos_status::run(&selector).await,
     };
 
     if let Err(e) = result {
