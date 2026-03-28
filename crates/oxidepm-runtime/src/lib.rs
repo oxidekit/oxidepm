@@ -2,6 +2,7 @@
 
 pub mod cargo;
 pub mod cmd;
+pub mod cosmos;
 pub mod node;
 pub mod npm;
 pub mod rust;
@@ -9,6 +10,7 @@ pub mod traits;
 
 pub use cargo::CargoRunner;
 pub use cmd::CmdRunner;
+pub use cosmos::CosmosRunner;
 pub use node::NodeRunner;
 pub use npm::NpmRunner;
 pub use rust::RustRunner;
@@ -26,5 +28,6 @@ pub fn get_runner(mode: AppMode) -> Box<dyn Runner> {
         AppMode::Yarn => Box::new(NpmRunner::new("yarn")),
         AppMode::Cargo => Box::new(CargoRunner),
         AppMode::Rust => Box::new(RustRunner),
+        AppMode::Cosmos => Box::new(CosmosRunner),
     }
 }
