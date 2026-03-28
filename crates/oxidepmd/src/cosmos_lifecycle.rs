@@ -64,7 +64,7 @@ impl CosmosLifecycle {
         } else if config.node_mode == CosmosNodeMode::Validator {
             CosmosLifecycleState::ValidatorActive
         } else {
-            // Seeds and relays don't use the lifecycle state machine
+            // Seeds, relays, sentries, and archives don't use the lifecycle state machine
             CosmosLifecycleState::RelayingSyncing
         };
 

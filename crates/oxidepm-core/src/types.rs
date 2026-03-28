@@ -354,8 +354,12 @@ pub enum CosmosNodeMode {
     Validator,
     /// Seed node (peer discovery only)
     Seed,
-    /// Relay/sentry node (no signing)
+    /// Relay node (no signing)
     Relay,
+    /// Sentry node (shields validator from public network)
+    Sentry,
+    /// Archive node (full history, pruning = "nothing")
+    Archive,
 }
 
 impl CosmosNodeMode {
@@ -364,6 +368,8 @@ impl CosmosNodeMode {
             CosmosNodeMode::Validator => "validator",
             CosmosNodeMode::Seed => "seed",
             CosmosNodeMode::Relay => "relay",
+            CosmosNodeMode::Sentry => "sentry",
+            CosmosNodeMode::Archive => "archive",
         }
     }
 }
@@ -376,6 +382,8 @@ impl FromStr for CosmosNodeMode {
             "validator" => Ok(CosmosNodeMode::Validator),
             "seed" => Ok(CosmosNodeMode::Seed),
             "relay" => Ok(CosmosNodeMode::Relay),
+            "sentry" => Ok(CosmosNodeMode::Sentry),
+            "archive" => Ok(CosmosNodeMode::Archive),
             _ => Err(Error::ConfigError(format!("Invalid cosmos node mode: {}", s))),
         }
     }
