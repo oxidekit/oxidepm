@@ -404,6 +404,8 @@ pub struct CosmosConfig {
     pub nofile_limit: Option<u64>,
     /// Graceful shutdown timeout in seconds
     pub shutdown_timeout: u32,
+    /// Detect x/upgrade halt messages in stdout/stderr (default: true)
+    pub detect_upgrade_halt: bool,
 }
 
 impl Default for CosmosConfig {
@@ -416,6 +418,7 @@ impl Default for CosmosConfig {
             validator_key_path: None,
             nofile_limit: None,
             shutdown_timeout: 30,
+            detect_upgrade_halt: true,
         }
     }
 }
@@ -567,6 +570,8 @@ pub enum AppStatus {
     Stopped,
     Errored,
     Building,
+    /// Cosmos node halted for a planned upgrade (not a crash)
+    UpgradeHalted,
 }
 
 impl AppStatus {
@@ -578,6 +583,7 @@ impl AppStatus {
             AppStatus::Stopped => "stopped",
             AppStatus::Errored => "errored",
             AppStatus::Building => "building",
+            AppStatus::UpgradeHalted => "upgrade_halted",
         }
     }
 
@@ -603,6 +609,7 @@ impl FromStr for AppStatus {
             "stopped" => Ok(AppStatus::Stopped),
             "errored" => Ok(AppStatus::Errored),
             "building" => Ok(AppStatus::Building),
+            "upgrade_halted" => Ok(AppStatus::UpgradeHalted),
             _ => Err(Error::ConfigError(format!("Invalid status: {}", s))),
         }
     }
@@ -641,6 +648,11 @@ pub struct RunState {
     // Instance info for clusters
     #[serde(default)]
     pub instance_id: Option<u32>,
+    // Cosmos upgrade halt info (populated when status = UpgradeHalted)
+    #[serde(default)]
+    pub upgrade_name: Option<String>,
+    #[serde(default)]
+    pub upgrade_halt_height: Option<u64>,
 }
 
 impl RunState {
@@ -660,6 +672,8 @@ impl RunState {
             health_check_failures: 0,
             port: None,
             instance_id: None,
+            upgrade_name: None,
+            upgrade_halt_height: None,
         }
     }
 
@@ -679,6 +693,8 @@ impl RunState {
             health_check_failures: 0,
             port: None,
             instance_id: None,
+            upgrade_name: None,
+            upgrade_halt_height: None,
         }
     }
 

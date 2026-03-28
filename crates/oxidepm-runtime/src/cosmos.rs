@@ -174,6 +174,7 @@ mod tests {
             validator_key_path: None,
             nofile_limit: Some(65535),
             shutdown_timeout: 30,
+            detect_upgrade_halt: true,
         });
         spec
     }

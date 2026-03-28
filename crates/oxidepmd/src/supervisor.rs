@@ -1,6 +1,6 @@
 //! Process supervisor - manages running processes
 
-use oxidepm_core::{constants, AppInfo, AppSpec, AppStatus, Error, HookEvent, Hooks, Result, RunState, Selector};
+use oxidepm_core::{constants, AppInfo, AppMode, AppSpec, AppStatus, Error, HookEvent, Hooks, Result, RunState, Selector};
 use oxidepm_db::Database;
 use oxidepm_health::HealthMonitor;
 use oxidepm_logs::{LogCapture, LogReader, RotationConfig};
@@ -162,6 +162,8 @@ impl Supervisor {
                 health_check_failures: 0,
                 port: None,
                 instance_id: None,
+                upgrade_name: None,
+                upgrade_halt_height: None,
             },
             child: None,
             restart_count: 0,
@@ -273,6 +275,8 @@ impl Supervisor {
                 health_check_failures: 0,
                 port: spec.port,
                 instance_id: spec.instance_id,
+                upgrade_name: None,
+                upgrade_halt_height: None,
             },
             child: Some(child),
             restart_count: 0,
@@ -1040,7 +1044,119 @@ impl Supervisor {
                                                 });
                                             }
 
-                                            // TODO: Handle restart logic here
+                                            // ── Upgrade halt detection (Cosmos) ──
+                                            if proc.spec.mode == oxidepm_core::AppMode::Cosmos
+                                                && exit_code == Some(0)
+                                                && proc
+                                                    .spec
+                                                    .cosmos_config
+                                                    .as_ref()
+                                                    .map(|c| c.detect_upgrade_halt)
+                                                    .unwrap_or(true)
+                                            {
+                                                // Check recent log output for upgrade halt pattern
+                                                if let Some((upgrade_name, halt_height)) =
+                                                    detect_upgrade_halt_from_logs(app_id)
+                                                {
+                                                    info!(
+                                                        "Cosmos upgrade halt detected: '{}' at height {}",
+                                                        upgrade_name, halt_height
+                                                    );
+                                                    proc.state.status = AppStatus::UpgradeHalted;
+                                                    proc.state.upgrade_name = Some(upgrade_name.clone());
+                                                    proc.state.upgrade_halt_height = Some(halt_height);
+
+                                                    // Send upgrade halt notification
+                                                    let name = proc.spec.name.clone();
+                                                    let notifier_clone = Arc::clone(&notifier);
+                                                    tokio::spawn(async move {
+                                                        let event = ProcessEvent::UpgradeHalted {
+                                                            name,
+                                                            id: app_id,
+                                                            upgrade_name,
+                                                            halt_height,
+                                                        };
+                                                        if let Err(e) = notifier_clone.notify(&event).await {
+                                                            warn!("Failed to send upgrade halt notification: {}", e);
+                                                        }
+                                                    });
+                                                    // Do NOT restart — this is an intentional stop
+                                                    continue;
+                                                }
+                                            }
+
+                                            // ── Restart-on-crash logic ──
+                                            let should_restart = {
+                                                let restart_mode = proc.spec.restart_mode;
+                                                let policy = &proc.spec.restart_policy;
+
+                                                if !policy.auto_restart {
+                                                    false
+                                                } else if !restart_mode.should_restart(exit_code) {
+                                                    false
+                                                } else if proc.state.restarts >= policy.max_restarts {
+                                                    warn!(
+                                                        "Process {} exceeded max restarts ({}), marking as errored",
+                                                        proc.spec.name, policy.max_restarts
+                                                    );
+                                                    false
+                                                } else {
+                                                    true
+                                                }
+                                            };
+
+                                            if should_restart {
+                                                let delay = proc.spec.restart_policy.restart_delay_ms;
+                                                proc.state.restarts += 1;
+                                                let restart_count = proc.state.restarts;
+                                                let spec = proc.spec.clone();
+                                                let processes_restart = Arc::clone(&processes);
+                                                let notifier_restart = Arc::clone(&notifier);
+
+                                                // Drop lock before spawning restart
+                                                drop(procs);
+
+                                                tokio::spawn(async move {
+                                                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                                                    info!("Restarting process {} (attempt {})", spec.name, restart_count);
+
+                                                    // Re-acquire and attempt restart
+                                                    let runner = oxidepm_runtime::get_runner(spec.mode);
+                                                    match runner.start(&spec).await {
+                                                        Ok(running) => {
+                                                            {
+                                                                let mut procs = processes_restart.write();
+                                                                if let Some(proc) = procs.get_mut(&app_id) {
+                                                                    proc.state.pid = Some(running.pid);
+                                                                    proc.state.status = AppStatus::Running;
+                                                                    proc.state.started_at = Some(chrono::Utc::now());
+                                                                    proc.child = Some(running.child);
+                                                                    proc.started_at = Some(Instant::now());
+                                                                }
+                                                            } // drop procs before await
+
+                                                            let event = ProcessEvent::Restarted {
+                                                                name: spec.name.clone(),
+                                                                id: app_id,
+                                                                restart_count,
+                                                            };
+                                                            if let Err(e) = notifier_restart.notify(&event).await {
+                                                                warn!("Failed to send restart notification: {}", e);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            error!("Failed to restart process {}: {}", spec.name, e);
+                                                            let mut procs = processes_restart.write();
+                                                            if let Some(proc) = procs.get_mut(&app_id) {
+                                                                proc.state.status = AppStatus::Errored;
+                                                            }
+                                                        }
+                                                    }
+                                                });
+
+                                                // We dropped `procs` above, so skip the rest of this iteration
+                                                continue;
+                                            }
                                         }
                                     }
                                     Ok(None) => {
@@ -1456,6 +1572,51 @@ fn log_hook_output(
     }
 
     Ok(())
+}
+
+/// Detect a Cosmos SDK x/upgrade halt from recent log output.
+///
+/// Scans the last N lines of the process's log file for the pattern:
+///   `UPGRADE "<name>" NEEDED at height: <height>`
+///
+/// Returns `Some((upgrade_name, halt_height))` if found, `None` otherwise.
+fn detect_upgrade_halt_from_logs(app_id: u32) -> Option<(String, u64)> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static UPGRADE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"UPGRADE "([^"]+)" NEEDED at height:\s*(\d+)"#)
+            .expect("Invalid upgrade halt regex")
+    });
+
+    // Read the last 50 lines from the process's stderr log (upgrade messages go to stderr)
+    let log_path = constants::log_path(
+        &format!("{}", app_id),
+        "err",
+    );
+
+    // Also check by name-based log paths (OxidePM uses name-based log files)
+    let log_content = std::fs::read_to_string(&log_path)
+        .or_else(|_| {
+            // Try stdout log as fallback
+            let out_path = constants::log_path(&format!("{}", app_id), "out");
+            std::fs::read_to_string(&out_path)
+        })
+        .unwrap_or_default();
+
+    // Check last 50 lines
+    let lines: Vec<&str> = log_content.lines().collect();
+    let start = lines.len().saturating_sub(50);
+
+    for line in &lines[start..] {
+        if let Some(caps) = UPGRADE_PATTERN.captures(line) {
+            let name = caps.get(1)?.as_str().to_string();
+            let height: u64 = caps.get(2)?.as_str().parse().ok()?;
+            return Some((name, height));
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

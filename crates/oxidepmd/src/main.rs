@@ -5,6 +5,7 @@ use oxidepm_core::constants;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+pub mod cosmos_lifecycle;
 mod daemon;
 mod handlers;
 mod supervisor;

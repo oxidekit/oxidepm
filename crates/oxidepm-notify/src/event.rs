@@ -40,6 +40,51 @@ pub enum ProcessEvent {
         id: u32,
         endpoint: String,
     },
+
+    /// Cosmos validator activated (relay-until-synced complete)
+    ValidatorActivated {
+        name: String,
+        id: u32,
+        height: u64,
+    },
+
+    /// Cosmos node catching up (falling behind)
+    CatchingUp {
+        name: String,
+        id: u32,
+        behind_blocks: u64,
+    },
+
+    /// Cosmos validator missed blocks (approaching jail threshold)
+    MissedBlocks {
+        name: String,
+        id: u32,
+        missed: u64,
+        window: u64,
+        jail_threshold: u64,
+    },
+
+    /// Cosmos validator jailed
+    Jailed {
+        name: String,
+        id: u32,
+        height: u64,
+    },
+
+    /// Cosmos node stale (no new blocks)
+    StaleNode {
+        name: String,
+        id: u32,
+        seconds: u64,
+    },
+
+    /// Cosmos upgrade halt detected (intentional stop, not a crash)
+    UpgradeHalted {
+        name: String,
+        id: u32,
+        upgrade_name: String,
+        halt_height: u64,
+    },
 }
 
 impl ProcessEvent {
@@ -52,6 +97,12 @@ impl ProcessEvent {
             ProcessEvent::Restarted { .. } => "restart",
             ProcessEvent::MemoryLimit { .. } => "memory_limit",
             ProcessEvent::HealthCheckFailed { .. } => "health_check",
+            ProcessEvent::ValidatorActivated { .. } => "validator_activated",
+            ProcessEvent::CatchingUp { .. } => "catching_up",
+            ProcessEvent::MissedBlocks { .. } => "missed_blocks",
+            ProcessEvent::Jailed { .. } => "jailed",
+            ProcessEvent::StaleNode { .. } => "stale_node",
+            ProcessEvent::UpgradeHalted { .. } => "upgrade_halted",
         }
     }
 
@@ -103,6 +154,43 @@ impl ProcessEvent {
                     name, id, endpoint
                 )
             }
+            // SECURITY: format_message() NEVER includes key paths, IPs, or config details
+            ProcessEvent::ValidatorActivated { name, id: _, height } => {
+                format!(
+                    "\u{2705} Validator activated: `{}` at height {}",
+                    name, height
+                )
+            }
+            ProcessEvent::CatchingUp { name, id: _, behind_blocks } => {
+                format!(
+                    "\u{26A0}\u{FE0F} Node catching up: `{}` — {} blocks behind",
+                    name, behind_blocks
+                )
+            }
+            ProcessEvent::MissedBlocks { name, id: _, missed, window, jail_threshold } => {
+                format!(
+                    "\u{26A0}\u{FE0F} Missed blocks: `{}` — {}/{} (jail at {})",
+                    name, missed, window, jail_threshold
+                )
+            }
+            ProcessEvent::Jailed { name, id: _, height } => {
+                format!(
+                    "\u{1F6A8} JAILED: `{}` at height {}",
+                    name, height
+                )
+            }
+            ProcessEvent::StaleNode { name, id: _, seconds } => {
+                format!(
+                    "\u{1F6A8} Node stale: `{}` — no new blocks for {}s",
+                    name, seconds
+                )
+            }
+            ProcessEvent::UpgradeHalted { name, id: _, upgrade_name, halt_height } => {
+                format!(
+                    "\u{1F6E0}\u{FE0F} Upgrade halt: `{}` halted for upgrade '{}' at height {}. Run: monarch upgrade --version {}",
+                    name, upgrade_name, halt_height, upgrade_name
+                )
+            }
         }
     }
 
@@ -114,7 +202,13 @@ impl ProcessEvent {
             | ProcessEvent::Crashed { name, .. }
             | ProcessEvent::Restarted { name, .. }
             | ProcessEvent::MemoryLimit { name, .. }
-            | ProcessEvent::HealthCheckFailed { name, .. } => name,
+            | ProcessEvent::HealthCheckFailed { name, .. }
+            | ProcessEvent::ValidatorActivated { name, .. }
+            | ProcessEvent::CatchingUp { name, .. }
+            | ProcessEvent::MissedBlocks { name, .. }
+            | ProcessEvent::Jailed { name, .. }
+            | ProcessEvent::StaleNode { name, .. }
+            | ProcessEvent::UpgradeHalted { name, .. } => name,
         }
     }
 
@@ -126,7 +220,13 @@ impl ProcessEvent {
             | ProcessEvent::Crashed { id, .. }
             | ProcessEvent::Restarted { id, .. }
             | ProcessEvent::MemoryLimit { id, .. }
-            | ProcessEvent::HealthCheckFailed { id, .. } => *id,
+            | ProcessEvent::HealthCheckFailed { id, .. }
+            | ProcessEvent::ValidatorActivated { id, .. }
+            | ProcessEvent::CatchingUp { id, .. }
+            | ProcessEvent::MissedBlocks { id, .. }
+            | ProcessEvent::Jailed { id, .. }
+            | ProcessEvent::StaleNode { id, .. }
+            | ProcessEvent::UpgradeHalted { id, .. } => *id,
         }
     }
 }
