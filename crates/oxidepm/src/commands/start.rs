@@ -475,5 +475,9 @@ fn build_app_spec(args: &StartArgs) -> Result<AppSpec> {
         tags: args.tag.clone(),
         // Maximum uptime before auto-restart
         max_uptime_secs: args.max_uptime,
+        // Cosmos config (populated from config file, not CLI)
+        cosmos_config: None,
+        // Restart mode
+        restart_mode: oxidepm_core::RestartMode::default(),
     })
 }

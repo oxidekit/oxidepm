@@ -1,6 +1,7 @@
 //! Command implementations
 
 pub mod check;
+pub mod cosmos_status;
 pub mod delete;
 pub mod describe;
 pub mod flush;

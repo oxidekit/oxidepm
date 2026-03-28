@@ -258,6 +258,7 @@ fn render_processes(f: &mut Frame, app: &App, area: Rect) {
             AppStatus::Errored => Color::Red,
             AppStatus::Starting | AppStatus::Building => Color::Yellow,
             AppStatus::Stopping => Color::Yellow,
+            AppStatus::UpgradeHalted => Color::Magenta,
         };
 
         let cells = vec![
@@ -371,14 +372,49 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
         .label(format_bytes(info.state.memory_bytes));
     f.render_widget(mem_gauge, chunks[2]);
 
-    // Environment
-    let env_text: Vec<Line> = info.spec.env.iter()
-        .take(10)
-        .map(|(k, v)| Line::from(format!("{}={}", k, v)))
-        .collect();
-    let env_paragraph = Paragraph::new(env_text)
-        .block(Block::default().borders(Borders::ALL).title("Environment"));
-    f.render_widget(env_paragraph, chunks[3]);
+    // Environment / Cosmos info
+    let detail_lines: Vec<Line> = if info.spec.mode == oxidepm_core::AppMode::Cosmos {
+        let mut lines = Vec::new();
+        if let Some(ref cosmos) = info.spec.cosmos_config {
+            lines.push(Line::from(format!("Chain: {}", cosmos.chain_id)));
+            lines.push(Line::from(format!("Mode: {}", cosmos.node_mode)));
+            lines.push(Line::from(format!("RPC: {}", cosmos.rpc_endpoint)));
+            lines.push(Line::from(format!(
+                "Relay Until Synced: {}",
+                cosmos.relay_until_synced
+            )));
+        }
+        if info.state.status == AppStatus::UpgradeHalted {
+            if let Some(ref upgrade) = info.state.upgrade_name {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "UPGRADE HALTED: '{}' at height {}",
+                        upgrade,
+                        info.state.upgrade_halt_height.unwrap_or(0)
+                    ),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(format!(
+                    "Run: monarch upgrade --version {}",
+                    upgrade
+                )));
+            }
+        }
+        lines
+    } else {
+        info.spec.env.iter()
+            .take(10)
+            .map(|(k, v)| Line::from(format!("{}={}", k, v)))
+            .collect()
+    };
+    let detail_title = if info.spec.mode == oxidepm_core::AppMode::Cosmos {
+        "Cosmos"
+    } else {
+        "Environment"
+    };
+    let detail_paragraph = Paragraph::new(detail_lines)
+        .block(Block::default().borders(Borders::ALL).title(detail_title));
+    f.render_widget(detail_paragraph, chunks[3]);
 }
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {

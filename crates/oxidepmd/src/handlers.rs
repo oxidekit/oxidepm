@@ -242,4 +242,36 @@ impl RequestHandler {
             Err(e) => Response::error(e.to_string()),
         }
     }
+
+    /// Handle cosmos-status request
+    pub async fn cosmos_status(&self, selector: Selector) -> Response {
+        info!("Handling cosmos-status request for: {}", selector);
+
+        match self.supervisor.show(&selector).await {
+            Ok(Some(app_info)) => {
+                let spec = &app_info.spec;
+                let state = &app_info.state;
+
+                if spec.mode != oxidepm_core::AppMode::Cosmos {
+                    return Response::error(format!("'{}' is not a cosmos process", spec.name));
+                }
+
+                let cosmos = spec.cosmos_config.as_ref();
+
+                Response::CosmosStatus {
+                    name: spec.name.clone(),
+                    lifecycle_state: None, // Would be populated from cosmos lifecycle state
+                    catching_up: None,     // Would be populated from health checker
+                    block_height: None,    // Would be populated from health checker
+                    seconds_since_block: None,
+                    chain_id: cosmos.map(|c| c.chain_id.clone()),
+                    node_mode: cosmos.map(|c| c.node_mode.to_string()),
+                    upgrade_name: state.upgrade_name.clone(),
+                    upgrade_halt_height: state.upgrade_halt_height,
+                }
+            }
+            Ok(None) => Response::error("App not found"),
+            Err(e) => Response::error(e.to_string()),
+        }
+    }
 }

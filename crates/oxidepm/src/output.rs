@@ -87,6 +87,7 @@ impl From<&AppInfo> for StatusRow {
             AppStatus::Starting => "starting".yellow().to_string(),
             AppStatus::Stopping => "stopping".yellow().to_string(),
             AppStatus::Building => "building".cyan().to_string(),
+            AppStatus::UpgradeHalted => "upgrade_halted".magenta().bold().to_string(),
         };
 
         StatusRow {
@@ -165,6 +166,7 @@ impl From<&AppInfo> for StatusRowExtended {
             AppStatus::Starting => "starting".yellow().to_string(),
             AppStatus::Stopping => "stopping".yellow().to_string(),
             AppStatus::Building => "building".cyan().to_string(),
+            AppStatus::UpgradeHalted => "upgrade_halted".magenta().bold().to_string(),
         };
 
         // Get port from state first (actual running port), fall back to spec
@@ -357,6 +359,7 @@ fn format_status(status: AppStatus) -> String {
         AppStatus::Starting => "starting".yellow().to_string(),
         AppStatus::Stopping => "stopping".yellow().to_string(),
         AppStatus::Building => "building".cyan().to_string(),
+        AppStatus::UpgradeHalted => "upgrade_halted".magenta().bold().to_string(),
     }
 }
 

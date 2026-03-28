@@ -118,6 +118,12 @@ pub enum Commands {
 
     /// Check if a project is ready to run (dependencies, configs, env)
     Check(CheckArgs),
+
+    /// Show Cosmos node status (sync state, block height, lifecycle)
+    CosmosStatus {
+        /// Process name or id
+        selector: String,
+    },
 }
 
 #[derive(Args)]

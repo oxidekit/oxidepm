@@ -74,6 +74,26 @@ pub const DEFAULT_DEBOUNCE_MS: u64 = 200;
 /// Default metrics polling interval in seconds
 pub const DEFAULT_METRICS_INTERVAL_SECS: u64 = 2;
 
+// ── Cosmos node constants ──
+
+/// Default Cosmos RPC poll interval in seconds (check /status)
+pub const COSMOS_STATUS_POLL_SECS: u64 = 5;
+
+/// Default signing info poll interval in seconds (check missed blocks)
+pub const COSMOS_SIGNING_POLL_SECS: u64 = 30;
+
+/// Cosmos node stale threshold in seconds (no new blocks)
+pub const COSMOS_STALE_THRESHOLD_SECS: u64 = 120;
+
+/// Default nofile limit for Cosmos nodes
+pub const COSMOS_DEFAULT_NOFILE: u64 = 65535;
+
+/// Default shutdown timeout for Cosmos nodes in seconds
+pub const COSMOS_DEFAULT_SHUTDOWN_TIMEOUT: u32 = 30;
+
+/// Number of blocks behind before warning about catching up
+pub const COSMOS_CATCHING_UP_WARN_BLOCKS: u64 = 100;
+
 /// Get the OxidePM home directory
 pub fn oxidepm_home() -> PathBuf {
     dirs::home_dir()

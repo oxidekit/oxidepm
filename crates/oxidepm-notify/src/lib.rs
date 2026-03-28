@@ -13,7 +13,7 @@ mod telegram;
 
 pub use config::{notify_config_path, NotifyConfig, TelegramConfig};
 pub use error::{NotifyError, Result};
-pub use event::ProcessEvent;
+pub use event::{ProcessEvent, Severity};
 pub use telegram::TelegramNotifier;
 
 use async_trait::async_trait;
@@ -40,10 +40,10 @@ pub struct NotificationManager {
 impl NotificationManager {
     /// Create a new notification manager from config
     pub fn new(config: NotifyConfig) -> Self {
-        let telegram = config
-            .telegram
-            .as_ref()
-            .map(|tc| TelegramNotifier::new(tc.bot_token.clone(), tc.chat_id.clone()));
+        let telegram = config.telegram.as_ref().and_then(|tc| {
+            let token = tc.resolve_token()?;
+            Some(TelegramNotifier::new(token, tc.chat_id.clone()))
+        });
 
         Self { telegram, config }
     }
@@ -87,8 +87,17 @@ impl NotificationManager {
 
     /// Check if this event type should trigger a notification
     fn should_notify(&self, event: &ProcessEvent) -> bool {
+        // Check severity filter
+        if let Some(ref min_sev_str) = self.config.min_severity {
+            if let Ok(min_sev) = min_sev_str.parse::<Severity>() {
+                if event.severity() < min_sev {
+                    return false;
+                }
+            }
+        }
+
         if self.config.events.is_empty() {
-            // If no events specified, notify all
+            // If no events specified, notify all (that pass severity)
             return true;
         }
 
@@ -113,9 +122,11 @@ mod tests {
         let config = NotifyConfig {
             telegram: Some(TelegramConfig {
                 bot_token: "test".to_string(),
+                bot_token_env: None,
                 chat_id: "123".to_string(),
             }),
             events: vec![],
+            min_severity: None,
         };
         let manager = NotificationManager::new(config);
 
@@ -131,9 +142,11 @@ mod tests {
         let config = NotifyConfig {
             telegram: Some(TelegramConfig {
                 bot_token: "test".to_string(),
+                bot_token_env: None,
                 chat_id: "123".to_string(),
             }),
             events: vec!["crash".to_string(), "memory_limit".to_string()],
+            min_severity: None,
         };
         let manager = NotificationManager::new(config);
 

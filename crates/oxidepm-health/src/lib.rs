@@ -2,6 +2,10 @@
 //!
 //! Provides HTTP endpoint and script-based health checks for processes.
 
+pub mod cosmos;
+
+pub use cosmos::{CosmosHealthChecker, CosmosHealthResult, CosmosNodeStatus, ValidatorSigningInfo};
+
 use chrono::{DateTime, Utc};
 use oxidepm_core::HealthCheck;
 use std::process::Stdio;

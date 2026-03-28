@@ -29,9 +29,12 @@ pub struct NotifyConfig {
     pub telegram: Option<TelegramConfig>,
 
     /// Events to notify on (empty = all events)
-    /// Valid values: "start", "stop", "crash", "restart", "memory_limit", "health_check"
     #[serde(default)]
     pub events: Vec<String>,
+
+    /// Minimum severity level to trigger notifications (info, warning, critical)
+    /// Events below this severity are silently dropped.
+    pub min_severity: Option<String>,
 }
 
 impl NotifyConfig {
@@ -89,7 +92,11 @@ impl NotifyConfig {
 
     /// Configure Telegram notifications
     pub fn set_telegram(&mut self, bot_token: String, chat_id: String) {
-        self.telegram = Some(TelegramConfig { bot_token, chat_id });
+        self.telegram = Some(TelegramConfig {
+            bot_token,
+            bot_token_env: None,
+            chat_id,
+        });
     }
 
     /// Remove Telegram configuration
@@ -111,6 +118,12 @@ impl NotifyConfig {
             "restart",
             "memory_limit",
             "health_check",
+            "validator_activated",
+            "catching_up",
+            "missed_blocks",
+            "jailed",
+            "stale_node",
+            "upgrade_halted",
         ];
 
         for event in &self.events {
@@ -128,11 +141,37 @@ impl NotifyConfig {
 /// Telegram notification configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
-    /// Bot token from @BotFather
+    /// Bot token from @BotFather (prefer bot_token_env for security)
+    #[serde(default)]
     pub bot_token: String,
+
+    /// Environment variable name containing the bot token (preferred over bot_token)
+    pub bot_token_env: Option<String>,
 
     /// Chat ID to send messages to (can be user, group, or channel)
     pub chat_id: String,
+}
+
+impl TelegramConfig {
+    /// Resolve the bot token — prefer env var, fall back to direct value
+    pub fn resolve_token(&self) -> Option<String> {
+        if let Some(ref env_var) = self.bot_token_env {
+            if let Ok(token) = std::env::var(env_var) {
+                if !token.is_empty() {
+                    return Some(token);
+                }
+            }
+            tracing::warn!(
+                "bot_token_env '{}' is not set or empty, falling back to bot_token",
+                env_var
+            );
+        }
+        if !self.bot_token.is_empty() {
+            Some(self.bot_token.clone())
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +240,7 @@ chat_id = "-100123456789"
         let config = NotifyConfig {
             telegram: None,
             events: vec!["crash".to_string(), "restart".to_string()],
+            min_severity: None,
         };
         assert!(config.validate_events().is_ok());
     }
@@ -210,6 +250,7 @@ chat_id = "-100123456789"
         let config = NotifyConfig {
             telegram: None,
             events: vec!["invalid_event".to_string()],
+            min_severity: None,
         };
         assert!(config.validate_events().is_err());
     }
