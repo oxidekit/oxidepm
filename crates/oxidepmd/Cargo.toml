@@ -33,6 +33,7 @@ nix = { workspace = true }
 sysinfo = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
