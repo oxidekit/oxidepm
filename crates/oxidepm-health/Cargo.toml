@@ -10,6 +10,7 @@ description = "Health check system for OxidePM (HTTP + script checks)"
 oxidepm-core = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
