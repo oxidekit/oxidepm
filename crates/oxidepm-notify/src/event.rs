@@ -2,6 +2,43 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Notification severity level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl Severity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Warning => "warning",
+            Severity::Critical => "critical",
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for Severity {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "info" => Ok(Severity::Info),
+            "warning" | "warn" => Ok(Severity::Warning),
+            "critical" | "crit" => Ok(Severity::Critical),
+            _ => Err(format!("Invalid severity: {}", s)),
+        }
+    }
+}
+
 /// Events that can trigger notifications
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -209,6 +246,24 @@ impl ProcessEvent {
             | ProcessEvent::Jailed { name, .. }
             | ProcessEvent::StaleNode { name, .. }
             | ProcessEvent::UpgradeHalted { name, .. } => name,
+        }
+    }
+
+    /// Get the severity level of this event
+    pub fn severity(&self) -> Severity {
+        match self {
+            ProcessEvent::Started { .. } => Severity::Info,
+            ProcessEvent::Stopped { .. } => Severity::Info,
+            ProcessEvent::Crashed { .. } => Severity::Critical,
+            ProcessEvent::Restarted { .. } => Severity::Warning,
+            ProcessEvent::MemoryLimit { .. } => Severity::Warning,
+            ProcessEvent::HealthCheckFailed { .. } => Severity::Critical,
+            ProcessEvent::ValidatorActivated { .. } => Severity::Info,
+            ProcessEvent::CatchingUp { .. } => Severity::Warning,
+            ProcessEvent::MissedBlocks { .. } => Severity::Warning,
+            ProcessEvent::Jailed { .. } => Severity::Critical,
+            ProcessEvent::StaleNode { .. } => Severity::Critical,
+            ProcessEvent::UpgradeHalted { .. } => Severity::Warning,
         }
     }
 
