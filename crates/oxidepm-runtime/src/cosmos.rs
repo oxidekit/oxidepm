@@ -175,6 +175,9 @@ mod tests {
             nofile_limit: Some(65535),
             shutdown_timeout: 30,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         });
         spec
     }

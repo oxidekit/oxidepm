@@ -1069,17 +1069,76 @@ impl Supervisor {
                                                     // Send upgrade halt notification
                                                     let name = proc.spec.name.clone();
                                                     let notifier_clone = Arc::clone(&notifier);
+                                                    let upgrade_name_notify = upgrade_name.clone();
                                                     tokio::spawn(async move {
                                                         let event = ProcessEvent::UpgradeHalted {
                                                             name,
                                                             id: app_id,
-                                                            upgrade_name,
+                                                            upgrade_name: upgrade_name_notify,
                                                             halt_height,
                                                         };
                                                         if let Err(e) = notifier_clone.notify(&event).await {
                                                             warn!("Failed to send upgrade halt notification: {}", e);
                                                         }
                                                     });
+
+                                                    // Attempt auto-upgrade if configured
+                                                    if let Some(ref cosmos_cfg) = proc.spec.cosmos_config {
+                                                        if cosmos_cfg.auto_upgrade {
+                                                            let binary_path = std::path::PathBuf::from(&proc.spec.command);
+                                                            let cosmos_cfg = cosmos_cfg.clone();
+                                                            let upgrade = upgrade_name.clone();
+                                                            let spec = proc.spec.clone();
+                                                            let processes_upgrade = Arc::clone(&processes);
+                                                            let notifier_upgrade = Arc::clone(&notifier);
+
+                                                            drop(procs);
+
+                                                            tokio::spawn(async move {
+                                                                let result = crate::auto_upgrade::try_auto_upgrade(
+                                                                    &cosmos_cfg,
+                                                                    &binary_path,
+                                                                    &upgrade,
+                                                                ).await;
+
+                                                                match result {
+                                                                    crate::auto_upgrade::AutoUpgradeResult::Success { new_version, .. } => {
+                                                                        info!("Auto-upgrade to {} complete, restarting", new_version);
+
+                                                                        let runner = oxidepm_runtime::get_runner(spec.mode);
+                                                                        match runner.start(&spec).await {
+                                                                            Ok(running) => {
+                                                                                let mut procs = processes_upgrade.write();
+                                                                                if let Some(proc) = procs.get_mut(&app_id) {
+                                                                                    proc.state.pid = Some(running.pid);
+                                                                                    proc.state.status = AppStatus::Running;
+                                                                                    proc.state.started_at = Some(chrono::Utc::now());
+                                                                                    proc.state.upgrade_name = None;
+                                                                                    proc.state.upgrade_halt_height = None;
+                                                                                    proc.child = Some(running.child);
+                                                                                    proc.started_at = Some(Instant::now());
+                                                                                }
+                                                                            }
+                                                                            Err(e) => {
+                                                                                error!("Failed to restart after auto-upgrade: {}", e);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    crate::auto_upgrade::AutoUpgradeResult::Failed(msg) => {
+                                                                        error!("Auto-upgrade failed: {}", msg);
+                                                                        // Notify about the failure
+                                                                        let _ = notifier_upgrade.send_message(
+                                                                            &format!("Auto-upgrade failed for {}: {}", spec.name, msg)
+                                                                        ).await;
+                                                                    }
+                                                                    _ => {}
+                                                                }
+                                                            });
+
+                                                            continue;
+                                                        }
+                                                    }
+
                                                     // Do NOT restart — this is an intentional stop
                                                     continue;
                                                 }

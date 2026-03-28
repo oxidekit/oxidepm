@@ -320,6 +320,9 @@ mod tests {
             nofile_limit: None,
             shutdown_timeout: 30,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         };
         let lifecycle = CosmosLifecycle::new(config);
         assert_eq!(lifecycle.state, CosmosLifecycleState::RelayingSyncing);
@@ -336,6 +339,9 @@ mod tests {
             nofile_limit: None,
             shutdown_timeout: 30,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         };
         let lifecycle = CosmosLifecycle::new(config);
         assert_eq!(lifecycle.state, CosmosLifecycleState::ValidatorActive);
