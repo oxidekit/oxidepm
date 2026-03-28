@@ -354,8 +354,12 @@ pub enum CosmosNodeMode {
     Validator,
     /// Seed node (peer discovery only)
     Seed,
-    /// Relay/sentry node (no signing)
+    /// Relay node (no signing)
     Relay,
+    /// Sentry node (shields validator from public network)
+    Sentry,
+    /// Archive node (full history, pruning = "nothing")
+    Archive,
 }
 
 impl CosmosNodeMode {
@@ -364,6 +368,8 @@ impl CosmosNodeMode {
             CosmosNodeMode::Validator => "validator",
             CosmosNodeMode::Seed => "seed",
             CosmosNodeMode::Relay => "relay",
+            CosmosNodeMode::Sentry => "sentry",
+            CosmosNodeMode::Archive => "archive",
         }
     }
 }
@@ -376,6 +382,8 @@ impl FromStr for CosmosNodeMode {
             "validator" => Ok(CosmosNodeMode::Validator),
             "seed" => Ok(CosmosNodeMode::Seed),
             "relay" => Ok(CosmosNodeMode::Relay),
+            "sentry" => Ok(CosmosNodeMode::Sentry),
+            "archive" => Ok(CosmosNodeMode::Archive),
             _ => Err(Error::ConfigError(format!("Invalid cosmos node mode: {}", s))),
         }
     }
@@ -406,6 +414,12 @@ pub struct CosmosConfig {
     pub shutdown_timeout: u32,
     /// Detect x/upgrade halt messages in stdout/stderr (default: true)
     pub detect_upgrade_halt: bool,
+    /// Auto-upgrade: download and swap binary on upgrade halt (default: false)
+    pub auto_upgrade: bool,
+    /// Trusted GitHub repo for auto-upgrade downloads (e.g., "monolythium/mono-chain")
+    pub auto_upgrade_source: Option<String>,
+    /// Require SHA256 checksum verification for auto-upgrade binaries (default: true)
+    pub auto_upgrade_require_checksum: bool,
 }
 
 impl Default for CosmosConfig {
@@ -419,6 +433,9 @@ impl Default for CosmosConfig {
             nofile_limit: None,
             shutdown_timeout: 30,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         }
     }
 }

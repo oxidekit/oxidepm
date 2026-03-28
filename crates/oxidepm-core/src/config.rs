@@ -172,6 +172,14 @@ pub struct AppConfig {
     /// Detect x/upgrade halt messages in stdout/stderr (default: true for cosmos)
     #[serde(default = "default_true")]
     pub detect_upgrade_halt: bool,
+    /// Auto-upgrade: download and swap binary on upgrade halt (default: false)
+    #[serde(default)]
+    pub auto_upgrade: bool,
+    /// Trusted GitHub repo for auto-upgrade (e.g., "monolythium/mono-chain")
+    pub auto_upgrade_source: Option<String>,
+    /// Require SHA256 checksum verification for auto-upgrade (default: true)
+    #[serde(default = "default_true")]
+    pub auto_upgrade_require_checksum: bool,
 }
 
 fn default_true() -> bool {
@@ -363,6 +371,9 @@ impl AppConfig {
                     .shutdown_timeout
                     .unwrap_or(crate::constants::COSMOS_DEFAULT_SHUTDOWN_TIMEOUT),
                 detect_upgrade_halt: self.detect_upgrade_halt,
+                auto_upgrade: self.auto_upgrade,
+                auto_upgrade_source: self.auto_upgrade_source.clone(),
+                auto_upgrade_require_checksum: self.auto_upgrade_require_checksum,
             })
         } else {
             None
@@ -602,6 +613,9 @@ apps:
             restart: None,
             binary: None,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         };
 
         let base_dir = Path::new("/project");
@@ -671,6 +685,9 @@ apps:
             restart: None,
             binary: None,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         };
 
         let base_dir = Path::new("/project");

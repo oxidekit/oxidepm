@@ -126,6 +126,13 @@ impl CosmosHealthChecker {
             None
         };
 
+        // Sentry: same monitoring as Relay for now.
+        // TODO: track validator connectivity (e.g. persistent_peers health)
+
+        // TODO(archive): warn if pruning is not set to "nothing" for Archive nodes.
+        // This requires reading the node's app.toml or querying a config endpoint
+        // to verify pruning-keep-recent / pruning-keep-every / pruning-interval settings.
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         CosmosHealthResult {

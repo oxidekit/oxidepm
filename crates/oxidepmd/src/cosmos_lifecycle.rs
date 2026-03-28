@@ -64,7 +64,7 @@ impl CosmosLifecycle {
         } else if config.node_mode == CosmosNodeMode::Validator {
             CosmosLifecycleState::ValidatorActive
         } else {
-            // Seeds and relays don't use the lifecycle state machine
+            // Seeds, relays, sentries, and archives don't use the lifecycle state machine
             CosmosLifecycleState::RelayingSyncing
         };
 
@@ -320,6 +320,9 @@ mod tests {
             nofile_limit: None,
             shutdown_timeout: 30,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         };
         let lifecycle = CosmosLifecycle::new(config);
         assert_eq!(lifecycle.state, CosmosLifecycleState::RelayingSyncing);
@@ -336,6 +339,9 @@ mod tests {
             nofile_limit: None,
             shutdown_timeout: 30,
             detect_upgrade_halt: true,
+            auto_upgrade: false,
+            auto_upgrade_source: None,
+            auto_upgrade_require_checksum: true,
         };
         let lifecycle = CosmosLifecycle::new(config);
         assert_eq!(lifecycle.state, CosmosLifecycleState::ValidatorActive);
