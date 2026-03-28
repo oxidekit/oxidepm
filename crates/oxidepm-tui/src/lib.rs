@@ -258,6 +258,7 @@ fn render_processes(f: &mut Frame, app: &App, area: Rect) {
             AppStatus::Errored => Color::Red,
             AppStatus::Starting | AppStatus::Building => Color::Yellow,
             AppStatus::Stopping => Color::Yellow,
+            AppStatus::UpgradeHalted => Color::Magenta,
         };
 
         let cells = vec![

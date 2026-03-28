@@ -226,6 +226,10 @@ fn row_to_app_spec(row: &sqlx::sqlite::SqliteRow) -> Result<AppSpec> {
         tags: Vec::new(),
         // Maximum uptime (defaults - not persisted in DB yet)
         max_uptime_secs: None,
+        // Cosmos config (not persisted in DB yet)
+        cosmos_config: None,
+        // Restart mode (defaults - not persisted in DB yet)
+        restart_mode: oxidepm_core::RestartMode::default(),
     })
 }
 

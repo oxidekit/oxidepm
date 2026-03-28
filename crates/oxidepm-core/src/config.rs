@@ -169,6 +169,13 @@ pub struct AppConfig {
     pub restart: Option<String>,
     /// Path to the binary (for cosmos: e.g., "/root/go/bin/monod")
     pub binary: Option<String>,
+    /// Detect x/upgrade halt messages in stdout/stderr (default: true for cosmos)
+    #[serde(default = "default_true")]
+    pub detect_upgrade_halt: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_instances() -> u32 {
@@ -355,6 +362,7 @@ impl AppConfig {
                 shutdown_timeout: self
                     .shutdown_timeout
                     .unwrap_or(crate::constants::COSMOS_DEFAULT_SHUTDOWN_TIMEOUT),
+                detect_upgrade_halt: self.detect_upgrade_halt,
             })
         } else {
             None
@@ -593,6 +601,7 @@ apps:
             shutdown_timeout: None,
             restart: None,
             binary: None,
+            detect_upgrade_halt: true,
         };
 
         let base_dir = Path::new("/project");
@@ -661,6 +670,7 @@ apps:
             shutdown_timeout: None,
             restart: None,
             binary: None,
+            detect_upgrade_halt: true,
         };
 
         let base_dir = Path::new("/project");

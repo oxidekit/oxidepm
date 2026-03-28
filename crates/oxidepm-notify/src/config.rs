@@ -111,6 +111,12 @@ impl NotifyConfig {
             "restart",
             "memory_limit",
             "health_check",
+            "validator_activated",
+            "catching_up",
+            "missed_blocks",
+            "jailed",
+            "stale_node",
+            "upgrade_halted",
         ];
 
         for event in &self.events {
