@@ -412,6 +412,36 @@ impl Supervisor {
         Ok(true)
     }
 
+    /// Stop all running processes (used during daemon shutdown)
+    pub async fn stop_all(&self) -> usize {
+        // Collect IDs of all running processes
+        let running_ids: Vec<u32> = {
+            let processes = self.processes.read();
+            processes
+                .iter()
+                .filter(|(_, p)| p.state.status.is_running())
+                .map(|(&id, _)| id)
+                .collect()
+        };
+
+        let total = running_ids.len();
+        if total == 0 {
+            return 0;
+        }
+
+        info!("Stopping all {} running processes...", total);
+        let mut stopped = 0;
+        for id in running_ids {
+            match self.stop(id).await {
+                Ok(true) => stopped += 1,
+                Ok(false) => {}
+                Err(e) => error!("Error stopping process {}: {}", id, e),
+            }
+        }
+        info!("Stopped {}/{} processes", stopped, total);
+        stopped
+    }
+
     /// Restart an application
     pub async fn restart(&self, id: u32) -> Result<bool> {
         // Get the spec first

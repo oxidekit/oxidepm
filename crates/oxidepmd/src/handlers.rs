@@ -1,6 +1,7 @@
 //! IPC request handlers
 
-use oxidepm_core::{constants, AppSpec, Result, Selector};
+use oxidepm_core::{constants, AppMode, AppSpec, Result, Selector};
+use oxidepm_health::CosmosHealthChecker;
 use oxidepm_ipc::Response;
 use oxidepm_logs::{stderr_path, stdout_path};
 use std::fs::OpenOptions;
@@ -243,6 +244,14 @@ impl RequestHandler {
         }
     }
 
+    /// Stop all running processes and save state (for daemon shutdown)
+    pub async fn stop_all_and_save(&mut self) -> Response {
+        info!("Stopping all processes before daemon shutdown...");
+        let stopped = self.supervisor.stop_all().await;
+        let _ = self.supervisor.save().await;
+        Response::ok(format!("Stopped {} process(es), daemon shutting down", stopped))
+    }
+
     /// Handle cosmos-status request
     pub async fn cosmos_status(&self, selector: Selector) -> Response {
         info!("Handling cosmos-status request for: {}", selector);
@@ -252,25 +261,81 @@ impl RequestHandler {
                 let spec = &app_info.spec;
                 let state = &app_info.state;
 
-                if spec.mode != oxidepm_core::AppMode::Cosmos {
-                    return Response::error(format!("'{}' is not a cosmos process", spec.name));
+                if spec.mode != AppMode::Cosmos {
+                    return Response::error(format!(
+                        "'{}' is not a cosmos process\n\nUsage: oxidepm cosmos-status <name>\nExample: oxidepm cosmos-status monod",
+                        spec.name
+                    ));
                 }
 
-                let cosmos = spec.cosmos_config.as_ref();
+                let cosmos = match spec.cosmos_config.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        return Response::error(format!(
+                            "'{}' has no cosmos config\n\nUsage: oxidepm cosmos-status <name>\nExample: oxidepm cosmos-status monod",
+                            spec.name
+                        ));
+                    }
+                };
+
+                // Query the node's RPC endpoint for live data
+                let checker = CosmosHealthChecker::new(&cosmos.rpc_endpoint);
+                let health = checker.check(cosmos).await;
+
+                let (catching_up, block_height, seconds_since_block) =
+                    if let Some(ref node_status) = health.node_status {
+                        (
+                            Some(node_status.catching_up),
+                            Some(node_status.latest_block_height),
+                            node_status.seconds_since_block,
+                        )
+                    } else {
+                        (None, None, None)
+                    };
+
+                // Derive lifecycle state from node status and config
+                let lifecycle_state = if !health.reachable {
+                    Some("unreachable".to_string())
+                } else if let Some(ref ns) = health.node_status {
+                    if state.status == oxidepm_core::AppStatus::UpgradeHalted {
+                        Some("upgrade_halted".to_string())
+                    } else if cosmos.relay_until_synced
+                        && cosmos.node_mode == oxidepm_core::CosmosNodeMode::Validator
+                        && ns.catching_up
+                    {
+                        Some("relaying_syncing".to_string())
+                    } else if cosmos.node_mode == oxidepm_core::CosmosNodeMode::Validator {
+                        if ns.catching_up {
+                            Some("validator_catching_up".to_string())
+                        } else {
+                            Some("validator_active".to_string())
+                        }
+                    } else {
+                        if ns.catching_up {
+                            Some("syncing".to_string())
+                        } else {
+                            Some("synced".to_string())
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 Response::CosmosStatus {
                     name: spec.name.clone(),
-                    lifecycle_state: None, // Would be populated from cosmos lifecycle state
-                    catching_up: None,     // Would be populated from health checker
-                    block_height: None,    // Would be populated from health checker
-                    seconds_since_block: None,
-                    chain_id: cosmos.map(|c| c.chain_id.clone()),
-                    node_mode: cosmos.map(|c| c.node_mode.to_string()),
+                    lifecycle_state,
+                    catching_up,
+                    block_height,
+                    seconds_since_block,
+                    chain_id: Some(cosmos.chain_id.clone()),
+                    node_mode: Some(cosmos.node_mode.to_string()),
                     upgrade_name: state.upgrade_name.clone(),
                     upgrade_halt_height: state.upgrade_halt_height,
                 }
             }
-            Ok(None) => Response::error("App not found"),
+            Ok(None) => Response::error(
+                "App not found\n\nUsage: oxidepm cosmos-status <name>\nExample: oxidepm cosmos-status monod"
+            ),
             Err(e) => Response::error(e.to_string()),
         }
     }

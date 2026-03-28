@@ -51,10 +51,16 @@ pub async fn run(selector_str: &str) -> anyhow::Result<()> {
         }
         Response::Error { message } => {
             eprintln!("Error: {}", message);
+            if !message.contains("Usage:") {
+                eprintln!("\nUsage: oxidepm cosmos-status <name>");
+                eprintln!("Example: oxidepm cosmos-status monod");
+            }
             std::process::exit(1);
         }
         _ => {
             eprintln!("Unexpected response from daemon");
+            eprintln!("\nUsage: oxidepm cosmos-status <name>");
+            eprintln!("Example: oxidepm cosmos-status monod");
             std::process::exit(1);
         }
     }

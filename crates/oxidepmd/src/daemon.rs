@@ -14,6 +14,7 @@ use crate::supervisor::Supervisor;
 pub struct Daemon {
     server: IpcServer,
     handler: Arc<RwLock<RequestHandler>>,
+    shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl Daemon {
@@ -44,6 +45,7 @@ impl Daemon {
         Ok(Self {
             server,
             handler: Arc::new(RwLock::new(handler)),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -52,45 +54,52 @@ impl Daemon {
         info!("Daemon running, waiting for connections...");
 
         loop {
-            match self.server.accept().await {
-                Ok(mut conn) => {
-                    let handler = Arc::clone(&self.handler);
+            tokio::select! {
+                result = self.server.accept() => {
+                    match result {
+                        Ok(mut conn) => {
+                            let handler = Arc::clone(&self.handler);
+                            let shutdown = Arc::clone(&self.shutdown);
 
-                    tokio::spawn(async move {
-                        loop {
-                            match conn.read_request().await {
-                                Ok(Some(request)) => {
-                                    let response = Self::handle_request(&handler, request).await;
+                            tokio::spawn(async move {
+                                loop {
+                                    match conn.read_request().await {
+                                        Ok(Some(request)) => {
+                                            let is_kill = matches!(request, Request::Kill);
+                                            let response = Self::handle_request(&handler, request).await;
 
-                                    if let Err(e) = conn.send_response(&response).await {
-                                        error!("Failed to send response: {}", e);
-                                        break;
+                                            if let Err(e) = conn.send_response(&response).await {
+                                                error!("Failed to send response: {}", e);
+                                                break;
+                                            }
+
+                                            if is_kill {
+                                                shutdown.notify_one();
+                                                break;
+                                            }
+                                        }
+                                        Ok(None) => break,
+                                        Err(e) => {
+                                            error!("Error reading request: {}", e);
+                                            break;
+                                        }
                                     }
-
-                                    // Check if this was a kill request
-                                    if matches!(response, Response::Ok { .. })
-                                        && matches!(response, Response::Ok { message } if message.contains("Daemon shutting down"))
-                                    {
-                                        // Don't break here, let the main loop handle shutdown
-                                    }
                                 }
-                                Ok(None) => {
-                                    // Connection closed
-                                    break;
-                                }
-                                Err(e) => {
-                                    error!("Error reading request: {}", e);
-                                    break;
-                                }
-                            }
+                            });
                         }
-                    });
+                        Err(e) => {
+                            error!("Failed to accept connection: {}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to accept connection: {}", e);
+                _ = self.shutdown.notified() => {
+                    info!("Kill signal received, daemon exiting");
+                    break;
                 }
             }
         }
+
+        Ok(())
     }
 
     async fn handle_request(
@@ -121,9 +130,8 @@ impl Daemon {
             Request::Describe { selector } => h.describe(selector).await,
             Request::CosmosStatus { selector } => h.cosmos_status(selector).await,
             Request::Kill => {
-                // Save before killing
-                let _ = h.save().await;
-                Response::ok("Daemon shutting down")
+                // Stop all processes and save before shutting down
+                h.stop_all_and_save().await
             }
         }
     }
