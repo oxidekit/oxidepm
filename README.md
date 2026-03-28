@@ -14,17 +14,18 @@ A fast, modern process manager for Node.js and Rust applications. Built in Rust 
 
 ## Features
 
-- **Multi-runtime support** - Node.js, npm/pnpm/yarn scripts, Cargo projects, Rust single-file
+- **Multi-runtime support** - Node.js, npm/pnpm/yarn scripts, Cargo projects, Rust single-file, Cosmos SDK nodes
+- **Cosmos node management** - Relay-until-synced lifecycle, upgrade halt detection, validator health monitoring
 - **Daemon supervision** - Processes persist across terminal sessions
 - **Auto-restart** - Configurable restart policies with crash-loop protection
 - **Watch mode** - Automatic rebuild and restart on file changes
 - **Clustering** - Run multiple instances with automatic port assignment
-- **Health checks** - HTTP and script-based health monitoring
+- **Health checks** - HTTP, script-based, and Cosmos RPC health monitoring
 - **Graceful reload** - Zero-downtime restarts
 - **Log management** - Rotation, tail, follow, grep filtering
 - **TUI dashboard** - Real-time monitoring with `monit` command
 - **Web API** - REST API + WebSocket for remote management
-- **Telegram alerts** - Notifications for crashes, restarts, memory limits
+- **Telegram alerts** - Notifications for crashes, restarts, memory limits, validator events
 - **Git clone & start** - One command to clone, setup, and run
 
 ## Installation
@@ -32,7 +33,7 @@ A fast, modern process manager for Node.js and Rust applications. Built in Rust 
 ### Quick Install (Recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/prod/scripts/install.sh | sh
 ```
 
 ### Homebrew (macOS/Linux)
@@ -113,6 +114,7 @@ oxidepm stop my-app
 | `web [--port 9615]` | Start Web API server |
 | `notify telegram` | Configure Telegram alerts |
 | `ping` | Check daemon health |
+| `cosmos-status <name>` | Cosmos node sync/lifecycle info |
 | `kill` | Stop daemon and all processes |
 
 **Selectors:** Process name, ID, `all`, or `@tag` for groups.
@@ -213,6 +215,111 @@ oxidepm start oxidepm.config.toml
 
 Also supports YAML and JSON formats.
 
+## Cosmos Node Management
+
+OxidePM provides first-class support for Cosmos SDK blockchain nodes with `mode = "cosmos"`.
+
+> **Security:** Always run blockchain nodes as a dedicated non-root user (e.g. `monouser`). Use `sudo` only for one-off privileged operations like system-level configuration. Never run validators as `root`.
+
+### Cosmos Config
+
+```toml
+[[apps]]
+name = "monod"
+mode = "cosmos"
+binary = "/usr/local/bin/monod"
+args = ["start", "--home", "/home/monouser/.mono"]
+cwd = "/home/monouser"
+
+# Node configuration
+cosmos_mode = "validator"           # validator | seed | relay
+rpc_endpoint = "http://localhost:26657"
+chain_id = "mono_6940-1"
+
+# Relay-until-synced: start as relay, auto-enable validator key when synced
+relay_until_synced = true
+validator_key_path = "/home/monouser/.mono/config/priv_validator_key.json"
+
+# System limits
+nofile_limit = 65535
+shutdown_timeout = 30
+
+# Upgrade halt detection (detects x/upgrade planned halts)
+detect_upgrade_halt = true
+
+# Restart policy
+restart = "on-crash"                # on-crash | always | never
+max_restarts = 5
+restart_delay = 10000
+```
+
+### Relay-Until-Synced
+
+When `relay_until_synced = true`, OxidePM manages a state machine that prevents validator jailing during initial sync:
+
+1. **RelayingSyncing** — Validator key is disabled (renamed), node syncs as a relay
+2. **TransitioningToValidator** — Node is synced, OxidePM stops the process, restores the key, restarts
+3. **ValidatorActive** — Node is signing blocks normally
+4. **ValidatorCatchingUp** — Validator fell behind (alert only, key stays enabled)
+
+The validator key is only ever renamed (`*.json` ↔ `*.json.disabled`) — OxidePM never reads its contents.
+
+### Upgrade Halt Detection
+
+When a Cosmos chain halts for a governance-approved upgrade, the node exits with a message like:
+
+```
+UPGRADE "v2.0.0" NEEDED at height: 500000
+```
+
+OxidePM detects this pattern and:
+- Sets the process status to `upgrade_halted` (not `errored`)
+- Suppresses auto-restart (even with `restart = "always"`)
+- Sends a Telegram notification with the required action
+- Shows the upgrade info in `oxidepm status` and the TUI
+
+The operator then swaps the binary and manually restarts.
+
+### Cosmos Status
+
+```bash
+# Check cosmos-specific node info
+oxidepm cosmos-status monod
+```
+
+Shows chain ID, node mode, lifecycle state, block height, catching-up status, and upgrade halt details.
+
+### Cosmos Health Checks
+
+OxidePM automatically monitors Cosmos nodes by polling:
+- **CometBFT `/status`** — Sync state, block height, stale detection
+- **Slashing module** — Missed blocks and jailed status (validators only)
+
+### Cosmos Notifications
+
+New event types for validators:
+- `validator_activated` — Relay-until-synced complete (info)
+- `catching_up` — Node falling behind (warning)
+- `missed_blocks` — Approaching jail threshold (warning)
+- `jailed` — Validator jailed (critical)
+- `stale_node` — No new blocks (critical)
+- `upgrade_halted` — Planned upgrade halt (warning)
+
+Filter by severity:
+
+```toml
+# In ~/.oxidepm/notify.toml
+min_severity = "warning"  # info | warning | critical
+```
+
+Use environment variables for bot tokens (recommended for validators):
+
+```toml
+[telegram]
+bot_token_env = "OXIDEPM_TELEGRAM_TOKEN"  # reads from env var
+chat_id = "-100123456789"
+```
+
 ## Preflight Checks
 
 OxidePM validates your project before starting:
@@ -303,10 +410,10 @@ oxidepm (CLI) ──IPC──> oxidepmd (daemon)
 - `oxidepm-watch` - Filesystem watcher
 - `oxidepm-logs` - Log rotation + streaming
 - `oxidepm-db` - SQLite persistence
-- `oxidepm-health` - Health check monitoring
+- `oxidepm-health` - Health check monitoring (HTTP, script, Cosmos RPC)
 - `oxidepm-web` - REST API + WebSocket
 - `oxidepm-tui` - Terminal UI (ratatui)
-- `oxidepm-notify` - Telegram notifications
+- `oxidepm-notify` - Telegram notifications with severity filtering
 
 ## Data Directory
 
@@ -343,6 +450,7 @@ All data stored in `~/.oxidepm/`:
 | Node.js apps | ✅ | ✅ | Both support Node.js natively |
 | npm/yarn/pnpm scripts | ✅ | ✅ | Run package.json scripts |
 | Rust/Cargo projects | ✅ | ❌ | OxidePM auto-builds and runs Cargo projects |
+| Cosmos SDK nodes | ✅ | ❌ | Lifecycle, upgrade halt detection, validator monitoring |
 | Generic commands | ✅ | ✅ | Run any shell command |
 | **Process Management** |
 | Daemon supervision | ✅ | ✅ | Processes persist across terminal sessions |
