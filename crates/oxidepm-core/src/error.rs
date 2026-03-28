@@ -59,6 +59,12 @@ pub enum Error {
     #[error("Health check failed")]
     HealthCheckFailed,
 
+    #[error("Cosmos node error: {0}")]
+    CosmosError(String),
+
+    #[error("Validator key operation failed: {0}")]
+    ValidatorKeyError(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 

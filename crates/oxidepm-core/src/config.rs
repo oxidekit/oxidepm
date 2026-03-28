@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::constants::*;
 use crate::error::{Error, Result};
-use crate::types::{AppMode, AppSpec, HealthCheck, Hooks, RestartPolicy};
+use crate::types::{AppMode, AppSpec, CosmosConfig, CosmosNodeMode, HealthCheck, Hooks, RestartMode, RestartPolicy};
 
 /// Supported configuration file formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +149,26 @@ pub struct AppConfig {
     pub tags: Vec<String>,
     /// Maximum uptime in seconds before auto-restart (prevents memory leaks)
     pub max_uptime_secs: Option<u64>,
+    // ── Cosmos-specific fields (only used when type/mode = "cosmos") ──
+    /// Cosmos node mode: "validator", "seed", or "relay"
+    pub cosmos_mode: Option<String>,
+    /// Cosmos RPC endpoint for health checks
+    pub rpc_endpoint: Option<String>,
+    /// Cosmos chain ID
+    pub chain_id: Option<String>,
+    /// Start as relay, auto-enable validator key when synced
+    #[serde(default)]
+    pub relay_until_synced: bool,
+    /// Path to priv_validator_key.json (oxidepm only renames, never reads)
+    pub validator_key_path: Option<String>,
+    /// RLIMIT_NOFILE for the process
+    pub nofile_limit: Option<u64>,
+    /// Graceful shutdown timeout in seconds
+    pub shutdown_timeout: Option<u32>,
+    /// Restart mode: "on-crash", "always", "never"
+    pub restart: Option<String>,
+    /// Path to the binary (for cosmos: e.g., "/root/go/bin/monod")
+    pub binary: Option<String>,
 }
 
 fn default_instances() -> u32 {
@@ -246,9 +266,11 @@ impl AppConfig {
             AppMode::Cmd
         };
 
-        // Determine command
+        // Determine command — for cosmos, prefer `binary` field
         let command = self
-            .script
+            .binary
+            .clone()
+            .or(self.script.clone())
             .or(self.bin.clone())
             .unwrap_or_else(|| self.name.clone());
 
@@ -301,6 +323,51 @@ impl AppConfig {
         // Convert hooks config
         let hooks = self.hooks.map(|h| h.into_hooks()).unwrap_or_default();
 
+        // Build cosmos config if mode is cosmos
+        let cosmos_config = if mode == AppMode::Cosmos {
+            let node_mode = self
+                .cosmos_mode
+                .as_deref()
+                .unwrap_or("relay")
+                .parse::<CosmosNodeMode>()?;
+            let rpc = self
+                .rpc_endpoint
+                .unwrap_or_else(|| "http://localhost:26657".to_string());
+            let chain = self
+                .chain_id
+                .unwrap_or_default();
+            let key_path = self.validator_key_path.map(|p| {
+                let path = std::path::Path::new(&p);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    base_dir.join(path)
+                }
+            });
+
+            Some(CosmosConfig {
+                node_mode,
+                rpc_endpoint: rpc,
+                chain_id: chain,
+                relay_until_synced: self.relay_until_synced,
+                validator_key_path: key_path,
+                nofile_limit: self.nofile_limit,
+                shutdown_timeout: self
+                    .shutdown_timeout
+                    .unwrap_or(crate::constants::COSMOS_DEFAULT_SHUTDOWN_TIMEOUT),
+            })
+        } else {
+            None
+        };
+
+        // Parse restart mode
+        let restart_mode = self
+            .restart
+            .as_deref()
+            .map(|s| s.parse::<RestartMode>())
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(AppSpec {
             id: 0, // Will be assigned by database
             name: self.name,
@@ -325,6 +392,8 @@ impl AppConfig {
             hooks,
             tags: self.tags,
             max_uptime_secs: self.max_uptime_secs,
+            cosmos_config,
+            restart_mode,
         })
     }
 }
@@ -515,6 +584,15 @@ apps:
             }),
             tags: vec!["web".to_string(), "production".to_string()],
             max_uptime_secs: Some(86400),
+            cosmos_mode: None,
+            rpc_endpoint: None,
+            chain_id: None,
+            relay_until_synced: false,
+            validator_key_path: None,
+            nofile_limit: None,
+            shutdown_timeout: None,
+            restart: None,
+            binary: None,
         };
 
         let base_dir = Path::new("/project");
@@ -574,6 +652,15 @@ apps:
             hooks: None,
             tags: vec![],
             max_uptime_secs: None,
+            cosmos_mode: None,
+            rpc_endpoint: None,
+            chain_id: None,
+            relay_until_synced: false,
+            validator_key_path: None,
+            nofile_limit: None,
+            shutdown_timeout: None,
+            restart: None,
+            binary: None,
         };
 
         let base_dir = Path::new("/project");

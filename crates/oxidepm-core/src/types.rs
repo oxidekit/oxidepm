@@ -205,6 +205,12 @@ pub struct AppSpec {
     // Maximum uptime in seconds before auto-restart (prevents memory leaks)
     #[serde(default)]
     pub max_uptime_secs: Option<u64>,
+    // Cosmos-specific configuration (only used when mode = Cosmos)
+    #[serde(default)]
+    pub cosmos_config: Option<CosmosConfig>,
+    // Restart mode (on-crash, always, never)
+    #[serde(default)]
+    pub restart_mode: RestartMode,
 }
 
 impl AppSpec {
@@ -252,6 +258,8 @@ impl AppSpec {
             hooks: Hooks::default(),
             tags: Vec::new(),
             max_uptime_secs: None,
+            cosmos_config: None,
+            restart_mode: RestartMode::default(),
         })
     }
 
@@ -338,6 +346,135 @@ impl AppSpec {
     }
 }
 
+/// Cosmos node operating mode
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum CosmosNodeMode {
+    /// Full validator node (signs blocks)
+    Validator,
+    /// Seed node (peer discovery only)
+    Seed,
+    /// Relay/sentry node (no signing)
+    Relay,
+}
+
+impl CosmosNodeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CosmosNodeMode::Validator => "validator",
+            CosmosNodeMode::Seed => "seed",
+            CosmosNodeMode::Relay => "relay",
+        }
+    }
+}
+
+impl FromStr for CosmosNodeMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "validator" => Ok(CosmosNodeMode::Validator),
+            "seed" => Ok(CosmosNodeMode::Seed),
+            "relay" => Ok(CosmosNodeMode::Relay),
+            _ => Err(Error::ConfigError(format!("Invalid cosmos node mode: {}", s))),
+        }
+    }
+}
+
+impl std::fmt::Display for CosmosNodeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Cosmos-specific configuration for blockchain node management
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmosConfig {
+    /// Node operating mode
+    pub node_mode: CosmosNodeMode,
+    /// RPC endpoint for health checks (e.g., "http://localhost:26657")
+    pub rpc_endpoint: String,
+    /// Chain ID (e.g., "mono_6940-1")
+    pub chain_id: String,
+    /// Start as relay, auto-enable validator key when synced
+    pub relay_until_synced: bool,
+    /// Path to priv_validator_key.json (oxidepm only renames, NEVER reads contents)
+    pub validator_key_path: Option<PathBuf>,
+    /// RLIMIT_NOFILE value for the node process
+    pub nofile_limit: Option<u64>,
+    /// Graceful shutdown timeout in seconds
+    pub shutdown_timeout: u32,
+}
+
+impl Default for CosmosConfig {
+    fn default() -> Self {
+        Self {
+            node_mode: CosmosNodeMode::Relay,
+            rpc_endpoint: "http://localhost:26657".to_string(),
+            chain_id: String::new(),
+            relay_until_synced: false,
+            validator_key_path: None,
+            nofile_limit: None,
+            shutdown_timeout: 30,
+        }
+    }
+}
+
+/// Restart mode for process crash recovery
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartMode {
+    /// Restart on non-zero exit code
+    OnCrash,
+    /// Always restart regardless of exit code
+    Always,
+    /// Never auto-restart
+    Never,
+}
+
+impl Default for RestartMode {
+    fn default() -> Self {
+        RestartMode::OnCrash
+    }
+}
+
+impl RestartMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RestartMode::OnCrash => "on-crash",
+            RestartMode::Always => "always",
+            RestartMode::Never => "never",
+        }
+    }
+
+    pub fn should_restart(&self, exit_code: Option<i32>) -> bool {
+        match self {
+            RestartMode::Never => false,
+            RestartMode::Always => true,
+            RestartMode::OnCrash => exit_code.map(|c| c != 0).unwrap_or(true),
+        }
+    }
+}
+
+impl FromStr for RestartMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "on-crash" | "on_crash" => Ok(RestartMode::OnCrash),
+            "always" => Ok(RestartMode::Always),
+            "never" => Ok(RestartMode::Never),
+            _ => Err(Error::ConfigError(format!("Invalid restart mode: {}", s))),
+        }
+    }
+}
+
+impl std::fmt::Display for RestartMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Application runtime mode
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -349,6 +486,7 @@ pub enum AppMode {
     Yarn,
     Cargo,
     Rust,
+    Cosmos,
 }
 
 impl AppMode {
@@ -390,6 +528,7 @@ impl AppMode {
             AppMode::Yarn => "yarn",
             AppMode::Cargo => "cargo",
             AppMode::Rust => "rust",
+            AppMode::Cosmos => "cosmos",
         }
     }
 }
@@ -406,6 +545,7 @@ impl FromStr for AppMode {
             "yarn" => Ok(AppMode::Yarn),
             "cargo" => Ok(AppMode::Cargo),
             "rust" => Ok(AppMode::Rust),
+            "cosmos" => Ok(AppMode::Cosmos),
             _ => Err(Error::InvalidMode(s.to_string())),
         }
     }
