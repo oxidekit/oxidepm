@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use oxidepm_core::Selector;
 use oxidepm_ipc::{Request, Response};
 use regex::Regex;
+use std::io::Write;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::signal;
 
@@ -127,7 +128,9 @@ async fn follow_log_file(
                 }
             }
             _ = signal::ctrl_c() => {
-                break;
+                // Flush any remaining output and exit cleanly
+                let _ = std::io::stdout().flush();
+                std::process::exit(0);
             }
         }
     }
