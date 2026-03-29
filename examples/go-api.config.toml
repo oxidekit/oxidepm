@@ -1,0 +1,15 @@
+# Go API server example
+# Start with: oxidepm start examples/go-api.config.toml
+
+[[apps]]
+name = "api"
+mode = "go"
+script = "."
+cwd = "./cmd/api"
+env = { GIN_MODE = "release", PORT = "8080" }
+watch = true
+tags = ["backend"]
+
+[apps.health_check]
+http_url = "http://localhost:8080/healthz"
+interval_secs = 15

@@ -1,0 +1,38 @@
+# Cosmos SDK validator node example
+# Start with: oxidepm start examples/cosmos-validator.config.toml
+#
+# IMPORTANT: Run as a dedicated non-root user (e.g., monouser).
+# Never run validators as root.
+
+[[apps]]
+name = "monod"
+mode = "cosmos"
+binary = "/usr/local/bin/monod"
+args = ["start", "--home", "/home/monouser/.mono"]
+cwd = "/home/monouser"
+
+# Node configuration
+cosmos_mode = "validator"
+rpc_endpoint = "http://127.0.0.1:26657"
+chain_id = "mono_6940-1"
+
+# Relay-until-synced: start as relay, auto-enable validator key when synced
+relay_until_synced = true
+validator_key_path = "/home/monouser/.mono/config/priv_validator_key.json"
+
+# System limits
+nofile_limit = 65535
+shutdown_timeout = 30
+
+# Upgrade halt detection
+detect_upgrade_halt = true
+
+# Restart policy
+restart = "on-crash"
+max_restarts = 5
+restart_delay_ms = 10000
+
+# Log rotation
+log_max_size = "100mb"
+log_max_files = 10
+log_compress = true

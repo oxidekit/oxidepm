@@ -69,6 +69,17 @@ async fn main() -> Result<()> {
         Commands::Deploy(args) => deploy::execute(args).await,
         Commands::Env(args) => env_cmd::execute(args).await,
         Commands::Top => top::execute().await,
+        Commands::Completions { shell } => {
+            completions::execute_completions(&shell)?;
+            Ok(())
+        }
+        Commands::ManPage => {
+            completions::execute_manpage()?;
+            Ok(())
+        }
+        Commands::Backup { output } => backup::execute_backup(output).await,
+        Commands::Restore { file } => backup::execute_restore(&file).await,
+        Commands::Diff(args) => diff::execute(args).await,
     };
 
     if let Err(e) = result {

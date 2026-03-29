@@ -1,0 +1,35 @@
+# Express.js + PostgreSQL worker example
+# Start with: oxidepm start examples/node-express.config.toml
+
+[[apps]]
+name = "api"
+mode = "npm"
+script = "start"
+cwd = "./api"
+instances = 2
+port = 3000
+watch = true
+env = { NODE_ENV = "production", PORT = "3000" }
+env_file = ".env"
+tags = ["backend"]
+max_memory_mb = 512
+
+[apps.health_check]
+http_url = "http://localhost:3000/health"
+interval_secs = 30
+retries = 3
+
+[apps.hooks]
+on_crash = "echo 'API crashed!' >> /tmp/oxidepm-hooks.log"
+
+[[apps]]
+name = "worker"
+mode = "node"
+script = "worker.js"
+cwd = "./api"
+depends_on = ["api"]
+restart_cron = "0 4 * * *"
+env = { NODE_ENV = "production" }
+tags = ["backend"]
+log_max_size = "50mb"
+log_compress = true

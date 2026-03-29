@@ -1,0 +1,39 @@
+# Full-stack example: Next.js frontend + Rust API + PostgreSQL worker
+# Demonstrates dependencies, clustering, health checks, and cron restarts
+# Start with: oxidepm start examples/full-stack.config.toml
+
+[[apps]]
+name = "api"
+mode = "cargo"
+cwd = "./api"
+watch = true
+env = { RUST_LOG = "info", DATABASE_URL = "postgres://localhost/myapp" }
+tags = ["backend"]
+
+[apps.health_check]
+http_url = "http://localhost:8080/health"
+interval_secs = 30
+
+[[apps]]
+name = "web"
+mode = "npm"
+script = "start"
+cwd = "./web"
+instances = 2
+port = 3000
+depends_on = ["api"]
+env = { NODE_ENV = "production" }
+env_file = ".env.local"
+tags = ["frontend"]
+max_memory_mb = 512
+
+[[apps]]
+name = "worker"
+mode = "node"
+script = "worker.js"
+cwd = "./api"
+depends_on = ["api"]
+restart_cron = "0 4 * * *"
+tags = ["backend", "worker"]
+log_max_size = "50mb"
+log_compress = true

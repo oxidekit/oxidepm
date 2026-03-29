@@ -148,6 +148,32 @@ pub enum Commands {
 
     /// Real-time process resource monitor (like htop for oxidepm)
     Top,
+
+    /// Generate shell completions (bash, zsh, fish, elvish, powershell)
+    Completions {
+        /// Shell type
+        shell: String,
+    },
+
+    /// Generate man page
+    #[command(name = "man")]
+    ManPage,
+
+    /// Backup config, saved processes, and notification settings to a tarball
+    Backup {
+        /// Output file (default: oxidepm-backup.tar.gz)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Restore from a backup tarball
+    Restore {
+        /// Backup file to restore from
+        file: String,
+    },
+
+    /// Show git diff on a remote server (what changed since last deploy)
+    Diff(DiffArgs),
 }
 
 #[derive(Args)]
@@ -418,6 +444,20 @@ pub enum EnvCommand {
         /// Variable name to remove
         key: String,
     },
+}
+
+#[derive(Args)]
+pub struct DiffArgs {
+    /// Remote host (user@host or SSH alias)
+    pub host: String,
+
+    /// Remote project directory
+    #[arg(long)]
+    pub cwd: Option<String>,
+
+    /// Number of commits to show (default: 5)
+    #[arg(long, default_value = "5")]
+    pub count: usize,
 }
 
 fn parse_env(s: &str) -> Result<(String, String), String> {

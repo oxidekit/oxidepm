@@ -1,0 +1,24 @@
+# Maintainer: OxideKit <hello@oxidekit.com>
+pkgname=oxidepm
+pkgver=0.3.1
+pkgrel=1
+pkgdesc='Fast process manager for Node.js, Python, Go, Rust, and Cosmos SDK. PM2 alternative built in Rust.'
+arch=('x86_64' 'aarch64')
+url='https://github.com/oxidekit/oxidepm'
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('rust' 'cargo')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/oxidekit/oxidepm/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --workspace --release
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/oxidepm" "$pkgdir/usr/bin/oxidepm"
+    install -Dm755 "target/release/oxidepmd" "$pkgdir/usr/bin/oxidepmd"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

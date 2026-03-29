@@ -21,7 +21,10 @@ pub use telegram::TelegramNotifier;
 pub use webhook::{DiscordNotifier, SlackNotifier, WebhookNotifier};
 
 use async_trait::async_trait;
-use tracing::warn;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use tracing::{debug, warn};
 
 /// Trait for notification backends
 #[async_trait]
@@ -36,6 +39,10 @@ pub trait Notifier: Send + Sync {
     fn is_configured(&self) -> bool;
 }
 
+/// Rate limiter to prevent notification spam during crash loops
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(300); // 5 minutes
+const RATE_LIMIT_MAX: usize = 5; // Max notifications per event type per window
+
 /// Manager for all notification channels
 pub struct NotificationManager {
     telegram: Option<TelegramNotifier>,
@@ -43,6 +50,8 @@ pub struct NotificationManager {
     slack: Option<SlackNotifier>,
     webhook: Option<WebhookNotifier>,
     config: NotifyConfig,
+    /// Rate limiter: tracks (event_key) -> (count, window_start)
+    rate_limiter: Mutex<HashMap<String, (usize, Instant)>>,
 }
 
 impl NotificationManager {
@@ -74,6 +83,7 @@ impl NotificationManager {
             slack,
             webhook,
             config,
+            rate_limiter: Mutex::new(HashMap::new()),
         }
     }
 
@@ -86,6 +96,43 @@ impl NotificationManager {
     /// Send a process event to all configured channels
     pub async fn notify(&self, event: &ProcessEvent) -> Result<()> {
         if !self.should_notify(event) {
+            return Ok(());
+        }
+
+        // Rate limiting: prevent spam during crash loops
+        let rate_key = format!("{}:{}", event.name(), event.event_type());
+        let rate_action = {
+            if let Ok(mut limiter) = self.rate_limiter.lock() {
+                let now = Instant::now();
+                let entry = limiter.entry(rate_key.clone()).or_insert((0, now));
+
+                if now.duration_since(entry.1) > RATE_LIMIT_WINDOW {
+                    *entry = (0, now);
+                }
+
+                entry.0 += 1;
+
+                if entry.0 > RATE_LIMIT_MAX {
+                    if entry.0 == RATE_LIMIT_MAX + 1 {
+                        Some(format!(
+                            "Notifications for '{}' ({}) rate-limited — {} in {}s. Suppressing further alerts.",
+                            event.name(), event.event_type(), RATE_LIMIT_MAX, RATE_LIMIT_WINDOW.as_secs()
+                        ))
+                    } else {
+                        // Already rate limited, silently drop
+                        return Ok(());
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }; // MutexGuard dropped here
+
+        if let Some(msg) = rate_action {
+            debug!("Rate limiting notifications for {}", rate_key);
+            let _ = self.send_message(&msg).await;
             return Ok(());
         }
 

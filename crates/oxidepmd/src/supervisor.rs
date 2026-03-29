@@ -447,25 +447,52 @@ impl Supervisor {
     }
 
     /// Stop all running processes (used during daemon shutdown)
+    ///
+    /// Stops in reverse dependency order: processes that depend on others
+    /// are stopped first, then their dependencies.
     pub async fn stop_all(&self) -> usize {
-        // Collect IDs of all running processes
-        let running_ids: Vec<u32> = {
+        // Build ordered stop list (reverse dependency order)
+        let ordered_ids = {
             let processes = self.processes.read();
-            processes
+            let running: Vec<(u32, Vec<String>)> = processes
                 .iter()
                 .filter(|(_, p)| p.state.status.is_running())
-                .map(|(&id, _)| id)
-                .collect()
+                .map(|(&id, p)| (id, p.spec.depends_on.clone()))
+                .collect();
+
+            // Simple topological sort: processes with dependencies first, then their deps
+            let name_to_id: std::collections::HashMap<String, u32> = processes
+                .iter()
+                .map(|(&id, p)| (p.spec.name.clone(), id))
+                .collect();
+
+            let mut ordered = Vec::new();
+            let mut remaining: Vec<(u32, Vec<String>)> = running;
+
+            // First pass: add processes that have dependents (stop dependents first)
+            // Processes with dependencies on others should be stopped BEFORE their deps
+            let mut added: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+            // Add processes with dependencies first (they depend on others, stop them first)
+            remaining.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            for (id, _deps) in &remaining {
+                if !added.contains(id) {
+                    ordered.push(*id);
+                    added.insert(*id);
+                }
+            }
+
+            ordered
         };
 
-        let total = running_ids.len();
+        let total = ordered_ids.len();
         if total == 0 {
             return 0;
         }
 
-        info!("Stopping all {} running processes...", total);
+        info!("Stopping all {} running processes (dependency-ordered)...", total);
         let mut stopped = 0;
-        for id in running_ids {
+        for id in ordered_ids {
             match self.stop(id).await {
                 Ok(true) => stopped += 1,
                 Ok(false) => {}

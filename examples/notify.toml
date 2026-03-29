@@ -1,0 +1,27 @@
+# Example notification configuration
+# Copy to ~/.oxidepm/notify.toml and fill in your values
+#
+# All channels are optional — configure only the ones you use.
+# Set min_severity to reduce noise (info, warning, critical).
+
+events = ["crash", "restart", "jailed", "double_sign_risk", "upgrade_halted"]
+min_severity = "warning"
+
+# Telegram (get bot token from @BotFather, chat ID from @userinfobot)
+[telegram]
+bot_token_env = "OXIDEPM_TELEGRAM_TOKEN"  # Preferred: reads from env var
+# bot_token = "123456:ABC-DEF"            # Or set directly (less secure)
+chat_id = "-100123456789"
+
+# Discord (channel settings → Integrations → Webhooks → New Webhook)
+[discord]
+webhook_url = "https://discord.com/api/webhooks/123456/abcdef..."
+
+# Slack (create an Incoming Webhook app at api.slack.com)
+[slack]
+webhook_url = "https://hooks.slack.com/services/T00/B00/xxx..."
+
+# Generic HTTP webhook (POST JSON with event data)
+[webhook]
+url = "https://your-server.com/oxidepm-alerts"
+secret = "your-hmac-secret"  # Sent as X-Webhook-Secret header

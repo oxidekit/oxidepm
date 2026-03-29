@@ -62,6 +62,14 @@ brew tap oxidekit/homebrew-tap
 brew install oxidepm
 ```
 
+### Arch Linux (AUR)
+
+```bash
+yay -S oxidepm
+# or
+git clone https://github.com/oxidekit/oxidepm.git && cd oxidepm/dist/aur && makepkg -si
+```
+
 ### From Source
 
 ```bash
@@ -152,8 +160,13 @@ oxidepm stop my-app
 | `update [--version X]` | Self-update to latest (or specific) release |
 | `init [dir]` | Scan project and generate config file |
 | `deploy <host>` | SSH deploy: pull code + restart processes |
+| `diff <host>` | Show remote git changes since last deploy |
 | `env list/set/unset` | Manage process environment variables |
 | `top` | Real-time process resource monitor |
+| `backup [--output file]` | Export config + process list to tarball |
+| `restore <file>` | Restore from backup tarball |
+| `completions <shell>` | Generate shell completions (bash/zsh/fish) |
+| `man` | Generate man page |
 | `kill` | Stop daemon and all processes |
 
 **Global flags:** `--json` for machine-readable output, `-v` for verbose logging.
@@ -546,6 +559,49 @@ Real-time monitoring dashboard with:
 - Log viewer
 - Start/stop/restart controls
 - Keyboard navigation
+
+## Shell Completions
+
+```bash
+# Bash
+oxidepm completions bash > /etc/bash_completion.d/oxidepm
+
+# Zsh
+oxidepm completions zsh > ~/.zfunc/_oxidepm
+
+# Fish
+oxidepm completions fish > ~/.config/fish/completions/oxidepm.fish
+```
+
+## Backup & Restore
+
+Migrate your config to another machine:
+
+```bash
+# Export
+oxidepm backup --output my-server-backup.tar.gz
+
+# Transfer and restore
+scp my-server-backup.tar.gz user@newserver:~
+ssh user@newserver "oxidepm restore my-server-backup.tar.gz && oxidepm resurrect"
+```
+
+## Remote Diff
+
+Check what's changed on a remote server before deploying:
+
+```bash
+oxidepm diff user@myserver --cwd /srv/myapp --count 10
+```
+
+## Docker
+
+```bash
+docker build -t oxidepm .
+docker run -d --name oxidepm-daemon oxidepm
+```
+
+Or use in a multi-service Docker Compose setup where OxidePM manages your processes inside a container.
 
 ## Architecture
 

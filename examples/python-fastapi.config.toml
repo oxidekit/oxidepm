@@ -1,0 +1,26 @@
+# FastAPI + Redis worker example
+# Start with: oxidepm start examples/python-fastapi.config.toml
+
+[[apps]]
+name = "api"
+mode = "python"
+script = "main.py"
+cwd = "./backend"
+env = { PYTHONPATH = ".", LOG_LEVEL = "info" }
+tags = ["backend"]
+max_memory_mb = 256
+
+[apps.health_check]
+http_url = "http://localhost:8000/health"
+interval_secs = 30
+
+[[apps]]
+name = "celery-worker"
+mode = "cmd"
+script = "celery"
+args = ["-A", "tasks", "worker", "--loglevel=info"]
+cwd = "./backend"
+depends_on = ["api"]
+env = { REDIS_URL = "redis://localhost:6379" }
+tags = ["backend", "worker"]
+restart_cron = "0 3 * * *"

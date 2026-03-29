@@ -1,8 +1,11 @@
 //! Command implementations
 
+pub mod backup;
 pub mod check;
+pub mod completions;
 pub mod cosmos_status;
 pub mod deploy;
+pub mod diff;
 pub mod env_cmd;
 pub mod init;
 pub mod delete;
