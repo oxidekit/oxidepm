@@ -1,9 +1,11 @@
 //! Startup command implementation
 
 use anyhow::Result;
+use std::fs;
+use std::process::Command;
 
 use crate::cli::StartupTarget;
-use crate::output::{print_info, print_success};
+use crate::output::{print_info, print_success, print_error};
 
 pub fn execute(target: Option<StartupTarget>) -> Result<()> {
     let target = target.unwrap_or_else(|| {
@@ -22,17 +24,24 @@ pub fn execute(target: Option<StartupTarget>) -> Result<()> {
     });
 
     match target {
-        StartupTarget::Systemd => print_systemd_instructions(),
-        StartupTarget::Launchd => print_launchd_instructions(),
+        StartupTarget::Systemd => install_systemd(),
+        StartupTarget::Launchd => install_launchd(),
     }
-
-    Ok(())
 }
 
-fn print_systemd_instructions() {
+fn install_systemd() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_default();
     let binary = std::env::current_exe().unwrap_or_default();
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+    let unit_path = "/etc/systemd/system/oxidepmd.service";
+
+    // Check if already installed
+    if std::path::Path::new(unit_path).exists() {
+        print_success("Already configured (systemd unit exists)");
+        // Make sure it's enabled
+        let _ = Command::new("sudo").args(["systemctl", "enable", "oxidepmd"]).output();
+        return Ok(());
+    }
 
     let unit = format!(
         r#"[Unit]
@@ -55,20 +64,66 @@ WantedBy=multi-user.target
         home = home.display(),
     );
 
-    print_info("Systemd unit file:");
+    println!("Installing systemd service...");
+
+    // Write to temp file
+    let tmp_path = "/tmp/oxidepmd.service";
+    fs::write(tmp_path, &unit)?;
+
+    // Copy with sudo
+    let status = Command::new("sudo")
+        .args(["cp", tmp_path, unit_path])
+        .status();
+
+    let _ = fs::remove_file(tmp_path);
+
+    match status {
+        Ok(s) if s.success() => {
+            print_success(&format!("Service installed at {}", unit_path));
+        }
+        _ => {
+            print_error("Failed to install service (need sudo)");
+            // Fall back to printing instructions
+            print_info("Install manually:");
+            println!("{}", unit);
+            println!("  sudo cp <file> {}", unit_path);
+            println!("  sudo systemctl daemon-reload");
+            println!("  sudo systemctl enable oxidepmd");
+            return Ok(());
+        }
+    }
+
+    // Reload, enable, start
+    let _ = Command::new("sudo").args(["systemctl", "daemon-reload"]).status();
+    print_success("systemd reloaded");
+
+    let _ = Command::new("sudo").args(["systemctl", "enable", "oxidepmd"]).status();
+    print_success("Enabled (starts on boot)");
+
+    let _ = Command::new("sudo").args(["systemctl", "start", "oxidepmd"]).status();
+    print_success("Started");
+
+    // Save processes
+    let _ = Command::new("oxidepm").args(["save"]).output();
+    print_success("Processes saved");
+
     println!();
-    println!("{}", unit);
-    println!();
-    print_success("To install:");
-    println!("  1. Save to /etc/systemd/system/oxidepmd.service");
-    println!("  2. sudo systemctl daemon-reload");
-    println!("  3. sudo systemctl enable oxidepmd");
-    println!("  4. sudo systemctl start oxidepmd");
+    println!("OxidePM will auto-start on reboot and restore your processes.");
+
+    Ok(())
 }
 
-fn print_launchd_instructions() {
+fn install_launchd() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_default();
     let binary = std::env::current_exe().unwrap_or_default();
+    let plist_dir = home.join("Library/LaunchAgents");
+    let plist_path = plist_dir.join("com.oxidepm.daemon.plist");
+
+    // Check if already installed
+    if plist_path.exists() {
+        print_success("Already configured (launchd plist exists)");
+        return Ok(());
+    }
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -99,13 +154,28 @@ fn print_launchd_instructions() {
         home = home.display(),
     );
 
-    print_info("Launchd plist file:");
+    println!("Installing launchd service...");
+
+    fs::create_dir_all(&plist_dir)?;
+    fs::write(&plist_path, &plist)?;
+    print_success(&format!("Plist installed at {}", plist_path.display()));
+
+    let status = Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            print_success("Loaded into launchd");
+        }
+        _ => {
+            print_error("Failed to load — run manually:");
+            println!("  launchctl load {}", plist_path.display());
+        }
+    }
+
     println!();
-    println!("{}", plist);
-    println!();
-    print_success("To install:");
-    println!(
-        "  1. Save to ~/Library/LaunchAgents/com.oxidepm.daemon.plist"
-    );
-    println!("  2. launchctl load ~/Library/LaunchAgents/com.oxidepm.daemon.plist");
+    println!("OxidePM will auto-start on login.");
+
+    Ok(())
 }
