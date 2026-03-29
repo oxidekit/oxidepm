@@ -14,19 +14,24 @@ A fast, modern process manager for Node.js and Rust applications. Built in Rust 
 
 ## Features
 
-- **Multi-runtime support** - Node.js, npm/pnpm/yarn scripts, Cargo projects, Rust single-file, Cosmos SDK nodes
-- **Cosmos node management** - Relay-until-synced lifecycle, upgrade halt detection, validator health monitoring
-- **Daemon supervision** - Processes persist across terminal sessions
-- **Auto-restart** - Configurable restart policies with crash-loop protection
-- **Watch mode** - Automatic rebuild and restart on file changes
-- **Clustering** - Run multiple instances with automatic port assignment
-- **Health checks** - HTTP, script-based, and Cosmos RPC health monitoring
-- **Graceful reload** - Zero-downtime restarts
-- **Log management** - Rotation, tail, follow, grep filtering
-- **TUI dashboard** - Real-time monitoring with `monit` command
-- **Web API** - REST API + WebSocket for remote management
-- **Telegram alerts** - Notifications for crashes, restarts, memory limits, validator events
-- **Git clone & start** - One command to clone, setup, and run
+- **Multi-runtime support** — Node.js, npm/pnpm/yarn scripts, Cargo projects, Rust single-file, Cosmos SDK nodes
+- **Cosmos node management** — Relay-until-synced lifecycle, upgrade halt detection, double-sign protection
+- **Daemon supervision** — Processes persist across terminal sessions
+- **Auto-restart** — Configurable restart policies with crash-loop protection
+- **Process dependencies** — `depends_on` waits for other processes before starting
+- **Cron restarts** — Schedule periodic restarts via cron expressions
+- **Watch mode** — Automatic rebuild and restart on file changes
+- **Clustering** — Run multiple instances with automatic port assignment
+- **Health checks** — HTTP, script-based, and Cosmos RPC health monitoring
+- **Graceful reload** — Zero-downtime restarts
+- **Log management** — Per-process rotation, gzip compression, tail, follow, grep filtering
+- **TUI dashboard** — Real-time monitoring with `monit` command
+- **Web API + Prometheus** — REST API, WebSocket, and `/metrics` endpoint for Grafana
+- **Multi-channel notifications** — Telegram, Discord, Slack, and generic HTTP webhooks
+- **Self-update** — `oxidepm update` downloads and swaps the latest release
+- **JSON output** — `--json` flag for machine-readable output on all commands
+- **Double-sign protection** — Pre-flight key check + runtime signing sentinel for validators
+- **Git clone & start** — One command to clone, setup, and run
 
 ## Installation
 
@@ -115,7 +120,10 @@ oxidepm stop my-app
 | `notify telegram` | Configure Telegram alerts |
 | `ping` | Check daemon health |
 | `cosmos-status <name>` | Cosmos node sync/lifecycle info |
+| `update [--version X]` | Self-update to latest (or specific) release |
 | `kill` | Stop daemon and all processes |
+
+**Global flags:** `--json` for machine-readable output, `-v` for verbose logging.
 
 **Selectors:** Process name, ID, `all`, or `@tag` for groups.
 
@@ -205,6 +213,13 @@ mode = "node"
 script = "worker.js"
 max_restarts = 5
 restart_delay = 2000
+depends_on = ["api"]              # Wait for API to be running first
+restart_cron = "0 4 * * *"        # Restart daily at 4am
+
+# Log rotation (optional — defaults: 10MB, 5 files, no compression)
+log_max_size = "50mb"
+log_max_files = 10
+log_compress = true
 ```
 
 Start all apps:
@@ -280,6 +295,16 @@ OxidePM detects this pattern and:
 
 The operator then swaps the binary and manually restarts.
 
+### Double-Sign Protection
+
+OxidePM provides two layers of protection against accidental double signing:
+
+**Pre-flight key check:** When `node_mode` is `relay`, `seed`, `sentry`, or `archive`, OxidePM refuses to start if `priv_validator_key.json` is present. This catches the dangerous scenario where someone creates a server snapshot and launches relay nodes without removing the validator key — CometBFT would silently sign blocks with it. The error message suggests moving the key to a backup location.
+
+**Runtime sentinel:** For validators, OxidePM compares the local `priv_validator_state.json` height against the chain's block height. If the chain is advancing past what the local node signed and the node is not catching up, a **Critical** `double_sign_risk` alert fires. This detects when another instance (e.g., from a forgotten snapshot) is signing with the same key.
+
+> The sentinel is safe during migrations: `catching_up: true` skips the check, and fresh nodes with `height: 0` are exempt.
+
 ### Cosmos Status
 
 ```bash
@@ -304,6 +329,7 @@ New event types for validators:
 - `jailed` — Validator jailed (critical)
 - `stale_node` — No new blocks (critical)
 - `upgrade_halted` — Planned upgrade halt (warning)
+- `double_sign_risk` — Another instance may be signing with the same key (critical)
 
 Filter by severity:
 
@@ -340,14 +366,42 @@ oxidepm start ./my-app --setup
 - Cargo: `Cargo.lock` exists
 - All: `.env` file (copies from `.env.example` with `--fix`)
 
-## Telegram Notifications
+## Notifications
+
+OxidePM supports multiple notification channels. Configure in `~/.oxidepm/notify.toml`:
+
+```toml
+# Events to notify on (empty = all events)
+events = ["crash", "restart", "jailed", "double_sign_risk", "upgrade_halted"]
+min_severity = "warning"  # info | warning | critical
+
+# Telegram
+[telegram]
+bot_token_env = "OXIDEPM_TELEGRAM_TOKEN"  # Preferred: reads from env var
+chat_id = "-100123456789"
+
+# Discord (webhook URL from channel settings → Integrations → Webhooks)
+[discord]
+webhook_url = "https://discord.com/api/webhooks/123456/abcdef..."
+
+# Slack (incoming webhook URL)
+[slack]
+webhook_url = "https://hooks.slack.com/services/T00/B00/xxx..."
+
+# Generic HTTP webhook (POST JSON to any URL)
+[webhook]
+url = "https://your-server.com/alerts"
+secret = "your-hmac-secret"  # Sent as X-Webhook-Secret header
+```
+
+CLI configuration:
 
 ```bash
 # Configure Telegram bot
 oxidepm notify telegram --token YOUR_BOT_TOKEN --chat YOUR_CHAT_ID
 
 # Set which events to notify
-oxidepm notify events --set start,stop,crash,restart,memory_limit
+oxidepm notify events --set crash,restart,jailed,double_sign_risk
 
 # Test notifications
 oxidepm notify test
@@ -356,7 +410,7 @@ oxidepm notify test
 oxidepm notify status
 ```
 
-## Web API
+## Web API & Prometheus
 
 Start the API server:
 
@@ -366,17 +420,41 @@ oxidepm web --port 9615 --api-key your-secret-key
 
 ### Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/status` | GET | All processes status |
-| `/api/process/:id` | GET | Single process details |
-| `/api/process/:id/start` | POST | Start process |
-| `/api/process/:id/stop` | POST | Stop process |
-| `/api/process/:id/restart` | POST | Restart process |
-| `/api/logs/:id` | GET | Process logs |
-| `/ws` | WebSocket | Real-time updates |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/health` | GET | No | Health check + version |
+| `/metrics` | GET | No | Prometheus metrics (text format) |
+| `/api/processes` | GET | Yes | All processes status |
+| `/api/processes/:selector` | GET | Yes | Single process details |
+| `/api/processes/:selector/stop` | POST | Yes | Stop process |
+| `/api/processes/:selector/restart` | POST | Yes | Restart process |
+| `/api/processes/:selector/logs` | GET | Yes | Process logs |
+| `/api/save` | POST | Yes | Save process list |
+| `/ws` | WebSocket | Yes | Real-time updates |
 
 Authentication via `X-API-Key` header when `--api-key` is set.
+
+### Prometheus Metrics
+
+The `/metrics` endpoint exports in Prometheus text exposition format:
+
+```
+oxidepm_processes_total 3
+oxidepm_process_up{name="monod",id="0",mode="cosmos"} 1
+oxidepm_process_uptime_seconds{name="monod",id="0",mode="cosmos"} 86400
+oxidepm_process_restarts_total{name="monod",id="0",mode="cosmos"} 0
+oxidepm_process_memory_bytes{name="monod",id="0",mode="cosmos"} 524288000
+oxidepm_process_cpu_percent{name="monod",id="0",mode="cosmos"} 2.30
+```
+
+Add to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'oxidepm'
+    static_configs:
+      - targets: ['localhost:9615']
+```
 
 ## TUI Dashboard
 
@@ -411,9 +489,9 @@ oxidepm (CLI) ──IPC──> oxidepmd (daemon)
 - `oxidepm-logs` - Log rotation + streaming
 - `oxidepm-db` - SQLite persistence
 - `oxidepm-health` - Health check monitoring (HTTP, script, Cosmos RPC)
-- `oxidepm-web` - REST API + WebSocket
+- `oxidepm-web` - REST API + WebSocket + Prometheus metrics
 - `oxidepm-tui` - Terminal UI (ratatui)
-- `oxidepm-notify` - Telegram notifications with severity filtering
+- `oxidepm-notify` - Notifications (Telegram, Discord, Slack, webhooks)
 
 ## Data Directory
 
@@ -450,7 +528,7 @@ All data stored in `~/.oxidepm/`:
 | Node.js apps | ✅ | ✅ | Both support Node.js natively |
 | npm/yarn/pnpm scripts | ✅ | ✅ | Run package.json scripts |
 | Rust/Cargo projects | ✅ | ❌ | OxidePM auto-builds and runs Cargo projects |
-| Cosmos SDK nodes | ✅ | ❌ | Lifecycle, upgrade halt detection, validator monitoring |
+| Cosmos SDK nodes | ✅ | ❌ | Lifecycle, upgrade halt, double-sign protection |
 | Generic commands | ✅ | ✅ | Run any shell command |
 | **Process Management** |
 | Daemon supervision | ✅ | ✅ | Processes persist across terminal sessions |
@@ -468,13 +546,22 @@ All data stored in `~/.oxidepm/`:
 | **Monitoring** |
 | Status table | ✅ | ✅ | CPU, memory, uptime display |
 | TUI dashboard | ✅ | ✅ | Real-time terminal UI |
-| Log management | ✅ | ✅ | Rotation, tail, follow, grep |
+| Log management | ✅ | ✅ | Per-process rotation, gzip compression, follow, grep |
 | Health checks (HTTP) | ✅ | 💰 | PM2 requires Plus subscription |
 | Health checks (Script) | ✅ | 💰 | PM2 requires Plus subscription |
+| Prometheus metrics | ✅ | 💰 | PM2 requires Plus subscription |
 | **Integrations** |
 | Web API / REST | ✅ | 💰 | PM2 requires Plus subscription |
 | WebSocket real-time | ✅ | 💰 | PM2 requires Plus subscription |
-| Telegram alerts | ✅ | ❌ | Native Telegram bot integration |
+| Telegram alerts | ✅ | ❌ | Native integration |
+| Discord/Slack webhooks | ✅ | ❌ | Native webhook integration |
+| Generic HTTP webhooks | ✅ | ❌ | POST JSON to any URL |
+| JSON output (`--json`) | ✅ | ✅ | Machine-readable output |
+| Self-update | ✅ | ✅ | `oxidepm update` |
+| **Advanced** |
+| Process dependencies | ✅ | ❌ | `depends_on = ["postgres"]` |
+| Cron restarts | ✅ | ❌ | `restart_cron = "0 4 * * *"` |
+| Double-sign protection | ✅ | ❌ | Pre-flight + runtime sentinel |
 | Systemd/launchd | ✅ | ✅ | Auto-start on boot |
 | **Configuration** |
 | TOML config | ✅ | ❌ | Clean, readable config format |
