@@ -84,7 +84,10 @@ jobs:
           EOF
 
           dpkg-deb --build "${PKG_DIR}"
-          mv "${PKG_DIR}.deb" "oxidepm_${VERSION}_${ARCH}.deb"
+          # dpkg-deb creates PKG_DIR.deb — rename only if needed
+          if [ "${PKG_DIR}.deb" != "oxidepm_${VERSION}_${ARCH}.deb" ]; then
+            mv "${PKG_DIR}.deb" "oxidepm_${VERSION}_${ARCH}.deb"
+          fi
 
       - name: Build .rpm package
         if: matrix.deb_arch == 'amd64'
