@@ -497,26 +497,31 @@ impl Supervisor {
     }
 
     /// Get info for a single app
+    ///
+    /// Prefers the in-memory spec over the DB spec because the database
+    /// does not persist all fields (e.g., cosmos_config, hooks, tags).
     pub async fn show(&self, selector: &Selector) -> Result<Option<AppInfo>> {
-        let spec = match selector {
+        // First try to find the app in the database to get the ID
+        let db_spec = match selector {
             Selector::All => return Ok(None),
             Selector::ById(id) => self.db.apps().get_by_id(*id).await?,
             Selector::ByName(name) => self.db.apps().get_by_name(name).await?,
             Selector::ByTag(tag) => {
-                // For tags, return the first matching app
                 let apps = self.db.apps().get_all().await?;
                 apps.into_iter().find(|app| app.tags.contains(tag))
             }
         };
 
-        if let Some(spec) = spec {
+        if let Some(db_spec) = db_spec {
+            let id = db_spec.id;
             let processes = self.processes.read();
-            let state = if let Some(proc) = processes.get(&spec.id) {
-                proc.state.clone()
+            if let Some(proc) = processes.get(&id) {
+                // Prefer the in-memory spec — it has all fields (cosmos_config, hooks, etc.)
+                Ok(Some(AppInfo::new(proc.spec.clone(), proc.state.clone())))
             } else {
-                RunState::new(spec.id)
-            };
-            Ok(Some(AppInfo::new(spec, state)))
+                // Process not in memory (stopped) — fall back to DB spec
+                Ok(Some(AppInfo::new(db_spec, RunState::new(id))))
+            }
         } else {
             Ok(None)
         }
@@ -570,15 +575,21 @@ impl Supervisor {
     }
 
     /// Save current process list
+    ///
+    /// Serializes the in-memory specs (not DB) to preserve all fields
+    /// that the database doesn't persist (cosmos_config, hooks, tags, etc.).
     pub async fn save(&self) -> Result<usize> {
-        let apps = self.db.apps().get_all().await?;
+        let specs: Vec<AppSpec> = {
+            let processes = self.processes.read();
+            processes.values().map(|p| p.spec.clone()).collect()
+        };
         let path = constants::saved_path();
 
-        let json = serde_json::to_string_pretty(&apps)?;
+        let json = serde_json::to_string_pretty(&specs)?;
         std::fs::write(&path, json)?;
 
-        info!("Saved {} apps to {}", apps.len(), path.display());
-        Ok(apps.len())
+        info!("Saved {} apps to {}", specs.len(), path.display());
+        Ok(specs.len())
     }
 
     /// Resurrect saved processes
