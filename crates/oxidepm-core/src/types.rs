@@ -526,6 +526,8 @@ pub enum AppMode {
     Yarn,
     Cargo,
     Rust,
+    Python,
+    Go,
     Cosmos,
 }
 
@@ -535,6 +537,8 @@ impl AppMode {
         match ext.to_lowercase().as_str() {
             "rs" => Some(AppMode::Rust),
             "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" => Some(AppMode::Node),
+            "py" => Some(AppMode::Python),
+            "go" => Some(AppMode::Go),
             _ => None,
         }
     }
@@ -542,13 +546,20 @@ impl AppMode {
     /// Detect mode from path
     pub fn detect(path: &std::path::Path) -> Option<Self> {
         if path.is_dir() {
-            // Check for Cargo.toml
             if path.join("Cargo.toml").exists() {
                 return Some(AppMode::Cargo);
             }
-            // Check for package.json
             if path.join("package.json").exists() {
                 return Some(AppMode::Npm);
+            }
+            if path.join("requirements.txt").exists()
+                || path.join("pyproject.toml").exists()
+                || path.join("setup.py").exists()
+            {
+                return Some(AppMode::Python);
+            }
+            if path.join("go.mod").exists() {
+                return Some(AppMode::Go);
             }
             return None;
         }
@@ -568,6 +579,8 @@ impl AppMode {
             AppMode::Yarn => "yarn",
             AppMode::Cargo => "cargo",
             AppMode::Rust => "rust",
+            AppMode::Python => "python",
+            AppMode::Go => "go",
             AppMode::Cosmos => "cosmos",
         }
     }
@@ -585,6 +598,8 @@ impl FromStr for AppMode {
             "yarn" => Ok(AppMode::Yarn),
             "cargo" => Ok(AppMode::Cargo),
             "rust" => Ok(AppMode::Rust),
+            "python" | "py" => Ok(AppMode::Python),
+            "go" | "golang" => Ok(AppMode::Go),
             "cosmos" => Ok(AppMode::Cosmos),
             _ => Err(Error::InvalidMode(s.to_string())),
         }
@@ -840,7 +855,9 @@ mod tests {
         assert_eq!(AppMode::from_extension("js"), Some(AppMode::Node));
         assert_eq!(AppMode::from_extension("mjs"), Some(AppMode::Node));
         assert_eq!(AppMode::from_extension("ts"), Some(AppMode::Node));
-        assert_eq!(AppMode::from_extension("py"), None);
+        assert_eq!(AppMode::from_extension("py"), Some(AppMode::Python));
+        assert_eq!(AppMode::from_extension("go"), Some(AppMode::Go));
+        assert_eq!(AppMode::from_extension("rb"), None);
     }
 
     #[test]

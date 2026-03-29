@@ -2,6 +2,9 @@
 
 pub mod check;
 pub mod cosmos_status;
+pub mod deploy;
+pub mod env_cmd;
+pub mod init;
 pub mod delete;
 pub mod describe;
 pub mod flush;
@@ -17,6 +20,7 @@ pub mod start;
 pub mod startup;
 pub mod status;
 pub mod stop;
+pub mod top;
 pub mod update;
 
 use oxidepm_core::constants;

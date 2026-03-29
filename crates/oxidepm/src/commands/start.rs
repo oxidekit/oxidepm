@@ -458,7 +458,7 @@ fn build_app_spec(args: &StartArgs) -> Result<AppSpec> {
         // Health checks
         health_check: None,
         // Memory limit
-        max_memory_mb: None,
+        max_memory_mb: args.max_memory,
         // Startup delay
         startup_delay_ms: args.startup_delay,
         // Environment inheritance flag (for reference)

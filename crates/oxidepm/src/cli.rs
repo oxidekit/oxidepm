@@ -133,6 +133,21 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
+
+    /// Initialize a config file by scanning the project directory
+    Init {
+        /// Project directory to scan (default: current directory)
+        dir: Option<String>,
+    },
+
+    /// Deploy to a remote server via SSH (pull + restart)
+    Deploy(DeployArgs),
+
+    /// Manage process environment variables
+    Env(EnvArgs),
+
+    /// Real-time process resource monitor (like htop for oxidepm)
+    Top,
 }
 
 #[derive(Args)]
@@ -247,6 +262,10 @@ pub struct StartArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
+    /// Maximum memory in MB before auto-restart (e.g., 512)
+    #[arg(long)]
+    pub max_memory: Option<u64>,
+
     /// Maximum uptime before auto-restart (e.g., "1h", "24h", "30m")
     #[arg(long, value_parser = parse_duration)]
     pub max_uptime: Option<u64>,
@@ -343,6 +362,62 @@ pub struct CheckArgs {
     /// Set environment variable (can be used multiple times, KEY=VALUE format)
     #[arg(long = "set-env", value_parser = parse_env)]
     pub set_envs: Vec<(String, String)>,
+}
+
+#[derive(Args)]
+pub struct DeployArgs {
+    /// Remote host (user@host or SSH alias)
+    pub host: String,
+
+    /// Remote project directory
+    #[arg(long)]
+    pub cwd: Option<String>,
+
+    /// Git branch to pull (default: current branch)
+    #[arg(long)]
+    pub branch: Option<String>,
+
+    /// Process name to restart after pull (default: all)
+    #[arg(long)]
+    pub restart: Option<String>,
+
+    /// Run a post-deploy command on the remote (e.g., "npm run build")
+    #[arg(long)]
+    pub post: Option<String>,
+
+    /// Dry run: show what would be done
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args)]
+pub struct EnvArgs {
+    #[command(subcommand)]
+    pub command: EnvCommand,
+}
+
+#[derive(Subcommand)]
+pub enum EnvCommand {
+    /// List environment variables for a process
+    List {
+        /// Process name or id
+        selector: String,
+    },
+    /// Set an environment variable for a process
+    Set {
+        /// Process name or id
+        selector: String,
+        /// KEY=VALUE pair
+        #[arg(value_parser = parse_env)]
+        pair: (String, String),
+    },
+    /// Remove an environment variable
+    Unset {
+        /// Process name or id
+        selector: String,
+        /// Variable name to remove
+        key: String,
+    },
 }
 
 fn parse_env(s: &str) -> Result<(String, String), String> {

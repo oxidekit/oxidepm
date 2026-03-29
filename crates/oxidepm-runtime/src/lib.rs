@@ -3,16 +3,20 @@
 pub mod cargo;
 pub mod cmd;
 pub mod cosmos;
+pub mod go;
 pub mod node;
 pub mod npm;
+pub mod python;
 pub mod rust;
 pub mod traits;
 
 pub use cargo::CargoRunner;
 pub use cmd::CmdRunner;
 pub use cosmos::CosmosRunner;
+pub use go::GoRunner;
 pub use node::NodeRunner;
 pub use npm::NpmRunner;
+pub use python::PythonRunner;
 pub use rust::RustRunner;
 pub use traits::{PrepareResult, Runner, RunningProcess};
 
@@ -28,6 +32,8 @@ pub fn get_runner(mode: AppMode) -> Box<dyn Runner> {
         AppMode::Yarn => Box::new(NpmRunner::new("yarn")),
         AppMode::Cargo => Box::new(CargoRunner),
         AppMode::Rust => Box::new(RustRunner),
+        AppMode::Python => Box::new(PythonRunner),
+        AppMode::Go => Box::new(GoRunner),
         AppMode::Cosmos => Box::new(CosmosRunner),
     }
 }

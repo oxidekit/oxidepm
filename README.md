@@ -1,6 +1,6 @@
 # OxidePM
 
-A fast, modern process manager for Node.js and Rust applications. Built in Rust for reliability and performance.
+A fast, modern process manager for Node.js, Python, Go, Rust, and Cosmos SDK applications. Built in Rust for reliability and performance.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@ A fast, modern process manager for Node.js and Rust applications. Built in Rust 
 
 ## Features
 
-- **Multi-runtime support** — Node.js, npm/pnpm/yarn scripts, Cargo projects, Rust single-file, Cosmos SDK nodes
+- **Multi-runtime support** — Node.js, Python, Go, Cargo, Rust, npm/pnpm/yarn, Cosmos SDK nodes
 - **Cosmos node management** — Relay-until-synced lifecycle, upgrade halt detection, double-sign protection
 - **Daemon supervision** — Processes persist across terminal sessions
 - **Auto-restart** — Configurable restart policies with crash-loop protection
@@ -39,6 +39,20 @@ A fast, modern process manager for Node.js and Rust applications. Built in Rust 
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/prod/scripts/install.sh | sh
+```
+
+### APT (Debian/Ubuntu)
+
+Download the `.deb` from the [Releases page](https://github.com/oxidekit/oxidepm/releases):
+
+```bash
+# x86_64
+wget https://github.com/oxidekit/oxidepm/releases/latest/download/oxidepm_0.3.0_amd64.deb
+sudo dpkg -i oxidepm_0.3.0_amd64.deb
+
+# ARM64
+wget https://github.com/oxidekit/oxidepm/releases/latest/download/oxidepm_0.3.0_arm64.deb
+sudo dpkg -i oxidepm_0.3.0_arm64.deb
 ```
 
 ### Homebrew (macOS/Linux)
@@ -77,11 +91,20 @@ Pre-built binaries available on the [Releases page](https://github.com/oxidekit/
 # Start a Node.js app
 oxidepm start app.js
 
+# Start a Python app (auto-detects virtualenv)
+oxidepm start app.py
+
+# Start a Go project
+oxidepm start ./my-go-project
+
 # Start from a directory (auto-detects project type)
 oxidepm start ./my-project
 
-# Start with watch mode
-oxidepm start ./my-project --watch
+# Start with watch mode and memory limit
+oxidepm start ./my-project --watch --max-memory 512
+
+# Initialize config by scanning a project
+oxidepm init ./my-project
 
 # Clone and start from GitHub
 oxidepm start --git https://github.com/user/repo
@@ -89,8 +112,14 @@ oxidepm start --git https://github.com/user/repo
 # View status
 oxidepm status
 
-# View logs
+# Real-time resource monitor
+oxidepm top
+
+# View logs (with follow)
 oxidepm logs my-app -f
+
+# Deploy to production
+oxidepm deploy user@server --cwd /srv/myapp --post "npm run build"
 
 # Stop a process
 oxidepm stop my-app
@@ -121,6 +150,10 @@ oxidepm stop my-app
 | `ping` | Check daemon health |
 | `cosmos-status <name>` | Cosmos node sync/lifecycle info |
 | `update [--version X]` | Self-update to latest (or specific) release |
+| `init [dir]` | Scan project and generate config file |
+| `deploy <host>` | SSH deploy: pull code + restart processes |
+| `env list/set/unset` | Manage process environment variables |
+| `top` | Real-time process resource monitor |
 | `kill` | Stop daemon and all processes |
 
 **Global flags:** `--json` for machine-readable output, `-v` for verbose logging.
@@ -229,6 +262,52 @@ oxidepm start oxidepm.config.toml
 ```
 
 Also supports YAML and JSON formats.
+
+## Project Init
+
+Scan a directory and auto-generate a config file:
+
+```bash
+oxidepm init                  # Scan current directory
+oxidepm init ./my-project     # Scan specific directory
+```
+
+Detects Node.js (npm/pnpm/yarn), Cargo, Python, and Go projects. Generates `oxidepm.config.toml` with sensible defaults.
+
+## Deploy
+
+Push code to a remote server and restart processes:
+
+```bash
+# Basic: pull latest code and restart all processes
+oxidepm deploy user@myserver --cwd /srv/myapp
+
+# With build step and specific process
+oxidepm deploy user@myserver --cwd /srv/myapp --post "npm run build" --restart api
+
+# Specify branch
+oxidepm deploy user@myserver --cwd /srv/myapp --branch main
+
+# Dry run (show commands without executing)
+oxidepm deploy user@myserver --cwd /srv/myapp --dry-run
+```
+
+Requires SSH key authentication (no password prompts).
+
+## Environment Management
+
+```bash
+# List environment variables for a process
+oxidepm env list my-app
+
+# Set a variable (requires restart to take effect)
+oxidepm env set my-app NODE_ENV=production
+
+# Remove a variable
+oxidepm env unset my-app DEBUG
+```
+
+Sensitive values (containing SECRET, TOKEN, KEY, PASSWORD) are automatically masked in output.
 
 ## Cosmos Node Management
 
@@ -527,6 +606,8 @@ All data stored in `~/.oxidepm/`:
 | **Runtime Support** |
 | Node.js apps | ✅ | ✅ | Both support Node.js natively |
 | npm/yarn/pnpm scripts | ✅ | ✅ | Run package.json scripts |
+| Python apps | ✅ | ❌ | Auto-detects virtualenv, unbuffered output |
+| Go projects | ✅ | ❌ | `go run` with module detection |
 | Rust/Cargo projects | ✅ | ❌ | OxidePM auto-builds and runs Cargo projects |
 | Cosmos SDK nodes | ✅ | ❌ | Lifecycle, upgrade halt, double-sign protection |
 | Generic commands | ✅ | ✅ | Run any shell command |
@@ -541,6 +622,10 @@ All data stored in `~/.oxidepm/`:
 | Port conflict detection | ✅ | ❌ | Suggests alternative port when conflict detected |
 | Preflight checks | ✅ | ❌ | Validates deps before starting |
 | Git clone & start | ✅ | ❌ | One command to clone, setup, and run |
+| Project init | ✅ | ❌ | `oxidepm init` scans and generates config |
+| SSH deploy | ✅ | ✅ | `oxidepm deploy user@host` |
+| Real-time top | ✅ | ❌ | `oxidepm top` — htop for processes |
+| Env management | ✅ | ✅ | `oxidepm env list/set/unset` |
 | Auto-setup (`--setup`) | ✅ | ❌ | Installs deps, creates .env from template |
 | Event hooks | ✅ | ✅ | Run scripts on start/stop/crash |
 | **Monitoring** |
@@ -587,8 +672,11 @@ All data stored in `~/.oxidepm/`:
 ## Requirements
 
 - Linux or macOS (Windows not supported yet)
-- Rust 1.75+ (for building)
-- Node.js (for Node.js apps)
+- Rust 1.75+ (only for building from source)
+- Runtimes only needed for their respective app types:
+  - Node.js for Node/npm/pnpm/yarn apps
+  - Python 3 for Python apps
+  - Go 1.21+ for Go apps
 
 ## License
 

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 jobs:
   build-linux:
@@ -16,7 +17,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
           - target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -32,16 +35,101 @@ jobs:
       - name: Build with cross
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package tarball
         run: |
           cd target/${{ matrix.target }}/release
           tar czvf ../../../oxidepm-${{ matrix.target }}.tar.gz oxidepm oxidepmd
 
-      - name: Upload artifact
+      - name: Build .deb package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH="${{ matrix.deb_arch }}"
+          PKG_DIR="oxidepm_${VERSION}_${ARCH}"
+
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/usr/lib/systemd/user"
+
+          cp target/${{ matrix.target }}/release/oxidepm "${PKG_DIR}/usr/bin/"
+          cp target/${{ matrix.target }}/release/oxidepmd "${PKG_DIR}/usr/bin/"
+
+          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+          Package: oxidepm
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: OxideKit <hello@oxidekit.com>
+          Description: Fast process manager for Node.js, Rust, Python, Go, and Cosmos SDK
+           OxidePM is a PM2 alternative built in Rust. Features include auto-restart,
+           clustering, health checks, log rotation, Prometheus metrics, Telegram/Discord
+           notifications, cron restarts, process dependencies, and Cosmos SDK node management.
+          Homepage: https://github.com/oxidekit/oxidepm
+          EOF
+
+          # systemd user service for the daemon
+          cat > "${PKG_DIR}/usr/lib/systemd/user/oxidepmd.service" << EOF
+          [Unit]
+          Description=OxidePM Process Manager Daemon
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/oxidepmd
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=default.target
+          EOF
+
+          dpkg-deb --build "${PKG_DIR}"
+          mv "${PKG_DIR}.deb" "oxidepm_${VERSION}_${ARCH}.deb"
+
+      - name: Build .rpm package
+        if: matrix.deb_arch == 'amd64'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sudo apt-get install -y rpm
+
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cp target/${{ matrix.target }}/release/oxidepm rpmbuild/SOURCES/
+          cp target/${{ matrix.target }}/release/oxidepmd rpmbuild/SOURCES/
+
+          cat > rpmbuild/SPECS/oxidepm.spec << 'SPEC'
+          Name: oxidepm
+          Version: %(echo $VERSION)
+          Release: 1
+          Summary: Fast process manager for Node.js, Rust, Python, Go, and Cosmos SDK
+          License: MIT
+          URL: https://github.com/oxidekit/oxidepm
+
+          %description
+          OxidePM is a PM2 alternative built in Rust.
+
+          %install
+          mkdir -p %{buildroot}/usr/bin
+          cp %{_sourcedir}/oxidepm %{buildroot}/usr/bin/
+          cp %{_sourcedir}/oxidepmd %{buildroot}/usr/bin/
+
+          %files
+          /usr/bin/oxidepm
+          /usr/bin/oxidepmd
+          SPEC
+
+          VERSION="${VERSION}" rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/oxidepm.spec || true
+
+      - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
           name: oxidepm-${{ matrix.target }}
           path: oxidepm-${{ matrix.target }}.tar.gz
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxidepm-deb-${{ matrix.deb_arch }}
+          path: "*.deb"
 
   build-macos:
     name: Build macOS ${{ matrix.target }}
@@ -86,20 +174,24 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create checksums
+      - name: Collect release files
         run: |
           cd artifacts
+          # Move all files to top level
           for dir in */; do
-            mv "$dir"/*.tar.gz .
+            mv "$dir"* . 2>/dev/null || true
           done
-          sha256sum *.tar.gz > checksums.txt
+          rmdir */ 2>/dev/null || true
+          sha256sum *.tar.gz *.deb 2>/dev/null > checksums.txt
           cat checksums.txt
+          ls -la
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             artifacts/*.tar.gz
+            artifacts/*.deb
             artifacts/checksums.txt
           generate_release_notes: true
         env:
