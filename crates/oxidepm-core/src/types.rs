@@ -211,6 +211,12 @@ pub struct AppSpec {
     // Restart mode (on-crash, always, never)
     #[serde(default)]
     pub restart_mode: RestartMode,
+    // Process dependencies: wait for these processes to be online before starting
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    // Cron expression for scheduled restarts (e.g., "0 4 * * *" for daily at 4am)
+    #[serde(default)]
+    pub restart_cron: Option<String>,
     // Log rotation: max file size in bytes (default: 10MB)
     #[serde(default)]
     pub log_max_size: Option<u64>,
@@ -269,6 +275,8 @@ impl AppSpec {
             max_uptime_secs: None,
             cosmos_config: None,
             restart_mode: RestartMode::default(),
+            depends_on: Vec::new(),
+            restart_cron: None,
             log_max_size: None,
             log_max_files: None,
             log_compress: false,

@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         Commands::Describe { target } => describe::execute(&target).await,
         Commands::Check(args) => check::execute(args).await,
         Commands::CosmosStatus { selector } => cosmos_status::run(&selector).await,
+        Commands::Update { version } => update::execute(version).await,
     };
 
     if let Err(e) = result {

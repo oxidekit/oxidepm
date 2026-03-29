@@ -17,6 +17,7 @@ pub mod start;
 pub mod startup;
 pub mod status;
 pub mod stop;
+pub mod update;
 
 use oxidepm_core::constants;
 use oxidepm_ipc::IpcClient;

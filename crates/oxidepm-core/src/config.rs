@@ -180,6 +180,12 @@ pub struct AppConfig {
     /// Require SHA256 checksum verification for auto-upgrade (default: true)
     #[serde(default = "default_true")]
     pub auto_upgrade_require_checksum: bool,
+    // ── Process dependencies ──
+    /// Wait for these processes to be online before starting (by name)
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Cron expression for scheduled restarts (e.g., "0 4 * * *" for daily at 4am)
+    pub restart_cron: Option<String>,
     // ── Log rotation settings ──
     /// Max log file size before rotation (e.g., "10mb", "500kb", or bytes)
     pub log_max_size: Option<String>,
@@ -424,6 +430,8 @@ impl AppConfig {
             max_uptime_secs: self.max_uptime_secs,
             cosmos_config,
             restart_mode,
+            depends_on: self.depends_on,
+            restart_cron: self.restart_cron,
             log_max_size,
             log_max_files: self.log_max_files,
             log_compress: self.log_compress,
@@ -661,6 +669,8 @@ apps:
             auto_upgrade: false,
             auto_upgrade_source: None,
             auto_upgrade_require_checksum: true,
+            depends_on: vec![],
+            restart_cron: None,
             log_max_size: None,
             log_max_files: None,
             log_compress: false,
@@ -736,6 +746,8 @@ apps:
             auto_upgrade: false,
             auto_upgrade_source: None,
             auto_upgrade_require_checksum: true,
+            depends_on: vec![],
+            restart_cron: None,
             log_max_size: None,
             log_max_files: None,
             log_compress: false,
@@ -854,5 +866,94 @@ apps:
         let config = ConfigFile::load(file.path()).unwrap();
         assert_eq!(config.apps.len(), 1);
         assert_eq!(config.apps[0].name, "test");
+    }
+
+    #[test]
+    fn test_parse_size_bytes() {
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_parse_size_kb() {
+        assert_eq!(parse_size("500kb").unwrap(), 500 * 1024);
+        assert_eq!(parse_size("500k").unwrap(), 500 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_mb() {
+        assert_eq!(parse_size("10mb").unwrap(), 10 * 1024 * 1024);
+        assert_eq!(parse_size("10m").unwrap(), 10 * 1024 * 1024);
+        assert_eq!(parse_size("10MB").unwrap(), 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_gb() {
+        assert_eq!(parse_size("1gb").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_invalid() {
+        assert!(parse_size("abc").is_err());
+        assert!(parse_size("10xyz").is_err());
+    }
+
+    #[test]
+    fn test_config_with_log_rotation() {
+        let content = r#"
+[[apps]]
+name = "monod"
+mode = "cosmos"
+binary = "/usr/local/bin/monod"
+args = ["start"]
+cosmos_mode = "validator"
+chain_id = "mono_6940-1"
+log_max_size = "50mb"
+log_max_files = 10
+log_compress = true
+"#;
+        let mut file = NamedTempFile::with_suffix(".toml").unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+
+        let config = ConfigFile::load(file.path()).unwrap();
+        let spec = config.into_specs(Path::new("/")).unwrap();
+        assert_eq!(spec[0].log_max_size, Some(50 * 1024 * 1024));
+        assert_eq!(spec[0].log_max_files, Some(10));
+        assert!(spec[0].log_compress);
+    }
+
+    #[test]
+    fn test_config_with_depends_on() {
+        let content = r#"
+[[apps]]
+name = "indexer"
+script = "indexer.js"
+depends_on = ["postgres", "redis"]
+"#;
+        let mut file = NamedTempFile::with_suffix(".toml").unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+
+        let config = ConfigFile::load(file.path()).unwrap();
+        let spec = config.into_specs(Path::new("/")).unwrap();
+        assert_eq!(spec[0].depends_on, vec!["postgres", "redis"]);
+    }
+
+    #[test]
+    fn test_config_with_restart_cron() {
+        let content = r#"
+[[apps]]
+name = "monod"
+mode = "cosmos"
+binary = "/usr/local/bin/monod"
+args = ["start"]
+cosmos_mode = "relay"
+chain_id = "mono_6940-1"
+restart_cron = "0 4 * * *"
+"#;
+        let mut file = NamedTempFile::with_suffix(".toml").unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+
+        let config = ConfigFile::load(file.path()).unwrap();
+        let spec = config.into_specs(Path::new("/")).unwrap();
+        assert_eq!(spec[0].restart_cron, Some("0 4 * * *".to_string()));
     }
 }

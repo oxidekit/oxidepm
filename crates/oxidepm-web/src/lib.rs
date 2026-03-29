@@ -164,7 +164,8 @@ pub fn create_router_with_cors(state: AppState, cors_origin: Option<String>) -> 
 
     // Public routes (no auth required)
     let public_routes = Router::new()
-        .route("/api/health", get(health_check));
+        .route("/api/health", get(health_check))
+        .route("/metrics", get(prometheus_metrics));
 
     Router::new()
         .merge(public_routes)
@@ -208,6 +209,71 @@ async fn health_check() -> impl IntoResponse {
         "status": "healthy",
         "version": env!("CARGO_PKG_VERSION")
     })))
+}
+
+/// Prometheus /metrics endpoint — returns process metrics in text exposition format
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let response = state.client.send(&Request::Status).await;
+
+    let apps = match response {
+        Ok(Response::Status { apps }) => apps,
+        _ => vec![],
+    };
+
+    let mut output = String::new();
+
+    // Help and type declarations
+    output.push_str("# HELP oxidepm_process_up Whether the process is running (1) or not (0)\n");
+    output.push_str("# TYPE oxidepm_process_up gauge\n");
+    output.push_str("# HELP oxidepm_process_uptime_seconds Process uptime in seconds\n");
+    output.push_str("# TYPE oxidepm_process_uptime_seconds gauge\n");
+    output.push_str("# HELP oxidepm_process_restarts_total Total number of process restarts\n");
+    output.push_str("# TYPE oxidepm_process_restarts_total counter\n");
+    output.push_str("# HELP oxidepm_process_memory_bytes Process memory usage in bytes\n");
+    output.push_str("# TYPE oxidepm_process_memory_bytes gauge\n");
+    output.push_str("# HELP oxidepm_process_cpu_percent Process CPU usage percentage\n");
+    output.push_str("# TYPE oxidepm_process_cpu_percent gauge\n");
+    output.push_str("# HELP oxidepm_processes_total Total number of managed processes\n");
+    output.push_str("# TYPE oxidepm_processes_total gauge\n");
+
+    // Total processes
+    output.push_str(&format!("oxidepm_processes_total {}\n", apps.len()));
+
+    for app in &apps {
+        let name = &app.spec.name;
+        let id = app.spec.id;
+        let mode = app.spec.mode.as_str();
+        let labels = format!("name=\"{}\",id=\"{}\",mode=\"{}\"", name, id, mode);
+
+        let up = if app.state.status.is_running() { 1 } else { 0 };
+        output.push_str(&format!("oxidepm_process_up{{{}}} {}\n", labels, up));
+
+        output.push_str(&format!(
+            "oxidepm_process_uptime_seconds{{{}}} {}\n",
+            labels, app.state.uptime_secs
+        ));
+
+        output.push_str(&format!(
+            "oxidepm_process_restarts_total{{{}}} {}\n",
+            labels, app.state.restarts
+        ));
+
+        output.push_str(&format!(
+            "oxidepm_process_memory_bytes{{{}}} {}\n",
+            labels, app.state.memory_bytes
+        ));
+
+        output.push_str(&format!(
+            "oxidepm_process_cpu_percent{{{}}} {:.2}\n",
+            labels, app.state.cpu_percent
+        ));
+    }
+
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        output,
+    )
 }
 
 async fn ping_daemon(State(state): State<AppState>) -> impl IntoResponse {

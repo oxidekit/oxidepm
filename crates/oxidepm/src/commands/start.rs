@@ -479,6 +479,10 @@ fn build_app_spec(args: &StartArgs) -> Result<AppSpec> {
         cosmos_config: None,
         // Restart mode
         restart_mode: oxidepm_core::RestartMode::default(),
+        // Process dependencies
+        depends_on: Vec::new(),
+        // Cron restarts
+        restart_cron: None,
         // Log rotation (use defaults unless set via config file)
         log_max_size: None,
         log_max_files: None,

@@ -214,6 +214,35 @@ impl Supervisor {
             spec.id = id;
         }
 
+        // Wait for dependencies to be running
+        if !spec.depends_on.is_empty() {
+            info!("Waiting for dependencies: {:?}", spec.depends_on);
+            for dep_name in &spec.depends_on {
+                let max_wait = Duration::from_secs(60);
+                let start_wait = Instant::now();
+                loop {
+                    let is_running = {
+                        let processes = self.processes.read();
+                        processes.values().any(|p| {
+                            p.spec.name == *dep_name && p.state.status.is_running()
+                        })
+                    };
+                    if is_running {
+                        info!("Dependency '{}' is running", dep_name);
+                        break;
+                    }
+                    if start_wait.elapsed() > max_wait {
+                        warn!(
+                            "Dependency '{}' not running after 60s, starting '{}' anyway",
+                            dep_name, spec.name
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
         // Apply startup delay if configured
         if let Some(delay_ms) = spec.startup_delay_ms {
             if delay_ms > 0 {
@@ -317,6 +346,11 @@ impl Supervisor {
         // Set up watch if enabled
         if spec.watch {
             self.spawn_watch_task(spec.id);
+        }
+
+        // Spawn cron restart task if configured
+        if spec.restart_cron.is_some() {
+            self.spawn_cron_restart_task(spec.id);
         }
 
         Ok(spec.id)
@@ -1330,6 +1364,93 @@ impl Supervisor {
                 if let Some(event) = watcher.wait(Duration::from_secs(1)) {
                     info!("File change detected for {}: {:?}", spec.name, event.paths);
                     // Restart logic would go here
+                }
+            }
+        });
+    }
+
+    /// Spawn cron restart task for scheduled periodic restarts
+    fn spawn_cron_restart_task(&self, app_id: u32) {
+        let processes = Arc::clone(&self.processes);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        tokio::spawn(async move {
+            // Get the cron expression
+            let cron_expr = {
+                let procs = processes.read();
+                procs
+                    .get(&app_id)
+                    .and_then(|p| p.spec.restart_cron.clone())
+            };
+
+            let cron_expr = match cron_expr {
+                Some(expr) => expr,
+                None => return,
+            };
+
+            let schedule = match cron_expr.parse::<cron::Schedule>() {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Invalid cron expression '{}' for app {}: {}", cron_expr, app_id, e);
+                    return;
+                }
+            };
+
+            info!("Cron restart schedule active for app {}: {}", app_id, cron_expr);
+
+            loop {
+                // Find next scheduled time
+                let next = match schedule.upcoming(chrono::Utc).next() {
+                    Some(t) => t,
+                    None => {
+                        warn!("No upcoming cron times for app {}", app_id);
+                        return;
+                    }
+                };
+
+                let until_next = (next - chrono::Utc::now())
+                    .to_std()
+                    .unwrap_or(Duration::from_secs(60));
+
+                debug!(
+                    "App {} next cron restart in {:?} (at {})",
+                    app_id, until_next, next
+                );
+
+                tokio::select! {
+                    _ = tokio::time::sleep(until_next) => {
+                        // Check if process still exists and is running
+                        let is_running = {
+                            let procs = processes.read();
+                            procs.get(&app_id).map(|p| p.state.status.is_running()).unwrap_or(false)
+                        };
+
+                        if !is_running {
+                            info!("App {} no longer running, stopping cron task", app_id);
+                            return;
+                        }
+
+                        info!("Cron restart triggered for app {}", app_id);
+
+                        // Get the PID, then signal the process to stop.
+                        // The supervision loop will handle the restart.
+                        let pid = {
+                            let procs = processes.read();
+                            procs.get(&app_id).and_then(|p| p.state.pid)
+                        };
+
+                        if let Some(pid) = pid {
+                            #[cfg(unix)]
+                            {
+                                use nix::sys::signal::{kill, Signal};
+                                use nix::unistd::Pid as NixPid;
+                                let _ = kill(NixPid::from_raw(pid as i32), Signal::SIGTERM);
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        return;
+                    }
                 }
             }
         });

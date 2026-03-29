@@ -29,6 +29,9 @@ pub enum NotifyError {
     #[error("TOML serialize error: {0}")]
     TomlSerializeError(#[from] toml::ser::Error),
 
+    #[error("Webhook error: {0}")]
+    WebhookError(String),
+
     #[error("Notifier not configured")]
     NotConfigured,
 }
@@ -43,5 +46,9 @@ impl NotifyError {
 
     pub fn telegram<S: Into<String>>(msg: S) -> Self {
         NotifyError::TelegramError(msg.into())
+    }
+
+    pub fn webhook<S: Into<String>>(msg: S) -> Self {
+        NotifyError::WebhookError(msg.into())
     }
 }

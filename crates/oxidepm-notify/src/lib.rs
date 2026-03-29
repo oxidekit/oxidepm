@@ -2,7 +2,9 @@
 //!
 //! Provides notification capabilities for process events via various channels:
 //! - Telegram
-//! - (Future: Slack, Discord, Webhooks, etc.)
+//! - Discord (webhook)
+//! - Slack (incoming webhook)
+//! - Generic HTTP webhook
 
 pub mod config;
 mod error;
@@ -10,13 +12,16 @@ mod event;
 #[cfg(test)]
 pub mod mock;
 mod telegram;
+mod webhook;
 
-pub use config::{notify_config_path, NotifyConfig, TelegramConfig};
+pub use config::{notify_config_path, DiscordConfig, NotifyConfig, SlackConfig, TelegramConfig, WebhookConfig};
 pub use error::{NotifyError, Result};
 pub use event::{ProcessEvent, Severity};
 pub use telegram::TelegramNotifier;
+pub use webhook::{DiscordNotifier, SlackNotifier, WebhookNotifier};
 
 use async_trait::async_trait;
+use tracing::warn;
 
 /// Trait for notification backends
 #[async_trait]
@@ -34,6 +39,9 @@ pub trait Notifier: Send + Sync {
 /// Manager for all notification channels
 pub struct NotificationManager {
     telegram: Option<TelegramNotifier>,
+    discord: Option<DiscordNotifier>,
+    slack: Option<SlackNotifier>,
+    webhook: Option<WebhookNotifier>,
     config: NotifyConfig,
 }
 
@@ -45,7 +53,28 @@ impl NotificationManager {
             Some(TelegramNotifier::new(token, tc.chat_id.clone()))
         });
 
-        Self { telegram, config }
+        let discord = config
+            .discord
+            .as_ref()
+            .map(|dc| DiscordNotifier::new(dc.webhook_url.clone()));
+
+        let slack = config
+            .slack
+            .as_ref()
+            .map(|sc| SlackNotifier::new(sc.webhook_url.clone()));
+
+        let webhook = config
+            .webhook
+            .as_ref()
+            .map(|wc| WebhookNotifier::new(wc.url.clone(), wc.secret.clone()));
+
+        Self {
+            telegram,
+            discord,
+            slack,
+            webhook,
+            config,
+        }
     }
 
     /// Create a notification manager by loading config from default path
@@ -56,14 +85,29 @@ impl NotificationManager {
 
     /// Send a process event to all configured channels
     pub async fn notify(&self, event: &ProcessEvent) -> Result<()> {
-        // Check if this event type should be notified
         if !self.should_notify(event) {
             return Ok(());
         }
 
-        // Send to Telegram if configured
         if let Some(ref telegram) = self.telegram {
-            telegram.send_process_event(event).await?;
+            if let Err(e) = telegram.send_process_event(event).await {
+                warn!("Telegram notification failed: {}", e);
+            }
+        }
+        if let Some(ref discord) = self.discord {
+            if let Err(e) = discord.send_process_event(event).await {
+                warn!("Discord notification failed: {}", e);
+            }
+        }
+        if let Some(ref slack) = self.slack {
+            if let Err(e) = slack.send_process_event(event).await {
+                warn!("Slack notification failed: {}", e);
+            }
+        }
+        if let Some(ref webhook) = self.webhook {
+            if let Err(e) = webhook.send_process_event(event).await {
+                warn!("Webhook notification failed: {}", e);
+            }
         }
 
         Ok(())
@@ -72,17 +116,26 @@ impl NotificationManager {
     /// Send a plain message to all configured channels
     pub async fn send_message(&self, message: &str) -> Result<()> {
         if let Some(ref telegram) = self.telegram {
-            telegram.send(message).await?;
+            let _ = telegram.send(message).await;
+        }
+        if let Some(ref discord) = self.discord {
+            let _ = discord.send(message).await;
+        }
+        if let Some(ref slack) = self.slack {
+            let _ = slack.send(message).await;
+        }
+        if let Some(ref webhook) = self.webhook {
+            let _ = webhook.send(message).await;
         }
         Ok(())
     }
 
     /// Check if any notification channel is configured
     pub fn is_configured(&self) -> bool {
-        self.telegram
-            .as_ref()
-            .map(|t| t.is_configured())
-            .unwrap_or(false)
+        self.telegram.as_ref().map(|t| t.is_configured()).unwrap_or(false)
+            || self.discord.as_ref().map(|d| d.is_configured()).unwrap_or(false)
+            || self.slack.as_ref().map(|s| s.is_configured()).unwrap_or(false)
+            || self.webhook.as_ref().map(|w| w.is_configured()).unwrap_or(false)
     }
 
     /// Check if this event type should trigger a notification
@@ -127,6 +180,7 @@ mod tests {
             }),
             events: vec![],
             min_severity: None,
+            ..Default::default()
         };
         let manager = NotificationManager::new(config);
 
@@ -147,6 +201,7 @@ mod tests {
             }),
             events: vec!["crash".to_string(), "memory_limit".to_string()],
             min_severity: None,
+            ..Default::default()
         };
         let manager = NotificationManager::new(config);
 

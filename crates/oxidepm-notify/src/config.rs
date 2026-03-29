@@ -28,6 +28,15 @@ pub struct NotifyConfig {
     /// Telegram notification settings
     pub telegram: Option<TelegramConfig>,
 
+    /// Discord webhook settings
+    pub discord: Option<DiscordConfig>,
+
+    /// Slack webhook settings
+    pub slack: Option<SlackConfig>,
+
+    /// Generic HTTP webhook settings
+    pub webhook: Option<WebhookConfig>,
+
     /// Events to notify on (empty = all events)
     #[serde(default)]
     pub events: Vec<String>,
@@ -88,6 +97,9 @@ impl NotifyConfig {
     /// Check if any notification channel is configured
     pub fn is_configured(&self) -> bool {
         self.telegram.is_some()
+            || self.discord.is_some()
+            || self.slack.is_some()
+            || self.webhook.is_some()
     }
 
     /// Configure Telegram notifications
@@ -175,6 +187,29 @@ impl TelegramConfig {
     }
 }
 
+/// Discord notification configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordConfig {
+    /// Discord webhook URL (from channel settings → Integrations → Webhooks)
+    pub webhook_url: String,
+}
+
+/// Slack notification configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackConfig {
+    /// Slack incoming webhook URL
+    pub webhook_url: String,
+}
+
+/// Generic HTTP webhook configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    /// URL to POST event JSON to
+    pub url: String,
+    /// Optional secret sent as X-Webhook-Secret header
+    pub secret: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,9 +274,8 @@ chat_id = "-100123456789"
     #[test]
     fn test_validate_events_valid() {
         let config = NotifyConfig {
-            telegram: None,
             events: vec!["crash".to_string(), "restart".to_string()],
-            min_severity: None,
+            ..Default::default()
         };
         assert!(config.validate_events().is_ok());
     }
@@ -249,9 +283,8 @@ chat_id = "-100123456789"
     #[test]
     fn test_validate_events_invalid() {
         let config = NotifyConfig {
-            telegram: None,
             events: vec!["invalid_event".to_string()],
-            min_severity: None,
+            ..Default::default()
         };
         assert!(config.validate_events().is_err());
     }
@@ -266,5 +299,66 @@ chat_id = "-100123456789"
 
         config.remove_telegram();
         assert!(!config.is_configured());
+    }
+
+    #[test]
+    fn test_discord_config() {
+        let config = NotifyConfig {
+            discord: Some(DiscordConfig {
+                webhook_url: "https://discord.com/api/webhooks/123/abc".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn test_slack_config() {
+        let config = NotifyConfig {
+            slack: Some(SlackConfig {
+                webhook_url: "https://hooks.slack.com/services/T00/B00/xxx".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn test_webhook_config() {
+        let config = NotifyConfig {
+            webhook: Some(WebhookConfig {
+                url: "https://example.com/hook".to_string(),
+                secret: Some("s3cret".to_string()),
+            }),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn test_multi_channel_config_toml() {
+        let content = r#"
+events = ["crash"]
+
+[telegram]
+bot_token = "123:ABC"
+chat_id = "-100123"
+
+[discord]
+webhook_url = "https://discord.com/api/webhooks/123/abc"
+
+[slack]
+webhook_url = "https://hooks.slack.com/services/T00/B00/xxx"
+
+[webhook]
+url = "https://example.com/hook"
+secret = "s3cret"
+"#;
+        let config: NotifyConfig = toml::from_str(content).unwrap();
+        assert!(config.telegram.is_some());
+        assert!(config.discord.is_some());
+        assert!(config.slack.is_some());
+        assert!(config.webhook.is_some());
+        assert_eq!(config.webhook.unwrap().secret, Some("s3cret".to_string()));
     }
 }

@@ -78,6 +78,9 @@ anyhow = "1.0"
 # Compression
 flate2 = "1.0"
 
+# Cron scheduling
+cron = "0.13"
+
 # Utils
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4"] }

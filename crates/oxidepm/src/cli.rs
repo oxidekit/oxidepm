@@ -126,6 +126,13 @@ pub enum Commands {
         /// Process name or id
         selector: String,
     },
+
+    /// Update oxidepm to the latest release (or a specific version)
+    Update {
+        /// Target version (e.g., "0.2.3"). Defaults to latest.
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Args)]

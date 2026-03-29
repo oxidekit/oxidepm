@@ -35,5 +35,6 @@ dirs = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
+cron = { workspace = true }
 
 [dev-dependencies]
