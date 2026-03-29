@@ -180,6 +180,14 @@ pub struct AppConfig {
     /// Require SHA256 checksum verification for auto-upgrade (default: true)
     #[serde(default = "default_true")]
     pub auto_upgrade_require_checksum: bool,
+    // ── Log rotation settings ──
+    /// Max log file size before rotation (e.g., "10mb", "500kb", or bytes)
+    pub log_max_size: Option<String>,
+    /// Max rotated files to keep (default: 5)
+    pub log_max_files: Option<usize>,
+    /// Compress rotated files with gzip (default: false)
+    #[serde(default)]
+    pub log_compress: bool,
 }
 
 fn default_true() -> bool {
@@ -379,6 +387,9 @@ impl AppConfig {
             None
         };
 
+        // Parse log max size (supports "10mb", "500kb", or raw bytes)
+        let log_max_size = self.log_max_size.map(|s| parse_size(&s)).transpose()?;
+
         // Parse restart mode
         let restart_mode = self
             .restart
@@ -413,8 +424,42 @@ impl AppConfig {
             max_uptime_secs: self.max_uptime_secs,
             cosmos_config,
             restart_mode,
+            log_max_size,
+            log_max_files: self.log_max_files,
+            log_compress: self.log_compress,
         })
     }
+}
+
+/// Parse a human-readable size string (e.g., "10mb", "500kb", "1gb") into bytes
+fn parse_size(s: &str) -> Result<u64> {
+    let s = s.trim().to_lowercase();
+
+    // Try pure number first (bytes)
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+
+    // Split number from suffix
+    let (num_str, suffix) = s
+        .find(|c: char| c.is_alphabetic())
+        .map(|i| (&s[..i], s[i..].trim()))
+        .ok_or_else(|| Error::ConfigError(format!("Invalid size: '{}'", s)))?;
+
+    let num: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| Error::ConfigError(format!("Invalid size number: '{}'", num_str)))?;
+
+    let multiplier: u64 = match suffix {
+        "b" => 1,
+        "kb" | "k" => 1024,
+        "mb" | "m" => 1024 * 1024,
+        "gb" | "g" => 1024 * 1024 * 1024,
+        _ => return Err(Error::ConfigError(format!("Unknown size suffix: '{}'. Use kb, mb, or gb", suffix))),
+    };
+
+    Ok((num * multiplier as f64) as u64)
 }
 
 /// Load environment variables from a .env file
@@ -616,6 +661,9 @@ apps:
             auto_upgrade: false,
             auto_upgrade_source: None,
             auto_upgrade_require_checksum: true,
+            log_max_size: None,
+            log_max_files: None,
+            log_compress: false,
         };
 
         let base_dir = Path::new("/project");
@@ -688,6 +736,9 @@ apps:
             auto_upgrade: false,
             auto_upgrade_source: None,
             auto_upgrade_require_checksum: true,
+            log_max_size: None,
+            log_max_files: None,
+            log_compress: false,
         };
 
         let base_dir = Path::new("/project");

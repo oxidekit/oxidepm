@@ -211,6 +211,15 @@ pub struct AppSpec {
     // Restart mode (on-crash, always, never)
     #[serde(default)]
     pub restart_mode: RestartMode,
+    // Log rotation: max file size in bytes (default: 10MB)
+    #[serde(default)]
+    pub log_max_size: Option<u64>,
+    // Log rotation: max rotated files to keep (default: 5)
+    #[serde(default)]
+    pub log_max_files: Option<usize>,
+    // Log rotation: gzip compress rotated files (default: false)
+    #[serde(default)]
+    pub log_compress: bool,
 }
 
 impl AppSpec {
@@ -260,6 +269,9 @@ impl AppSpec {
             max_uptime_secs: None,
             cosmos_config: None,
             restart_mode: RestartMode::default(),
+            log_max_size: None,
+            log_max_files: None,
+            log_compress: false,
         })
     }
 

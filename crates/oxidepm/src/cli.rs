@@ -101,7 +101,9 @@ pub enum Commands {
         selector: String,
     },
 
-    /// Clear/truncate log files for process(es)
+    /// Clear/truncate log files for process(es).
+    /// Log rotation is automatic (default: 10MB max, 5 files).
+    /// Configure per-process in config file: log_max_size, log_max_files, log_compress.
     Flush {
         /// Process name, id, or "all"
         selector: String,

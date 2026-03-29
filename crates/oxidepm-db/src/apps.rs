@@ -230,6 +230,10 @@ fn row_to_app_spec(row: &sqlx::sqlite::SqliteRow) -> Result<AppSpec> {
         cosmos_config: None,
         // Restart mode (defaults - not persisted in DB yet)
         restart_mode: oxidepm_core::RestartMode::default(),
+        // Log rotation (not persisted in DB yet)
+        log_max_size: None,
+        log_max_files: None,
+        log_compress: false,
     })
 }
 

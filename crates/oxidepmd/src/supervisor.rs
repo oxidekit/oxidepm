@@ -244,7 +244,7 @@ impl Supervisor {
 
         // Set up log capture
         oxidepm_logs::ensure_log_dir()?;
-        let log_capture = LogCapture::new(&spec.name, RotationConfig::default())?;
+        let log_capture = LogCapture::new(&spec.name, RotationConfig::from_spec(&spec))?;
 
         // Take ownership of child's stdout/stderr
         let mut child = running.child;

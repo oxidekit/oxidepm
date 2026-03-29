@@ -1,6 +1,8 @@
 //! Log writer with rotation support
 
 use chrono::Utc;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use oxidepm_core::Result;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -104,10 +106,12 @@ impl LogWriter {
         // Flush and close current file
         self.writer.flush()?;
 
+        let ext = if self.config.compress { ".gz" } else { "" };
+
         // Rotate existing files: .4 -> .5, .3 -> .4, etc.
         for i in (1..self.config.max_files).rev() {
-            let old_path = rotated_path(&self.path, i);
-            let new_path = rotated_path(&self.path, i + 1);
+            let old_path = rotated_path(&self.path, i, ext);
+            let new_path = rotated_path(&self.path, i + 1, ext);
 
             if old_path.exists() {
                 if i + 1 >= self.config.max_files {
@@ -119,10 +123,16 @@ impl LogWriter {
             }
         }
 
-        // Rename current to .1
-        let first_rotated = rotated_path(&self.path, 1);
+        // Rename current to .1 (and compress if enabled)
         if self.path.exists() {
-            fs::rename(&self.path, &first_rotated)?;
+            if self.config.compress {
+                let gz_path = rotated_path(&self.path, 1, ".gz");
+                compress_file(&self.path, &gz_path)?;
+                fs::remove_file(&self.path)?;
+            } else {
+                let first_rotated = rotated_path(&self.path, 1, "");
+                fs::rename(&self.path, &first_rotated)?;
+            }
         }
 
         // Create new file
@@ -150,9 +160,20 @@ impl LogWriter {
 }
 
 /// Get the path for a rotated log file
-fn rotated_path(base: &Path, index: usize) -> PathBuf {
+fn rotated_path(base: &Path, index: usize, suffix: &str) -> PathBuf {
     let name = base.file_name().unwrap().to_string_lossy();
-    base.with_file_name(format!("{}.{}", name, index))
+    base.with_file_name(format!("{}.{}{}", name, index, suffix))
+}
+
+/// Compress a file with gzip
+fn compress_file(src: &Path, dst: &Path) -> Result<()> {
+    let input = fs::read(src)?;
+    let output = File::create(dst)?;
+    let mut encoder = GzEncoder::new(output, Compression::default());
+    encoder.write_all(&input)?;
+    encoder.finish()?;
+    debug!("Compressed {} -> {}", src.display(), dst.display());
+    Ok(())
 }
 
 /// Async log capture from process stdout/stderr
@@ -266,7 +287,8 @@ mod tests {
     #[test]
     fn test_rotated_path() {
         let base = PathBuf::from("/var/log/app.log");
-        assert_eq!(rotated_path(&base, 1), PathBuf::from("/var/log/app.log.1"));
-        assert_eq!(rotated_path(&base, 5), PathBuf::from("/var/log/app.log.5"));
+        assert_eq!(rotated_path(&base, 1, ""), PathBuf::from("/var/log/app.log.1"));
+        assert_eq!(rotated_path(&base, 5, ""), PathBuf::from("/var/log/app.log.5"));
+        assert_eq!(rotated_path(&base, 1, ".gz"), PathBuf::from("/var/log/app.log.1.gz"));
     }
 }
