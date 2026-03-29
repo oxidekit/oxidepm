@@ -122,6 +122,14 @@ pub enum ProcessEvent {
         upgrade_name: String,
         halt_height: u64,
     },
+
+    /// Double-sign risk: another instance may be signing with the same validator key
+    DoubleSignRisk {
+        name: String,
+        id: u32,
+        chain_height: u64,
+        local_height: u64,
+    },
 }
 
 impl ProcessEvent {
@@ -140,6 +148,7 @@ impl ProcessEvent {
             ProcessEvent::Jailed { .. } => "jailed",
             ProcessEvent::StaleNode { .. } => "stale_node",
             ProcessEvent::UpgradeHalted { .. } => "upgrade_halted",
+            ProcessEvent::DoubleSignRisk { .. } => "double_sign_risk",
         }
     }
 
@@ -228,6 +237,15 @@ impl ProcessEvent {
                     name, upgrade_name, halt_height, upgrade_name
                 )
             }
+            // SECURITY: format_message() NEVER includes key paths, IPs, or config details
+            ProcessEvent::DoubleSignRisk { name, id: _, chain_height, local_height } => {
+                format!(
+                    "\u{1F6A8}\u{1F6A8} DOUBLE-SIGN RISK: `{}` — chain at height {} but local last signed at {}. \
+                     Another instance may be signing with the same validator key! \
+                     Investigate IMMEDIATELY to prevent slashing.",
+                    name, chain_height, local_height
+                )
+            }
         }
     }
 
@@ -245,7 +263,8 @@ impl ProcessEvent {
             | ProcessEvent::MissedBlocks { name, .. }
             | ProcessEvent::Jailed { name, .. }
             | ProcessEvent::StaleNode { name, .. }
-            | ProcessEvent::UpgradeHalted { name, .. } => name,
+            | ProcessEvent::UpgradeHalted { name, .. }
+            | ProcessEvent::DoubleSignRisk { name, .. } => name,
         }
     }
 
@@ -264,6 +283,7 @@ impl ProcessEvent {
             ProcessEvent::Jailed { .. } => Severity::Critical,
             ProcessEvent::StaleNode { .. } => Severity::Critical,
             ProcessEvent::UpgradeHalted { .. } => Severity::Warning,
+            ProcessEvent::DoubleSignRisk { .. } => Severity::Critical,
         }
     }
 
@@ -281,7 +301,8 @@ impl ProcessEvent {
             | ProcessEvent::MissedBlocks { id, .. }
             | ProcessEvent::Jailed { id, .. }
             | ProcessEvent::StaleNode { id, .. }
-            | ProcessEvent::UpgradeHalted { id, .. } => *id,
+            | ProcessEvent::UpgradeHalted { id, .. }
+            | ProcessEvent::DoubleSignRisk { id, .. } => *id,
         }
     }
 }

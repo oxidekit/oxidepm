@@ -8,8 +8,9 @@ use chrono::{DateTime, Utc};
 use oxidepm_core::{CosmosConfig, CosmosNodeMode};
 use reqwest::Client;
 use serde::Deserialize;
+use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 /// Cosmos node sync/health status
 #[derive(Debug, Clone)]
@@ -41,12 +42,22 @@ pub struct ValidatorSigningInfo {
     pub jail_threshold: u64,
 }
 
+/// Double-sign risk detection result
+#[derive(Debug, Clone)]
+pub struct DoubleSignRisk {
+    /// The chain's latest block height this validator signed
+    pub chain_signed_height: u64,
+    /// The local priv_validator_state.json last signed height
+    pub local_signed_height: u64,
+}
+
 /// Combined cosmos health check result
 #[derive(Debug, Clone)]
 pub struct CosmosHealthResult {
     pub reachable: bool,
     pub node_status: Option<CosmosNodeStatus>,
     pub signing_info: Option<ValidatorSigningInfo>,
+    pub double_sign_risk: Option<DoubleSignRisk>,
     pub timestamp: DateTime<Utc>,
     pub duration_ms: u64,
     pub message: Option<String>,
@@ -58,6 +69,7 @@ impl CosmosHealthResult {
             reachable: false,
             node_status: None,
             signing_info: None,
+            double_sign_risk: None,
             timestamp: Utc::now(),
             duration_ms,
             message: Some(msg.into()),
@@ -126,12 +138,29 @@ impl CosmosHealthChecker {
             None
         };
 
-        // Sentry: same monitoring as Relay for now.
-        // TODO: track validator connectivity (e.g. persistent_peers health)
-
-        // TODO(archive): warn if pruning is not set to "nothing" for Archive nodes.
-        // This requires reading the node's app.toml or querying a config endpoint
-        // to verify pruning-keep-recent / pruning-keep-every / pruning-interval settings.
+        // Double-sign sentinel: compare local priv_validator_state.json
+        // against chain height to detect another instance signing with our key
+        let double_sign_risk = if config.node_mode == CosmosNodeMode::Validator {
+            if let Some(ref key_path) = config.validator_key_path {
+                // priv_validator_state.json is in the data/ dir, sibling to config/
+                // key_path is typically: <home>/config/priv_validator_key.json
+                // state_path is typically: <home>/data/priv_validator_state.json
+                if let Some(config_dir) = key_path.parent() {
+                    if let Some(home_dir) = config_dir.parent() {
+                        let state_path = home_dir.join("data").join("priv_validator_state.json");
+                        self.check_double_sign_risk(&state_path, &node_status).await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -139,6 +168,7 @@ impl CosmosHealthChecker {
             reachable: true,
             node_status,
             signing_info,
+            double_sign_risk,
             timestamp: Utc::now(),
             duration_ms,
             message: None,
@@ -235,6 +265,70 @@ impl CosmosHealthChecker {
         })
     }
 
+    /// Check for double-sign risk by comparing local priv_validator_state.json
+    /// against the chain's latest block height.
+    ///
+    /// SECURITY: Only reads "height" from priv_validator_state.json (signing state),
+    /// NEVER reads priv_validator_key.json (key material).
+    async fn check_double_sign_risk(
+        &self,
+        state_path: &Path,
+        node_status: &Option<CosmosNodeStatus>,
+    ) -> Option<DoubleSignRisk> {
+        let chain_height = node_status.as_ref()?.latest_block_height;
+
+        // Read local signing state — only the height field
+        let local_height = match std::fs::read_to_string(state_path) {
+            Ok(content) => {
+                match serde_json::from_str::<PrivValidatorState>(&content) {
+                    Ok(state) => state.height.parse::<u64>().unwrap_or(0),
+                    Err(e) => {
+                        debug!("Failed to parse priv_validator_state.json: {}", e);
+                        return None;
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("Cannot read priv_validator_state.json: {}", e);
+                return None;
+            }
+        };
+
+        // If local height is 0, the node hasn't signed yet — no risk
+        if local_height == 0 {
+            return None;
+        }
+
+        // If the node is catching up, the gap is expected — this is normal
+        // during migration (stop on server A, start on server B that's behind).
+        // Only flag double-sign risk when the node believes it's fully synced
+        // but the chain shows blocks signed above our local state.
+        let catching_up = node_status.as_ref().map(|s| s.catching_up).unwrap_or(true);
+        if catching_up {
+            return None;
+        }
+
+        // If the chain is significantly ahead of our local signing state,
+        // another instance may be signing with the same key.
+        // Use a threshold to avoid false positives during normal operation
+        // (local state file may lag a few blocks behind).
+        const DOUBLE_SIGN_THRESHOLD: u64 = 10;
+
+        if chain_height > local_height + DOUBLE_SIGN_THRESHOLD {
+            error!(
+                "DOUBLE-SIGN RISK: chain height {} but local last signed height {}. \
+                 Another instance may be signing with the same validator key!",
+                chain_height, local_height
+            );
+            Some(DoubleSignRisk {
+                chain_signed_height: chain_height,
+                local_signed_height: local_height,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Check if expected ports are listening (basic TCP connect test)
     pub async fn check_ports(&self, ports: &[u16]) -> Vec<(u16, bool)> {
         let mut results = Vec::new();
@@ -292,6 +386,15 @@ struct SyncInfo {
     latest_block_height: String,
     latest_block_time: String,
     catching_up: bool,
+}
+
+// ── Local CometBFT state file ──
+
+/// Only reads the height field from priv_validator_state.json.
+/// SECURITY: This file contains signing state, NOT key material.
+#[derive(Debug, Deserialize)]
+struct PrivValidatorState {
+    height: String,
 }
 
 // ── JSON response types for Cosmos LCD/REST ──

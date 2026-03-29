@@ -4,7 +4,7 @@
 
 pub mod cosmos;
 
-pub use cosmos::{CosmosHealthChecker, CosmosHealthResult, CosmosNodeStatus, ValidatorSigningInfo};
+pub use cosmos::{CosmosHealthChecker, CosmosHealthResult, CosmosNodeStatus, DoubleSignRisk, ValidatorSigningInfo};
 
 use chrono::{DateTime, Utc};
 use oxidepm_core::HealthCheck;

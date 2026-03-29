@@ -124,6 +124,7 @@ impl NotifyConfig {
             "jailed",
             "stale_node",
             "upgrade_halted",
+            "double_sign_risk",
         ];
 
         for event in &self.events {

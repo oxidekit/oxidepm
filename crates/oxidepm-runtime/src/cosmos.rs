@@ -39,6 +39,40 @@ impl Runner for CosmosRunner {
 
         // Check cosmos config
         if let Some(ref cosmos) = spec.cosmos_config {
+            // DOUBLE-SIGN PREVENTION: If mode is NOT validator, block start if
+            // priv_validator_key.json is present. This catches the dangerous scenario
+            // where someone snapshots a validator and launches relays from it without
+            // removing the key — CometBFT would silently sign with it.
+            // Exception: relay_until_synced validators (OxidePM manages the key lifecycle)
+            if cosmos.node_mode != oxidepm_core::CosmosNodeMode::Validator
+                && !cosmos.relay_until_synced
+            {
+                if let Some(ref key_path) = cosmos.validator_key_path {
+                    if key_path.exists() {
+                        return Ok(PrepareResult::failure(format!(
+                            "DOUBLE-SIGN RISK: priv_validator_key.json found but node mode is '{}'. \
+                             A {} node must not have a validator key — CometBFT will sign blocks with it. \
+                             Move the key to a safe backup location first:\n  \
+                             mv {} ~/validator-key-backup/",
+                            cosmos.node_mode, cosmos.node_mode, key_path.display()
+                        )));
+                    }
+                } else {
+                    // No explicit key_path configured, but check the default location
+                    // relative to cwd (the node's home directory)
+                    let default_key = spec.cwd.join("config").join("priv_validator_key.json");
+                    if default_key.exists() {
+                        return Ok(PrepareResult::failure(format!(
+                            "DOUBLE-SIGN RISK: priv_validator_key.json found at default location but node mode is '{}'. \
+                             A {} node must not have a validator key — CometBFT will sign blocks with it. \
+                             Move the key to a safe backup location first:\n  \
+                             mv {} ~/validator-key-backup/",
+                            cosmos.node_mode, cosmos.node_mode, default_key.display()
+                        )));
+                    }
+                }
+            }
+
             // Check validator key file exists if path is configured (never read contents)
             if let Some(ref key_path) = cosmos.validator_key_path {
                 if !key_path.exists() {
