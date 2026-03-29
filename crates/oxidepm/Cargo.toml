@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 oxidepm-core = { workspace = true }
 oxidepm-ipc = { workspace = true }
+oxidepm-logs = { workspace = true }
 oxidepm-tui = { workspace = true }
 oxidepm-web = { workspace = true }
 oxidepm-health = { workspace = true }
