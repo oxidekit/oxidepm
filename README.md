@@ -548,6 +548,30 @@ scrape_configs:
       - targets: ['localhost:9615']
 ```
 
+## VS Code Extension
+
+Manage OxidePM processes directly from VS Code with the [OxidePM extension](https://github.com/oxidekit/oxidepm-vscode):
+
+- Sidebar process explorer with status, port, CPU, memory, uptime
+- Start / Stop / Restart via context menu and command palette
+- Real-time log viewer via WebSocket streaming
+- Status bar showing online/total process count
+- Crash and restart notifications with action buttons
+- Cosmos mode extras (chain ID, node mode, sync status)
+
+**Install:**
+```bash
+# Download .vsix from releases and install
+code --install-extension oxidepm-0.1.1.vsix
+
+# Or clone and build from source
+git clone https://github.com/oxidekit/oxidepm-vscode
+cd oxidepm-vscode && npm install && npm run build
+npx vsce package && code --install-extension oxidepm-*.vsix
+```
+
+Requires `oxidepm web --port 9615` to be running.
+
 ## TUI Dashboard
 
 ```bash
