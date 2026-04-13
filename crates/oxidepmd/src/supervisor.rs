@@ -187,9 +187,10 @@ impl Supervisor {
     fn calculate_instance_port(&self, spec: &AppSpec, instance_index: u32) -> Option<u16> {
         // Priority 1: Use port_range if specified
         if let Some((start, end)) = spec.port_range {
-            let port = start + instance_index as u16;
-            if port <= end {
-                return Some(port);
+            if let Some(port) = start.checked_add(instance_index as u16) {
+                if port <= end {
+                    return Some(port);
+                }
             }
             warn!(
                 "Port range exhausted for instance {}, using increment from base",
@@ -199,7 +200,7 @@ impl Supervisor {
 
         // Priority 2: Increment from base port
         if let Some(base_port) = spec.port {
-            return Some(base_port + instance_index as u16);
+            return base_port.checked_add(instance_index as u16);
         }
 
         // No port management configured
@@ -648,6 +649,13 @@ impl Supervisor {
 
         let json = serde_json::to_string_pretty(&specs)?;
         std::fs::write(&path, json)?;
+
+        // Restrict saved.json to owner-only (0600) — may contain sensitive config
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
 
         info!("Saved {} apps to {}", specs.len(), path.display());
         Ok(specs.len())
@@ -1158,7 +1166,7 @@ impl Supervisor {
                                             {
                                                 // Check recent log output for upgrade halt pattern
                                                 if let Some((upgrade_name, halt_height)) =
-                                                    detect_upgrade_halt_from_logs(app_id)
+                                                    detect_upgrade_halt_from_logs(&proc.spec.name)
                                                 {
                                                     info!(
                                                         "Cosmos upgrade halt detected: '{}' at height {}",
@@ -1828,7 +1836,7 @@ fn log_hook_output(
 ///   `UPGRADE "<name>" NEEDED at height: <height>`
 ///
 /// Returns `Some((upgrade_name, halt_height))` if found, `None` otherwise.
-fn detect_upgrade_halt_from_logs(app_id: u32) -> Option<(String, u64)> {
+fn detect_upgrade_halt_from_logs(app_name: &str) -> Option<(String, u64)> {
     use once_cell::sync::Lazy;
     use regex::Regex;
 
@@ -1838,16 +1846,13 @@ fn detect_upgrade_halt_from_logs(app_id: u32) -> Option<(String, u64)> {
     });
 
     // Read the last 50 lines from the process's stderr log (upgrade messages go to stderr)
-    let log_path = constants::log_path(
-        &format!("{}", app_id),
-        "err",
-    );
+    let log_path = constants::log_path(app_name, "err");
 
     // Also check by name-based log paths (OxidePM uses name-based log files)
     let log_content = std::fs::read_to_string(&log_path)
         .or_else(|_| {
             // Try stdout log as fallback
-            let out_path = constants::log_path(&format!("{}", app_id), "out");
+            let out_path = constants::log_path(app_name, "out");
             std::fs::read_to_string(&out_path)
         })
         .unwrap_or_default();

@@ -142,7 +142,10 @@ impl Runner for CosmosRunner {
                         rlim_cur: nofile,
                         rlim_max: nofile,
                     };
-                    setrlimit(RLIMIT_NOFILE, &rlim);
+                    let ret = setrlimit(RLIMIT_NOFILE, &rlim);
+                    if ret != 0 {
+                        eprintln!("oxidepm: warning: setrlimit(RLIMIT_NOFILE) failed (ret={})", ret);
+                    }
                     Ok(())
                 });
             }

@@ -6,6 +6,11 @@ use std::process::Command;
 
 use crate::cli::DeployArgs;
 
+/// Shell-quote a string to prevent injection when passed to SSH commands.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
 pub async fn execute(args: DeployArgs) -> Result<()> {
     let host = &args.host;
 
@@ -13,14 +18,14 @@ pub async fn execute(args: DeployArgs) -> Result<()> {
 
     // Build SSH command components
     let cwd_cmd = if let Some(ref cwd) = args.cwd {
-        format!("cd {} && ", cwd)
+        format!("cd {} && ", shell_quote(cwd))
     } else {
         String::new()
     };
 
     // Step 1: Git pull
     let branch = args.branch.as_deref().unwrap_or("prod");
-    let pull_cmd = format!("{}git pull origin {}", cwd_cmd, branch);
+    let pull_cmd = format!("{}git pull origin {}", cwd_cmd, shell_quote(branch));
 
     if args.dry_run {
         println!("  {} ssh {} '{}'", "[DRY-RUN]".yellow(), host, pull_cmd);
@@ -55,7 +60,7 @@ pub async fn execute(args: DeployArgs) -> Result<()> {
 
     // Step 3: Restart processes
     let restart_target = args.restart.as_deref().unwrap_or("all");
-    let restart_cmd = format!("oxidepm restart {}", restart_target);
+    let restart_cmd = format!("oxidepm restart {}", shell_quote(restart_target));
 
     if args.dry_run {
         println!("  {} ssh {} '{}'", "[DRY-RUN]".yellow(), host, restart_cmd);

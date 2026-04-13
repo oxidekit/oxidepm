@@ -235,7 +235,13 @@ impl RequestHandler {
                     command: spec.command,
                     args: spec.args,
                     cwd: spec.cwd.to_string_lossy().to_string(),
-                    env: spec.env,
+                    env: spec.env.iter().map(|(k, v)| {
+                        if is_sensitive(k) {
+                            (k.clone(), "****".to_string())
+                        } else {
+                            (k.clone(), v.clone())
+                        }
+                    }).collect(),
                     mode: spec.mode.to_string(),
                 }
             }
@@ -339,4 +345,14 @@ impl RequestHandler {
             Err(e) => Response::error(e.to_string()),
         }
     }
+}
+
+/// Check if an environment variable key likely contains sensitive data.
+fn is_sensitive(key: &str) -> bool {
+    let key_upper = key.to_uppercase();
+    key_upper.contains("SECRET")
+        || key_upper.contains("TOKEN")
+        || key_upper.contains("PASSWORD")
+        || key_upper.contains("KEY")
+        || key_upper.contains("PRIVATE")
 }

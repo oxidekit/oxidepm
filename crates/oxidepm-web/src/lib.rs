@@ -15,6 +15,7 @@ use oxidepm_core::{AppInfo, AppSpec, Selector};
 use oxidepm_ipc::{IpcClient, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -84,7 +85,9 @@ async fn api_key_auth(
         .and_then(|v| v.to_str().ok());
 
     match provided_key {
-        Some(key) if key == expected_key => Ok(next.run(request).await),
+        Some(key) if key.as_bytes().ct_eq(expected_key.as_bytes()).into() => {
+            Ok(next.run(request).await)
+        }
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
@@ -196,6 +199,9 @@ pub async fn start_server_with_cors(
 
     info!("Starting OxidePM Web API on {}", bind_addr);
 
+    // TODO: No TLS support — API key and env vars are sent in cleartext.
+    // Add rustls TLS option or document that a reverse proxy is required
+    // for non-localhost use.
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     axum::serve(listener, app).await?;
 
