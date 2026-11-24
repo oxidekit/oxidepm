@@ -36,7 +36,9 @@ impl RotationConfig {
     pub fn from_spec(spec: &oxidepm_core::AppSpec) -> Self {
         Self {
             max_size_bytes: spec.log_max_size.unwrap_or(constants::DEFAULT_LOG_MAX_SIZE),
-            max_files: spec.log_max_files.unwrap_or(constants::DEFAULT_LOG_MAX_FILES),
+            max_files: spec
+                .log_max_files
+                .unwrap_or(constants::DEFAULT_LOG_MAX_FILES),
             compress: spec.log_compress,
         }
     }

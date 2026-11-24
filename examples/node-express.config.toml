@@ -1,5 +1,6 @@
 # Express.js + PostgreSQL worker example
 # Start with: oxidepm start examples/node-express.config.toml
+# Needs the runtime adapters: oxidepm adapter import --bundled --tag runtime --enable --yes
 
 [[apps]]
 name = "api"
@@ -8,7 +9,6 @@ script = "start"
 cwd = "./api"
 instances = 2
 port = 3000
-watch = true
 env = { NODE_ENV = "production", PORT = "3000" }
 env_file = ".env"
 tags = ["backend"]

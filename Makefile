@@ -22,6 +22,7 @@ clean:
 install:
 	cargo install --path crates/oxidepm
 	cargo install --path crates/oxidepmd
+	cargo install --path crates/oxidepm-sandbox
 
 dev:
 	cargo watch -x 'check --workspace'

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"method":"host.request","params":{"request":{"type":"stop","selector":{"by":"name","value":"web"}},"dry_run":true}}

@@ -10,10 +10,14 @@ pub async fn execute(selector: &str) -> Result<()> {
     let client = super::get_client();
     let selector = Selector::parse(selector);
 
-    let response = client.send(&Request::Flush { selector }).await?;
+    let response = super::send(&client, &Request::Flush { selector }).await?;
+
+    if let Some(done) = super::plan_shown(&response) {
+        return done;
+    }
 
     match response {
-        Response::Flushed { count } => {
+        Response::Flushed { count, .. } => {
             if count == 0 {
                 print_error("No matching processes found");
             } else {
@@ -21,7 +25,7 @@ pub async fn execute(selector: &str) -> Result<()> {
             }
             Ok(())
         }
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             print_error(&message);
             bail!(message)
         }

@@ -1,0 +1,363 @@
+//! The audit log in process: the writer is held with a test hook, the clock is moved by hand.
+//! Real supervisor, private home.
+
+mod common;
+
+use common::*;
+use oxidepm_core::actor::{ActorClass, ActorId, Via};
+use oxidepm_core::AppStatus;
+use oxidepm_ipc::{Envelope, Request, Response};
+use oxidepmd::audit::{Audit, AuditConfig};
+use oxidepmd::handlers::RequestHandler;
+use oxidepmd::policy::{PeerCred, ReqCtx};
+use serde_json::{json, Value};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+fn ctx(claim: Option<&str>, request: &Request) -> ReqCtx {
+    let mut envelope = Envelope::new("req-audit", request.clone());
+    envelope.actor = claim.map(str::to_string);
+    ReqCtx::new(PeerCred::default(), Via::Main, &envelope)
+}
+
+fn adapter_ctx(name: &str, request: &Request) -> ReqCtx {
+    let mut ctx = ctx(None, request);
+    ctx.actor = ActorId::new(ActorClass::Adapter, name, Via::AdapterChannel);
+    ctx
+}
+
+fn selector(name: &str) -> oxidepm_core::Selector {
+    oxidepm_core::Selector::ByName(name.into())
+}
+
+fn sleeper(h: &Harness, name: &str, extra: Value) -> oxidepm_core::AppSpec {
+    h.cmd_with(name, &format!("exec sleep {}", h.marker()), extra)
+}
+
+/// Quick settings: the real limits would make a test slow.
+fn quick(paths: &oxidepm_core::Paths) -> AuditConfig {
+    let mut config = AuditConfig::new(paths);
+    for writer in [&mut config.main, &mut config.security] {
+        writer.retry = Duration::from_millis(60);
+        writer.sync_interval = Duration::from_millis(20);
+    }
+    config
+}
+
+fn lines(dir: &Path, file: &str) -> Vec<Value> {
+    std::fs::read_to_string(dir.join(file))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+async fn wait_lines<T>(dir: &Path, file: &str, pick: impl Fn(&[Value]) -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let all = lines(dir, file);
+        if let Some(found) = pick(&all) {
+            return found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nothing found in {file}: {all:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn decision_is_durable_before_the_effect() {
+    let h = Harness::new().await;
+    h.start(sleeper(&h, "guarded", json!({ "ai_control": true })))
+        .await
+        .unwrap();
+    let before = h.pid_of("guarded").await;
+    let handler = Arc::new(RequestHandler::with_audit(
+        Arc::clone(&h.sup),
+        Arc::new(Audit::with_config(quick(&h.paths))),
+    ));
+    let hold = handler.audit().writers().0.pause();
+
+    let request = Request::Stop {
+        selector: selector("guarded"),
+    };
+    let task = {
+        let (handler, ctx, request) = (
+            Arc::clone(&handler),
+            ctx(Some("ai:test"), &request),
+            request.clone(),
+        );
+        tokio::spawn(async move { handler.guarded(&ctx, request).await })
+    };
+    // the writer is held: the decision is not on disk, so the app has not been touched
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!task.is_finished(), "the request waits for its record");
+    assert_eq!(h.state("guarded").await.status, AppStatus::Running);
+    assert_eq!(h.pid_of("guarded").await, before);
+    assert!(lines(h.paths.audit_dir().as_path(), "audit.jsonl").is_empty());
+
+    drop(hold);
+    let response = task
+        .await
+        .unwrap()
+        .expect("the stop ran once the decision was written");
+    assert!(
+        matches!(response, Response::Stopped { count: 1, .. }),
+        "{response:?}"
+    );
+    h.wait_status("guarded", AppStatus::Stopped).await;
+    // the decision is the line before the effect: it is on disk by now
+    let dir = h.paths.audit_dir();
+    let line = wait_lines(&dir, "audit.jsonl", |l| {
+        l.iter().find(|x| x["decision"] == "allow").cloned()
+    })
+    .await;
+    assert_eq!(line["op"], "stop");
+}
+
+#[tokio::test]
+async fn a_decision_that_times_out_refuses_the_request() {
+    let h = Harness::new().await;
+    h.start(sleeper(&h, "kept", json!({ "ai_control": true })))
+        .await
+        .unwrap();
+    let mut config = quick(&h.paths);
+    config.ack_timeout = Duration::from_millis(200);
+    let handler =
+        RequestHandler::with_audit(Arc::clone(&h.sup), Arc::new(Audit::with_config(config)));
+    let _hold = handler.audit().writers().0.pause();
+    let request = Request::Stop {
+        selector: selector("kept"),
+    };
+    let started = Instant::now();
+    let err = handler
+        .guarded(&ctx(Some("ai:test"), &request), request)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "E_AUDIT_UNAVAILABLE", "{err}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(h.state("kept").await.status, AppStatus::Running);
+}
+
+#[tokio::test]
+async fn human_request_never_waits_for_a_full_audit_queue() {
+    let h = Harness::new().await;
+    for n in 0..10 {
+        h.start(sleeper(&h, &format!("p{n}"), json!({})))
+            .await
+            .unwrap();
+    }
+    let mut config = quick(&h.paths);
+    config.main.queue = 2;
+    config.security.queue = 2;
+    let handler =
+        RequestHandler::with_audit(Arc::clone(&h.sup), Arc::new(Audit::with_config(config)));
+    let _hold = handler.audit().writers().0.pause();
+
+    let started = Instant::now();
+    for n in 0..10 {
+        let request = Request::Stop {
+            selector: selector(&format!("p{n}")),
+        };
+        let response = handler
+            .guarded(&ctx(None, &request), request)
+            .await
+            .expect("a person's stop runs");
+        assert!(
+            matches!(response, Response::Stopped { count: 1, .. }),
+            "{response:?}"
+        );
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let state = handler.audit().state();
+    assert_eq!(state.state, "degraded", "{state:?}");
+    assert!(state.lost > 0, "the lost lines are counted: {state:?}");
+}
+
+#[tokio::test]
+async fn audit_recovers_when_directory_is_writable_again() {
+    let h = Harness::new().await;
+    h.start(sleeper(&h, "recovering", json!({ "ai_control": true })))
+        .await
+        .unwrap();
+    let dir = h.paths.audit_dir();
+    std::fs::write(&dir, b"in the way").unwrap();
+    let handler = RequestHandler::with_audit(
+        Arc::clone(&h.sup),
+        Arc::new(Audit::with_config(quick(&h.paths))),
+    );
+
+    let request = Request::Stop {
+        selector: selector("recovering"),
+    };
+    let err = handler
+        .guarded(&ctx(Some("ai:test"), &request), request.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "E_AUDIT_UNAVAILABLE", "{err}");
+    assert_eq!(handler.audit().state().state, "degraded");
+
+    std::fs::remove_file(&dir).unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let response = handler
+        .guarded(&ctx(Some("ai:test"), &request), request)
+        .await
+        .expect("the log is back");
+    assert!(
+        matches!(response, Response::Stopped { count: 1, .. }),
+        "{response:?}"
+    );
+    assert_eq!(handler.audit().state().state, "ok");
+    // the lines that were lost are reported by the first one that gets through
+    wait_lines(&dir, "audit.jsonl", |l| {
+        l.iter()
+            .find(|x| x["phase"] == "note" && x["dropped"].is_u64())
+            .cloned()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn denials_are_recorded_for_every_actor() {
+    let h = Harness::new().await;
+    h.start(sleeper(&h, "target", json!({}))).await.unwrap();
+    let handler = RequestHandler::with_audit(
+        Arc::clone(&h.sup),
+        Arc::new(Audit::with_config(quick(&h.paths))),
+    );
+    let dir = h.paths.audit_dir();
+
+    // an AI actor on the main socket and one on the agent socket, and an adapter
+    let request = Request::Delete {
+        selector: selector("target"),
+    };
+    let mut agent = ctx(Some("ai:other-agent"), &request);
+    agent.actor = ActorId::from_connection(Via::Agent, Some("ai:other-agent"));
+    for context in [
+        ctx(Some("ai:test"), &request),
+        agent,
+        adapter_ctx("ui-web", &request),
+    ] {
+        let err = handler
+            .guarded(&context, request.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "E_POLICY_DENIED", "{err}");
+    }
+    for file in ["audit.jsonl", "audit-security.jsonl"] {
+        let denials = wait_lines(&dir, file, |l| {
+            let d: Vec<Value> = l
+                .iter()
+                .filter(|x| x["decision"] == "deny")
+                .cloned()
+                .collect();
+            (d.len() >= 3).then_some(d)
+        })
+        .await;
+        let who: Vec<String> = denials
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}:{}:{}",
+                    d["actor"]["class"].as_str().unwrap(),
+                    d["actor"]["label"].as_str().unwrap(),
+                    d["actor"]["via"].as_str().unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(
+            who,
+            [
+                "ai:test:main",
+                "ai:other-agent:agent",
+                "adapter:ui-web:adapter"
+            ],
+            "{file}"
+        );
+    }
+    assert_eq!(h.state("target").await.status, AppStatus::Running);
+}
+
+#[tokio::test]
+async fn adapter_status_polling_is_coalesced_into_one_line_per_minute() {
+    let h = Harness::new().await;
+    // a clock the test moves by hand
+    let origin = Instant::now();
+    let offset = Arc::new(parking_lot::Mutex::new(Duration::ZERO));
+    let mut config = quick(&h.paths);
+    config.clock = {
+        let offset = Arc::clone(&offset);
+        Arc::new(move || origin + *offset.lock())
+    };
+    let handler =
+        RequestHandler::with_audit(Arc::clone(&h.sup), Arc::new(Audit::with_config(config)));
+    let dir = h.paths.audit_dir();
+
+    for _ in 0..1000 {
+        let request = Request::Status;
+        // the adapter polls inside the burst the limiter allows: spread over simulated seconds
+        *offset.lock() += Duration::from_millis(50);
+        handler
+            .guarded(&adapter_ctx("notifier", &request), request)
+            .await
+            .expect("status");
+    }
+    // 50 simulated seconds: the window is not over, nothing was written
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        lines(&dir, "audit.jsonl").is_empty(),
+        "{:?}",
+        lines(&dir, "audit.jsonl")
+    );
+
+    *offset.lock() += Duration::from_secs(20);
+    let line = wait_lines(&dir, "audit.jsonl", |l| l.first().cloned()).await;
+    assert_eq!(line["op"], "status");
+    assert_eq!(line["count"], 1000);
+    assert_eq!(line["actor"]["class"], "adapter");
+    assert_eq!(line["actor"]["label"], "notifier");
+    assert!(line["first"].is_string() && line["last"].is_string());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        lines(&dir, "audit.jsonl").len(),
+        1,
+        "one line for the window"
+    );
+}
+
+#[tokio::test]
+async fn an_adapter_is_rate_limited_by_its_name() {
+    let h = Harness::new().await;
+    let handler = RequestHandler::with_audit(
+        Arc::clone(&h.sup),
+        Arc::new(Audit::with_config(quick(&h.paths))),
+    );
+    let request = Request::Status;
+    let mut limited = 0;
+    for _ in 0..300 {
+        if let Err(e) = handler
+            .guarded(&adapter_ctx("busy", &request), request.clone())
+            .await
+        {
+            assert_eq!(e.code().as_str(), "E_RATE_LIMITED", "{e}");
+            limited += 1;
+        }
+    }
+    assert!(limited > 100, "{limited}");
+    // another adapter, and a person, have their own allowance
+    handler
+        .guarded(&adapter_ctx("quiet", &request), request.clone())
+        .await
+        .expect("its own bucket");
+    handler
+        .guarded(&ctx(None, &request), request)
+        .await
+        .expect("people are not limited");
+}

@@ -6,69 +6,120 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
-  pages: write
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 8
 
 jobs:
-  build-linux:
-    name: Build Linux ${{ matrix.target }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
             deb_arch: amd64
-          - target: aarch64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
             deb_arch: arm64
-
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15
+            target: x86_64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+      DEB_ARCH: ${{ matrix.deb_arch }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        with:
+          path: oxidepm
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: oxidekit/oxidepm-adapters
+          ref: ${{ github.ref }}
+          path: oxidepm-adapters
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build with cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Package tarball
+      - name: Enable Rosetta for Intel binaries
+        if: matrix.target == 'x86_64-apple-darwin'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../oxidepm-${{ matrix.target }}.tar.gz oxidepm oxidepmd
+          if ! arch -x86_64 /usr/bin/true; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
 
-      - name: Build .deb package
+      - name: Build OxidePM
+        working-directory: oxidepm
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          ARCH="${{ matrix.deb_arch }}"
-          PKG_DIR="oxidepm_${VERSION}_${ARCH}"
+          cargo build --release --target "$TARGET" -p oxidepm -p oxidepmd -p oxidepm-sandbox
+          test "$(target/"$TARGET"/release/oxidepm --version)" = "oxidepm ${GITHUB_REF_NAME#v}"
 
-          mkdir -p "${PKG_DIR}/DEBIAN"
-          mkdir -p "${PKG_DIR}/usr/bin"
-          mkdir -p "${PKG_DIR}/usr/lib/systemd/user"
+      - name: Build the runtime adapter bundle
+        working-directory: oxidepm-adapters
+        run: |
+          cargo build --locked --release --target "$TARGET" \
+            -p oxidepm-adapter-runtime-node -p oxidepm-adapter-runtime-python \
+            -p oxidepm-adapter-runtime-go -p oxidepm-adapter-runtime-rust \
+            -p oxidepm-adapter-bundle
+          bin="target/$TARGET/release"
+          bundle="../oxidepm/share/oxidepm/adapters"
+          "$bin/oxidepm-adapter-bundle" --out "$bundle" --target "$TARGET" \
+            --url-base "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            --sequence "$GITHUB_RUN_NUMBER" \
+            "runtime-node:$bin/oxidepm-runtime-node" \
+            "runtime-python:$bin/oxidepm-runtime-python" \
+            "runtime-go:$bin/oxidepm-runtime-go" \
+            "runtime-rust:$bin/oxidepm-runtime-rust"
+          (cd "$bundle" && shasum -a 256 -c SHA256SUMS)
 
-          cp target/${{ matrix.target }}/release/oxidepm "${PKG_DIR}/usr/bin/"
-          cp target/${{ matrix.target }}/release/oxidepmd "${PKG_DIR}/usr/bin/"
+      - name: Package archives
+        working-directory: oxidepm
+        run: |
+          tar -czf "oxidepm-$TARGET.tar.gz" \
+            -C "$PWD/target/$TARGET/release" oxidepm oxidepmd oxidepm-sandbox \
+            -C "$PWD" share LICENSE-MIT LICENSE-APACHE
+          tar -czf "oxidepm-adapters-$TARGET.tar.gz" -C share/oxidepm/adapters .
 
-          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+      - name: Build Debian package
+        if: matrix.deb_arch != ''
+        working-directory: oxidepm
+        run: |
+          version=$(sh scripts/deb-version.sh "$GITHUB_REF_NAME")
+          pkg="oxidepm_${version}_${DEB_ARCH}"
+          install -dm755 "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/systemd/user" \
+            "$pkg/usr/share/oxidepm" "$pkg/usr/share/doc/oxidepm"
+          cp "target/$TARGET/release/"{oxidepm,oxidepmd,oxidepm-sandbox} "$pkg/usr/bin/"
+          cp -R share/oxidepm/adapters "$pkg/usr/share/oxidepm/"
+          cp LICENSE-MIT LICENSE-APACHE "$pkg/usr/share/doc/oxidepm/"
+
+          cat > "$pkg/DEBIAN/control" << EOF
           Package: oxidepm
-          Version: ${VERSION}
+          Version: $version
           Section: utils
           Priority: optional
-          Architecture: ${ARCH}
-          Maintainer: OxideKit <hello@oxidekit.com>
-          Description: Fast process manager for Node.js, Rust, Python, Go, and Cosmos SDK
-           OxidePM is a PM2 alternative built in Rust. Features include auto-restart,
-           clustering, health checks, log rotation, Prometheus metrics, Telegram/Discord
-           notifications, cron restarts, process dependencies, and Cosmos SDK node management.
-          Homepage: https://github.com/oxidekit/oxidepm
+          Architecture: $DEB_ARCH
+          Maintainer: Nayiem Willems <nayiem@mono-labs.org>
+          Description: Process manager written in Rust with adapter support
+           OxidePM supervises processes, handles restart and health policies, and
+           supports optional runtime and tooling adapters.
+          Homepage: https://github.com/$GITHUB_REPOSITORY
           EOF
 
-          # systemd user service for the daemon
-          cat > "${PKG_DIR}/usr/lib/systemd/user/oxidepmd.service" << EOF
+          cat > "$pkg/DEBIAN/postinst" << 'EOF'
+          #!/bin/sh
+          if [ "$1" = configure ]; then
+              echo "Import the bundled runtimes with: oxidepm adapter import --bundled --tag runtime --enable --yes"
+          fi
+          EOF
+          chmod 755 "$pkg/DEBIAN/postinst"
+
+          cat > "$pkg/usr/lib/systemd/user/oxidepmd.service" << 'EOF'
           [Unit]
           Description=OxidePM Process Manager Daemon
           After=network.target
@@ -78,137 +129,49 @@ jobs:
           ExecStart=/usr/bin/oxidepmd
           Restart=on-failure
           RestartSec=5
+          TimeoutStopSec=160
+          KillMode=mixed
 
           [Install]
           WantedBy=default.target
           EOF
+          dpkg-deb --root-owner-group --build "$pkg"
+          test "$(dpkg-deb -f "$pkg.deb" Version)" = "$version"
 
-          dpkg-deb --build "${PKG_DIR}"
-          # dpkg-deb creates PKG_DIR.deb — rename only if needed
-          if [ "${PKG_DIR}.deb" != "oxidepm_${VERSION}_${ARCH}.deb" ]; then
-            mv "${PKG_DIR}.deb" "oxidepm_${VERSION}_${ARCH}.deb"
-          fi
-
-      - name: Build .rpm package
-        if: matrix.deb_arch == 'amd64'
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sudo apt-get install -y rpm
-
-          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          cp target/${{ matrix.target }}/release/oxidepm rpmbuild/SOURCES/
-          cp target/${{ matrix.target }}/release/oxidepmd rpmbuild/SOURCES/
-
-          cat > rpmbuild/SPECS/oxidepm.spec << 'SPEC'
-          Name: oxidepm
-          Version: %(echo $VERSION)
-          Release: 1
-          Summary: Fast process manager for Node.js, Rust, Python, Go, and Cosmos SDK
-          License: MIT
-          URL: https://github.com/oxidekit/oxidepm
-
-          %description
-          OxidePM is a PM2 alternative built in Rust.
-
-          %install
-          mkdir -p %{buildroot}/usr/bin
-          cp %{_sourcedir}/oxidepm %{buildroot}/usr/bin/
-          cp %{_sourcedir}/oxidepmd %{buildroot}/usr/bin/
-
-          %files
-          /usr/bin/oxidepm
-          /usr/bin/oxidepmd
-          SPEC
-
-          VERSION="${VERSION}" rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/oxidepm.spec || true
-
-      - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: oxidepm-${{ matrix.target }}
-          path: oxidepm-${{ matrix.target }}.tar.gz
-
-      - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: oxidepm-deb-${{ matrix.deb_arch }}
-          path: "*.deb"
-
-  build-macos:
-    name: Build macOS ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../oxidepm-${{ matrix.target }}.tar.gz oxidepm oxidepmd
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: oxidepm-${{ matrix.target }}
-          path: oxidepm-${{ matrix.target }}.tar.gz
+          path: |
+            oxidepm/*.tar.gz
+            oxidepm/*.deb
+          if-no-files-found: error
 
   release:
-    name: Create Release
-    needs: [build-linux, build-macos]
+    name: Publish release assets
+    needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Collect release files
+          merge-multiple: true
+      - name: Write checksums and Homebrew formula
         run: |
-          cd artifacts
-          # Move all files to top level
-          for dir in */; do
-            mv "$dir"* . 2>/dev/null || true
-          done
-          rmdir */ 2>/dev/null || true
-          sha256sum *.tar.gz *.deb 2>/dev/null > checksums.txt
-          cat checksums.txt
-          ls -la
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+          (cd artifacts && sha256sum -- *.tar.gz *.deb > checksums.txt)
+          ruby dist/homebrew/generate.rb "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" artifacts/checksums.txt > artifacts/oxidepm.rb
+          ruby -c artifacts/oxidepm.rb
+      - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/*.tar.gz
             artifacts/*.deb
             artifacts/checksums.txt
+            artifacts/oxidepm.rb
+          fail_on_unmatched_files: true
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  update-homebrew:
-    name: Update Homebrew
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Update Homebrew formula
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          repository: oxidekit/homebrew-tap
-          event-type: update-formula
-          client-payload: '{"version": "${{ github.ref_name }}"}'
+          prerelease: ${{ contains(github.ref_name, '-') }}

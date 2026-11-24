@@ -1,19 +1,26 @@
 //! Top command — real-time process resource monitor
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use colored::Colorize;
 use oxidepm_core::AppStatus;
 use oxidepm_ipc::{Request, Response};
 use std::io::Write;
 
+use crate::output::{is_json_mode, truncate_chars};
+
 pub async fn execute() -> Result<()> {
+    // top redraws a live screen; there is no meaningful single JSON document.
+    if is_json_mode() {
+        bail!("`top` is an interactive view and does not support --json (use `status --json`)");
+    }
+
     let client = super::get_client();
 
     println!("{}", "oxidepm top — press Ctrl+C to exit".dimmed());
     println!();
 
     loop {
-        let response = client.send(&Request::Status).await?;
+        let response = super::send(&client, &Request::Status).await?;
 
         match response {
             Response::Status { mut apps } => {
@@ -29,7 +36,7 @@ pub async fn execute() -> Result<()> {
                 print!("\x1B[2J\x1B[H");
 
                 // Header
-                let running = apps.iter().filter(|a| a.state.status.is_running()).count();
+                let running = apps.iter().filter(|a| a.state.status.has_child()).count();
                 let total = apps.len();
                 println!(
                     "{} — {} processes ({} running)",
@@ -58,7 +65,6 @@ pub async fn execute() -> Result<()> {
                         AppStatus::Stopped => "stopped".red().to_string(),
                         AppStatus::Errored => "errored".red().bold().to_string(),
                         AppStatus::Stopping => "stopping".yellow().to_string(),
-                        AppStatus::UpgradeHalted => "upgrade".magenta().to_string(),
                         _ => format!("{:?}", app.state.status).dimmed().to_string(),
                     };
 
@@ -74,14 +80,14 @@ pub async fn execute() -> Result<()> {
                     println!(
                         "  {:>3} {:<16} {:<8} {:>7} {:>8} {:>8} {:>10}",
                         app.spec.id,
-                        truncate(&app.spec.name, 16),
+                        truncate_chars(&app.spec.name, 16),
                         status_str,
-                        if app.state.status.is_running() {
+                        if app.state.status.has_child() {
                             cpu.to_string()
                         } else {
                             "-".dimmed().to_string()
                         },
-                        if app.state.status.is_running() {
+                        if app.state.status.has_child() {
                             mem
                         } else {
                             "-".dimmed().to_string()
@@ -95,16 +101,12 @@ pub async fn execute() -> Result<()> {
 
                 std::io::stdout().flush()?;
             }
-            _ => {
-                eprintln!("Failed to get status");
-                break;
-            }
+            Response::Error { message, .. } => bail!(message),
+            _ => bail!("Unexpected response from daemon"),
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
-
-    Ok(())
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -137,13 +139,5 @@ fn format_uptime(secs: u64) -> String {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     } else {
         format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
     }
 }

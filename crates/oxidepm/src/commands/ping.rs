@@ -13,7 +13,7 @@ pub async fn execute() -> Result<()> {
             print_success("Daemon is alive");
             Ok(())
         }
-        Ok(Response::Error { message }) => {
+        Ok(Response::Error { message, .. }) => {
             print_error(&message);
             bail!(message)
         }
@@ -21,9 +21,13 @@ pub async fn execute() -> Result<()> {
             print_error("Unexpected response from daemon");
             bail!("Unexpected response")
         }
-        Err(e) => {
-            print_error(&format!("Daemon is not running: {}", e));
+        Err(oxidepm_core::Error::DaemonNotRunning) => {
+            print_error("Daemon is not running");
             bail!("Daemon not running")
+        }
+        Err(e) => {
+            print_error(&format!("Could not reach the daemon: {}", e));
+            bail!("Could not reach the daemon: {}", e)
         }
     }
 }

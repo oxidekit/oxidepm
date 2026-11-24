@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":6,"method":"command.invoke","params":{"verb":"check","argv":["--fix"],"cwd":"/srv/web","dry_run":true,"actor":{"class":"human","label":"cli"},"tty":false}}

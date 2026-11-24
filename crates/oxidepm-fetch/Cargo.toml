@@ -1,0 +1,25 @@
+[package]
+name = "oxidepm-fetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Verified download, safe archive extraction and atomic install for OxidePM (CLI side only)"
+
+[features]
+# Lets a test point the downloader at a plain-http server on the loopback interface. Never enabled
+# in a normal build: the field it adds to `FetchOpts` does not exist without it.
+test-support = []
+
+[dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tar = { version = "0.4", default-features = false }
+flate2 = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

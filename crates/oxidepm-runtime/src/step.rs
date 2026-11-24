@@ -1,0 +1,635 @@
+//! What the core does with the words of a runtime adapter: checks the steps and the plan it
+//! returned, runs the steps itself, and hands back a plan it is willing to execute.
+//!
+//! An adapter returns data and never runs anything. The core limits what it runs on the
+//! adapter's word: only programs the manifest lists in `provides.programs`, only environment
+//! keys the manifest lists in `env_set`, never a key on the fixed deny list, and nothing that
+//! overrides the app's own `env`. Everything here is a pure check or a bounded runner, and
+//! none of it knows the name of a language.
+
+use crate::resolve::daemon_vars;
+use crate::spawn::{ChildEnv, GroupChild};
+use crate::traits::LaunchPlan;
+use oxidepm_adapter_proto::messages::{Capture, PlanResult, Step};
+use oxidepm_adapter_proto::text::{env_key_denied, is_env_name};
+use oxidepm_adapter_proto::{Limits, Manifest};
+use oxidepm_core::{AppSpec, Error, Result};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+
+/// The last bytes of a step's output that stay in memory for the error text.
+pub const STEP_TAIL_BYTES: usize = 64 * 1024;
+
+/// The first bytes of the output of a whole build that go to the build log.
+pub const BUILD_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The default cap on the time a step may ask for.
+pub const BUILD_TIMEOUT_MAX: Duration = Duration::from_secs(3600);
+
+/// What a runtime adapter is allowed to make the core run: the lists of its manifest and the
+/// core's own caps.
+#[derive(Debug, Clone)]
+pub struct RuntimeRules {
+    /// `provides.programs`: bare file names.
+    pub programs: Vec<String>,
+    /// `provides.capture_programs`: the programs whose output may be handed back to the adapter.
+    pub capture_programs: Vec<String>,
+    /// `provides.env_set`: the keys the adapter may add to the environment.
+    pub env_set: Vec<String>,
+    /// A step may ask for at most this long.
+    pub build_timeout_max: Duration,
+    pub limits: Limits,
+}
+
+impl RuntimeRules {
+    pub fn from_manifest(manifest: &Manifest, build_timeout_max: Duration) -> Self {
+        Self {
+            programs: manifest.provides.programs.clone(),
+            capture_programs: manifest.provides.capture_programs.clone(),
+            env_set: manifest.provides.env_set.clone(),
+            build_timeout_max,
+            limits: Limits::PROTOCOL_1,
+        }
+    }
+}
+
+/// A step that passed [`validate_steps`]: everything needed to run it, resolved.
+#[derive(Debug, Clone)]
+pub struct CheckedStep {
+    pub id: String,
+    pub description: String,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: ChildEnv,
+    pub timeout: Duration,
+    pub capture: Capture,
+    pub capture_max: usize,
+    pub optional: bool,
+    /// Keys of `env_add` that were left out because the app's own `env` sets them.
+    pub dropped_env: Vec<String>,
+}
+
+fn invalid<T>(message: impl Into<String>) -> Result<T> {
+    Err(Error::AdapterInvalid(message.into()))
+}
+
+fn has_nul(s: &str) -> bool {
+    s.contains('\0')
+}
+
+/// The name a program is judged by: the file name of the path, or the bare name itself.
+fn basename(program: &str) -> &str {
+    program.rsplit('/').next().unwrap_or(program)
+}
+
+/// Resolve `program` with the child's `PATH`: an absolute path as it is, a bare name through
+/// `PATH`; a relative path with a slash is refused (it would depend on a directory).
+fn resolve(program: &str, cwd: &Path, search: Option<std::ffi::OsString>) -> Result<PathBuf> {
+    if program.is_empty() {
+        return invalid("the program is empty");
+    }
+    if program.contains('/') {
+        if !Path::new(program).is_absolute() {
+            return invalid(format!(
+                "program '{program}' is a relative path; it must be absolute or a bare name"
+            ));
+        }
+        return Ok(PathBuf::from(program));
+    }
+    match search {
+        Some(search) => which::which_in(
+            program,
+            Some(crate::resolve::absolute_search_path(&search, cwd)),
+            cwd,
+        )
+        .map_err(|_| Error::ProcessStartFailed(format!("program '{program}' not found in PATH"))),
+        None => Err(Error::ProcessStartFailed(format!(
+            "program '{program}' not found in PATH"
+        ))),
+    }
+}
+
+/// The entries of an adapter's environment that apply, and the keys left out.
+type EnvCheck = (Vec<(String, String)>, Vec<String>);
+
+/// Check the adapter's extra environment against the rules. Returns the entries that apply
+/// and the keys left out because the app's own `env` has them (the app's value wins).
+fn check_env(
+    extra: &std::collections::BTreeMap<String, String>,
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+    what: &str,
+) -> Result<EnvCheck> {
+    let mut keep = Vec::new();
+    let mut dropped = Vec::new();
+    for (key, value) in extra {
+        if !is_env_name(key) {
+            return invalid(format!(
+                "{what}: '{}' is not an environment variable name",
+                key.escape_debug()
+            ));
+        }
+        if has_nul(value) {
+            return invalid(format!("{what}: the value of {key} contains a NUL byte"));
+        }
+        if env_key_denied(key) {
+            return invalid(format!("{what}: {key} may never be set by an adapter"));
+        }
+        if !rules.env_set.iter().any(|k| k == key) {
+            return invalid(format!("{what}: {key} is not in the adapter's env_set"));
+        }
+        if spec.env.contains_key(key) {
+            dropped.push(key.clone());
+            continue;
+        }
+        keep.push((key.clone(), value.clone()));
+    }
+    Ok((keep, dropped))
+}
+
+/// Check the steps a runtime adapter returned. Nothing runs here. A step that breaks a rule
+/// fails the whole list with `E_ADAPTER_INVALID`, before the first step starts.
+pub fn validate_steps(
+    steps: &[Step],
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+) -> Result<Vec<CheckedStep>> {
+    validate_steps_with(steps, spec, rules, &daemon_vars())
+}
+
+/// [`validate_steps`] with the daemon's environment given.
+pub fn validate_steps_with(
+    steps: &[Step],
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+    daemon_env: &[(String, String)],
+) -> Result<Vec<CheckedStep>> {
+    if steps.len() > rules.limits.max_steps {
+        return invalid(format!(
+            "{} steps; at most {} are accepted",
+            steps.len(),
+            rules.limits.max_steps
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(steps.len());
+    for step in steps {
+        let id = step.id.as_str();
+        if id.is_empty() || id.len() > 64 || !ids.insert(id) {
+            return invalid(format!(
+                "step id '{}' is empty, too long or used twice",
+                id.escape_debug()
+            ));
+        }
+        let what = format!("step '{id}'");
+        let Some(argv0) = step.argv.first() else {
+            return invalid(format!("{what}: argv is empty"));
+        };
+        if step.argv.len() > rules.limits.plan_args_items
+            || step.argv.iter().map(|a| a.len()).sum::<usize>() > rules.limits.plan_args_bytes
+            || step.argv.iter().any(|a| has_nul(a))
+        {
+            return invalid(format!("{what}: argv is too large or contains a NUL byte"));
+        }
+        if let Some(cwd) = &step.cwd {
+            if has_nul(cwd) {
+                return invalid(format!("{what}: cwd contains a NUL byte"));
+            }
+        }
+        let cwd = match &step.cwd {
+            Some(c) if !c.is_empty() => spec.cwd.join(c),
+            _ => spec.cwd.clone(),
+        };
+        let name = basename(argv0);
+        if !rules.programs.iter().any(|p| p == name) {
+            return invalid(format!(
+                "{what}: program '{name}' is not one the adapter's manifest lists"
+            ));
+        }
+        let capturing = step.capture != Capture::None;
+        if capturing && !rules.capture_programs.iter().any(|p| p == name) {
+            return invalid(format!(
+                "{what}: the output of '{name}' may not be captured"
+            ));
+        }
+        let capture_max = match step.capture_max {
+            Some(n) if n as usize > rules.limits.capture_max => {
+                return invalid(format!(
+                    "{what}: capture_max {n} is over the limit of {}",
+                    rules.limits.capture_max
+                ))
+            }
+            Some(n) => n as usize,
+            None => rules.limits.capture_max,
+        };
+        let (add, dropped_env) = check_env(&step.env_add, spec, rules, &what)?;
+        // A capturing step runs without the app's env, so `cargo metadata` can be captured and
+        // `env` cannot.
+        let env = if capturing {
+            let mut bare = spec.clone();
+            bare.env.clear();
+            bare.env_inherit = false;
+            crate::resolve::build_env_from(
+                &bare,
+                &add,
+                daemon_env,
+                crate::resolve::EnvMode::Isolated,
+            )
+        } else {
+            crate::resolve::build_env_from(spec, &add, daemon_env, crate::resolve::APP_ENV_MODE)
+        };
+        // Look up an explicitly configured app PATH without passing it to a capturing step.
+        let search = if capturing {
+            spec.env
+                .get("PATH")
+                .map(std::ffi::OsString::from)
+                .or_else(|| env.get("PATH"))
+        } else {
+            env.get("PATH")
+        };
+        let program = resolve(argv0, &cwd, search)?;
+        let timeout = Duration::from_secs(step.timeout_secs.max(1)).min(rules.build_timeout_max);
+        out.push(CheckedStep {
+            id: step.id.clone(),
+            description: step.description.clone(),
+            program,
+            args: step.argv[1..].to_vec(),
+            cwd,
+            env,
+            timeout,
+            capture: step.capture,
+            capture_max,
+            optional: step.optional,
+            dropped_env,
+        });
+    }
+    Ok(out)
+}
+
+/// A plan that passed [`validate_plan`].
+#[derive(Debug, Clone)]
+pub struct CheckedPlan {
+    pub launch: LaunchPlan,
+    pub binary_path: Option<PathBuf>,
+    /// Keys of `extra_env` left out because the app's own `env` sets them.
+    pub dropped_env: Vec<String>,
+}
+
+/// Check the launch plan of a runtime adapter, a fresh one or a stored one. Nothing runs.
+pub fn validate_plan(
+    plan: &PlanResult,
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+) -> Result<CheckedPlan> {
+    validate_plan_with(plan, spec, rules, &daemon_vars())
+}
+
+/// [`validate_plan`] with the daemon's environment given.
+pub fn validate_plan_with(
+    plan: &PlanResult,
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+    daemon_env: &[(String, String)],
+) -> Result<CheckedPlan> {
+    let what = "plan";
+    if has_nul(&plan.program)
+        || has_nul(&plan.cwd)
+        || plan.binary_path.as_deref().is_some_and(has_nul)
+    {
+        return invalid("plan: a path contains a NUL byte");
+    }
+    if plan.args.len() > rules.limits.plan_args_items
+        || plan.args.iter().map(|a| a.len()).sum::<usize>() > rules.limits.plan_args_bytes
+    {
+        return invalid(format!(
+            "plan: at most {} arguments and {} bytes are accepted",
+            rules.limits.plan_args_items, rules.limits.plan_args_bytes
+        ));
+    }
+    if plan.args.iter().any(|a| has_nul(a)) {
+        return invalid("plan: an argument contains a NUL byte");
+    }
+    // The one program that is not on the manifest's list is the binary the adapter's own build
+    // made: `program` is then its `binary_path`, and it must be a file the daemon's user owns.
+    let built = plan
+        .binary_path
+        .as_deref()
+        .is_some_and(|b| b == plan.program);
+    if built {
+        check_built_binary(&plan.program)?;
+    } else {
+        let name = basename(&plan.program);
+        if !rules.programs.iter().any(|p| p == name) {
+            return invalid(format!(
+                "plan: program '{name}' is not one the adapter's manifest lists"
+            ));
+        }
+    }
+    let cwd = PathBuf::from(&plan.cwd);
+    if !cwd.is_absolute() {
+        return invalid(format!("plan: cwd '{}' is not an absolute path", plan.cwd));
+    }
+    if !cwd.is_dir() {
+        return invalid(format!("plan: cwd '{}' is not a directory", plan.cwd));
+    }
+    let (extra, dropped_env) = check_env(&plan.extra_env, spec, rules, what)?;
+    let env = build_env_from_plan(spec, &extra, daemon_env);
+    let program = resolve(&plan.program, &cwd, env.get("PATH"))?;
+    let binary_path = match &plan.binary_path {
+        Some(p) if !Path::new(p).is_absolute() => {
+            return invalid(format!("plan: binary_path '{p}' is not absolute"))
+        }
+        Some(p) => Some(PathBuf::from(p)),
+        None => None,
+    };
+    Ok(CheckedPlan {
+        launch: LaunchPlan {
+            program,
+            args: plan.args.clone(),
+            cwd,
+            extra_env: extra,
+        },
+        binary_path,
+        dropped_env,
+    })
+}
+
+/// A binary that a build made and the plan names as the program: an absolute path to a regular
+/// file (not a link, which could lead anywhere) that the daemon's own user owns and may execute.
+/// A system program, owned by someone else, is therefore never accepted this way.
+fn check_built_binary(program: &str) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        return invalid(format!("plan: binary_path '{program}' is not absolute"));
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => {
+            return invalid(format!(
+                "plan: the binary '{program}' that the build should have made is not there"
+            ))
+        }
+    };
+    if !meta.is_file() || meta.permissions().mode() & 0o100 == 0 {
+        return invalid(format!("plan: '{program}' is not an executable file"));
+    }
+    if meta.uid() != nix::unistd::geteuid().as_raw() {
+        return invalid(format!(
+            "plan: '{program}' is not owned by the user the daemon runs as"
+        ));
+    }
+    Ok(())
+}
+
+fn build_env_from_plan(
+    spec: &AppSpec,
+    extra: &[(String, String)],
+    daemon_env: &[(String, String)],
+) -> ChildEnv {
+    crate::resolve::build_env_from(spec, extra, daemon_env, crate::resolve::APP_ENV_MODE)
+}
+
+/// Where the output of the steps of one build goes: the first [`BUILD_LOG_BYTES`] of it, to
+/// a file that is truncated when the build starts.
+pub struct BuildLog {
+    file: Option<std::fs::File>,
+    written: u64,
+    cap: u64,
+}
+
+impl BuildLog {
+    /// Create (truncate) the log file at `path`, mode 0600.
+    pub fn create(path: &Path) -> std::io::Result<Self> {
+        Self::create_capped(path, BUILD_LOG_BYTES)
+    }
+
+    pub fn create_capped(path: &Path, cap: u64) -> std::io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        Ok(Self {
+            file: Some(file),
+            written: 0,
+            cap,
+        })
+    }
+
+    /// A log that keeps nothing.
+    pub fn none() -> Self {
+        Self {
+            file: None,
+            written: 0,
+            cap: 0,
+        }
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.written
+    }
+
+    fn write(&mut self, data: &[u8]) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        let room = self.cap.saturating_sub(self.written) as usize;
+        let take = room.min(data.len());
+        if take > 0 && file.write_all(&data[..take]).is_ok() {
+            self.written += take as u64;
+        }
+        if take < data.len() {
+            // the cap is reached: later output is not kept, and the file says so once
+            let _ = file.write_all(b"\n[build log cut here: the cap was reached]\n");
+            self.file = None;
+        }
+    }
+
+    fn header(&mut self, text: &str) {
+        self.write(text.as_bytes());
+    }
+}
+
+/// How a step ended.
+#[derive(Debug, Clone)]
+pub struct StepOutcome {
+    pub id: String,
+    /// `None` when the step was killed by a signal (the timeout, or something else).
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    /// The last [`STEP_TAIL_BYTES`] of the output (stdout and stderr together).
+    pub tail: String,
+    /// The captured stream, when the step asked for it (at most `capture_max` bytes).
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    /// Output bytes the step produced in total.
+    pub output_bytes: u64,
+}
+
+impl StepOutcome {
+    pub fn success(&self) -> bool {
+        !self.timed_out && self.exit_code == Some(0)
+    }
+}
+
+struct Tail {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl Tail {
+    fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+        // let it grow to twice the cap, then cut: the copy is amortised
+        if self.buf.len() > self.cap * 2 {
+            let cut = self.buf.len() - self.cap;
+            self.buf.drain(..cut);
+        }
+    }
+
+    fn text(&self) -> String {
+        let start = self.buf.len().saturating_sub(self.cap);
+        String::from_utf8_lossy(&self.buf[start..]).into_owned()
+    }
+}
+
+fn push_capped(buf: &mut Vec<u8>, data: &[u8], max: usize) {
+    let room = max.saturating_sub(buf.len());
+    buf.extend_from_slice(&data[..room.min(data.len())]);
+}
+
+/// Run one checked step in its own process group and wait for it.
+///
+/// Output is read in chunks and kept in three bounded places only: the tail, the build log and
+/// the capture, so a step that prints without end costs no memory. The process group is
+/// killed when the step ends (anything it left behind goes too), when the timeout is up, and
+/// when this future is dropped (a Stop during the build).
+pub async fn run_step(step: &CheckedStep, log: &mut BuildLog) -> Result<StepOutcome> {
+    let mut cmd = crate::spawn::group_command(&step.program);
+    cmd.args(&step.args).current_dir(&step.cwd);
+    if step.env.clear {
+        cmd.env_clear();
+    }
+    cmd.envs(step.env.vars.iter().map(|(k, v)| (k, v)));
+    let mut child = GroupChild::spawn(&mut cmd).map_err(|e| {
+        Error::ProcessStartFailed(format!(
+            "step '{}': cannot start '{}': {e}",
+            step.id,
+            step.program.display()
+        ))
+    })?;
+    let mut stdout = child.take_stdout();
+    let mut stderr = child.take_stderr();
+
+    log.header(&format!("== step {}: {}\n", step.id, step.description));
+
+    let capture_out = matches!(step.capture, Capture::Stdout | Capture::Both);
+    let capture_err = matches!(step.capture, Capture::Stderr | Capture::Both);
+    let mut tail = Tail {
+        buf: Vec::new(),
+        cap: STEP_TAIL_BYTES,
+    };
+    let mut cap_out: Vec<u8> = Vec::new();
+    let mut cap_err: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+
+    let result = {
+        let pump = async {
+            let mut b1 = vec![0u8; 16 * 1024];
+            let mut b2 = vec![0u8; 16 * 1024];
+            let (mut out_done, mut err_done) = (stdout.is_none(), stderr.is_none());
+            while !(out_done && err_done) {
+                tokio::select! {
+                    n = async { stdout.as_mut().unwrap().read(&mut b1).await }, if !out_done => {
+                        match n {
+                            Ok(n) if n > 0 => {
+                                total += n as u64;
+                                tail.push(&b1[..n]);
+                                log.write(&b1[..n]);
+                                if capture_out { push_capped(&mut cap_out, &b1[..n], step.capture_max); }
+                            }
+                            _ => out_done = true,
+                        }
+                    }
+                    n = async { stderr.as_mut().unwrap().read(&mut b2).await }, if !err_done => {
+                        match n {
+                            Ok(n) if n > 0 => {
+                                total += n as u64;
+                                tail.push(&b2[..n]);
+                                log.write(&b2[..n]);
+                                if capture_err { push_capped(&mut cap_err, &b2[..n], step.capture_max); }
+                            }
+                            _ => err_done = true,
+                        }
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(step.timeout, async {
+            tokio::join!(child.finish_group(), pump).0
+        })
+        .await
+    };
+
+    let (exit_code, timed_out) = match result {
+        Ok(Ok(status)) => (status.code(), false),
+        Ok(Err(e)) => {
+            child.kill_and_wait().await;
+            return Err(Error::ProcessStartFailed(format!(
+                "step '{}': waiting failed: {e}",
+                step.id
+            )));
+        }
+        Err(_) => {
+            child.kill_and_wait().await;
+            (None, true)
+        }
+    };
+    if timed_out {
+        log.header(&format!(
+            "\n[step {} killed: no result after {} s]\n",
+            step.id,
+            step.timeout.as_secs()
+        ));
+    }
+    let text = |buf: &[u8]| String::from_utf8_lossy(buf).into_owned();
+    Ok(StepOutcome {
+        id: step.id.clone(),
+        exit_code,
+        timed_out,
+        tail: tail.text(),
+        stdout: capture_out.then(|| text(&cap_out)),
+        stderr: capture_err.then(|| text(&cap_err)),
+        output_bytes: total,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_output_over_cap_does_not_grow_memory_tail_buffer() {
+        let mut tail = Tail {
+            buf: Vec::new(),
+            cap: STEP_TAIL_BYTES,
+        };
+        let chunk = vec![b'x'; 16 * 1024];
+        for _ in 0..4096 {
+            tail.push(&chunk);
+            assert!(tail.buf.len() <= STEP_TAIL_BYTES * 2 + chunk.len());
+        }
+        assert_eq!(tail.text().len(), STEP_TAIL_BYTES);
+        let mut cap = Vec::new();
+        for _ in 0..100 {
+            push_capped(&mut cap, &chunk, 1000);
+        }
+        assert_eq!(cap.len(), 1000);
+    }
+}

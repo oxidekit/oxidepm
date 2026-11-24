@@ -4,41 +4,48 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "OxidePM CLI - PM2-like process manager for Rust and Node.js"
+description = "OxidePM CLI - Process manager written in Rust for any runtime, with adapter support"
 
 [[bin]]
 name = "oxidepm"
 path = "src/main.rs"
 
+[features]
+# Lets the integration tests point the CLI at a local index server with throwaway keys. Never
+# enabled in a normal build: the environment variables it reads are not read without it.
+test-support = ["oxidepm-fetch/test-support", "oxidepm-adapter-proto/test-support"]
+
 [dependencies]
 oxidepm-core = { workspace = true }
 oxidepm-ipc = { workspace = true }
 oxidepm-logs = { workspace = true }
-oxidepm-tui = { workspace = true }
-oxidepm-web = { workspace = true }
-oxidepm-health = { workspace = true }
-oxidepm-notify = { workspace = true }
+oxidepm-fetch = { workspace = true }
+oxidepm-db = { workspace = true }
+oxidepm-adapter-proto = { workspace = true }
+oxidepm-sandbox = { workspace = true, default-features = false }
+sha2 = { workspace = true }
+semver = "1"
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tabled = { workspace = true }
 colored = { workspace = true }
 dirs = { workspace = true }
-dotenvy = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
 dialoguer = { workspace = true }
 atty = { workspace = true }
-reqwest = { workspace = true }
+libc = "0.2"
 tempfile = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen = { workspace = true }
+tar = { version = "0.4", default-features = false }
+flate2 = { workspace = true }
 
 [dev-dependencies]
+oxidepm-fetch = { workspace = true, features = ["test-support"] }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

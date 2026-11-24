@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "OxidePM daemon - process supervisor"
 
+[lib]
+name = "oxidepmd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "oxidepmd"
 path = "src/main.rs"
@@ -15,26 +19,51 @@ oxidepm-core = { workspace = true }
 oxidepm-db = { workspace = true }
 oxidepm-ipc = { workspace = true }
 oxidepm-runtime = { workspace = true }
-oxidepm-watch = { workspace = true }
 oxidepm-logs = { workspace = true }
 oxidepm-health = { workspace = true }
-oxidepm-notify = { workspace = true }
+oxidepm-adapter-proto = { workspace = true, features = ["tokio"] }
+oxidepm-sandbox = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-once_cell = { workspace = true }
-regex = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 nix = { workspace = true }
 sysinfo = { workspace = true }
-dirs = { workspace = true }
 chrono = { workspace = true }
-tempfile = { workspace = true }
-reqwest = { workspace = true }
-cron = { workspace = true }
+futures = { workspace = true }
+tracing-appender = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+semver = "1"
+async-trait = { workspace = true }
+
+[features]
+# Timing-heavy tests (more than about 5 s); run in their own job.
+slow-tests = []
+# Counters of the tasks the supervisor owns (`Supervisor::stats`); production builds carry none.
+test-stats = []
+# Hooks that let a test hold the supervisor at an exact point (enabled for the tests below).
+test-hooks = ["test-stats"]
 
 [dev-dependencies]
+# the throwaway signing keys of the install tests
+oxidepm-adapter-proto = { workspace = true, features = ["tokio", "test-support"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { workspace = true }
+# the tests drive the library with its test hooks on
+oxidepmd = { path = ".", features = ["test-hooks", "test-stats"] }
+tempfile = { workspace = true }
+# the paused clock of the dependency-wait unit tests
+tokio = { workspace = true, features = ["test-util"] }
+serde_json = { workspace = true }
+nix = { workspace = true }
+sqlx = { workspace = true }
+# the scriptable test adapter (its library: the report reader; the binary is built by the tests)
+oxidepm-adapter-fixture = { path = "../oxidepm-adapter-fixture" }
+# a filter in a test, to take Landlock away from the launcher
+seccompiler = "0.5"
+libc = "0.2"

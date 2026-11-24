@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":5,"method":"runtime.plan","params":{"spec":{"name":"web","runtime":"node","command":"server.js","args":[],"cwd":"/srv/web","tags":[],"ports":[],"instances":1,"env":{},"options":{}},"steps_done":[{"id":"install","exit_code":0,"stdout":"added 10 packages","stderr":""}]}}

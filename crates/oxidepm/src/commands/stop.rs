@@ -10,10 +10,14 @@ pub async fn execute(selector: &str) -> Result<()> {
     let client = super::get_client();
     let selector = Selector::parse(selector);
 
-    let response = client.send(&Request::Stop { selector }).await?;
+    let response = super::send(&client, &Request::Stop { selector }).await?;
+
+    if let Some(done) = super::plan_shown(&response) {
+        return done;
+    }
 
     match response {
-        Response::Stopped { count } => {
+        Response::Stopped { count, .. } => {
             if count > 0 {
                 print_success(&format!("Stopped {} process(es)", count));
             } else {
@@ -21,7 +25,7 @@ pub async fn execute(selector: &str) -> Result<()> {
             }
             Ok(())
         }
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             print_error(&message);
             bail!(message)
         }

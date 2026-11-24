@@ -1,12 +1,12 @@
 # Full-stack example: Next.js frontend + Rust API + PostgreSQL worker
 # Demonstrates dependencies, clustering, health checks, and cron restarts
 # Start with: oxidepm start examples/full-stack.config.toml
+# Needs the runtime adapters: oxidepm adapter import --bundled --tag runtime --enable --yes
 
 [[apps]]
 name = "api"
 mode = "cargo"
 cwd = "./api"
-watch = true
 env = { RUST_LOG = "info", DATABASE_URL = "postgres://localhost/myapp" }
 tags = ["backend"]
 

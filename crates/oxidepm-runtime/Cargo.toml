@@ -4,16 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Process runners for OxidePM (Node, Cargo, Rust, npm)"
+description = "Process runners for OxidePM (command, Node, npm, Cargo, Rust, Python, Go)"
 
 [dependencies]
 oxidepm-core = { workspace = true }
+oxidepm-adapter-proto = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 which = { workspace = true }
+nix = { workspace = true }
 serde_json = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

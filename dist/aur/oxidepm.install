@@ -1,0 +1,8 @@
+post_install() {
+    echo "OxidePM: the runtimes (node, npm, pnpm, yarn, python, go, rust, cargo) are adapters, installed in /usr/share/oxidepm/adapters."
+    echo "As your user, import them with:  oxidepm adapter import --bundled --tag runtime --enable --yes"
+}
+
+post_upgrade() {
+    post_install
+}

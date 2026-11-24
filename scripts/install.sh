@@ -1,6 +1,6 @@
 #!/bin/sh
 # OxidePM Installer
-# Usage: curl -fsSL https://oxidekit.github.io/oxidepm/install.sh | sh
+# Usage: curl -fsSL https://oxidepm.com/install.sh | sh
 
 set -e
 
@@ -56,6 +56,43 @@ get_latest_version() {
     info "Latest version: $VERSION"
 }
 
+# Print the sha256 of a file (sha256sum on Linux, shasum on macOS)
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        error "Neither sha256sum nor shasum is available, so the download cannot be checked"
+    fi
+}
+
+# Check the archive against checksums.txt of the same release. This checks that the file
+# arrived whole and is the one the release lists; it is not a signature check.
+verify_checksum() {
+    ARCHIVE="$1"
+    NAME="oxidepm-$TARGET.tar.gz"
+    CHECKSUMS_URL="https://github.com/$REPO/releases/download/$VERSION/checksums.txt"
+
+    curl -fsSL "$CHECKSUMS_URL" -o "$TEMP_DIR/checksums.txt" || error "Could not download $CHECKSUMS_URL"
+
+    # the line for exactly this file name (sha256sum output: "<hash>  <name>")
+    EXPECTED=$(awk -v n="$NAME" '{ f = $2; sub(/^\*/, "", f); if (f == n) print $1 }' "$TEMP_DIR/checksums.txt")
+    case "$EXPECTED" in
+        "") error "checksums.txt does not list $NAME" ;;
+        *[!0-9a-fA-F]*) error "checksums.txt has an invalid entry for $NAME" ;;
+    esac
+    if [ "${#EXPECTED}" -ne 64 ]; then
+        error "checksums.txt has an invalid entry for $NAME"
+    fi
+
+    ACTUAL=$(sha256_of "$ARCHIVE")
+    if [ "$ACTUAL" != "$EXPECTED" ]; then
+        error "Checksum mismatch for $NAME (expected $EXPECTED, got $ACTUAL). Nothing was installed."
+    fi
+    success "Checksum verified (sha256 $ACTUAL)"
+}
+
 # Download and install
 install() {
     DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/oxidepm-$TARGET.tar.gz"
@@ -67,6 +104,8 @@ install() {
 
     curl -fsSL "$DOWNLOAD_URL" -o "$TEMP_DIR/oxidepm.tar.gz"
 
+    verify_checksum "$TEMP_DIR/oxidepm.tar.gz"
+
     info "Extracting..."
     tar -xzf "$TEMP_DIR/oxidepm.tar.gz" -C "$TEMP_DIR"
 
@@ -76,14 +115,57 @@ install() {
     if [ -w "$INSTALL_DIR" ]; then
         mv "$TEMP_DIR/oxidepm" "$INSTALL_DIR/"
         mv "$TEMP_DIR/oxidepmd" "$INSTALL_DIR/"
+        # releases before the sandbox launcher do not have it
+        if [ -f "$TEMP_DIR/oxidepm-sandbox" ]; then mv "$TEMP_DIR/oxidepm-sandbox" "$INSTALL_DIR/"; fi
     else
         warn "Need sudo to install to $INSTALL_DIR"
         sudo mv "$TEMP_DIR/oxidepm" "$INSTALL_DIR/"
         sudo mv "$TEMP_DIR/oxidepmd" "$INSTALL_DIR/"
+        if [ -f "$TEMP_DIR/oxidepm-sandbox" ]; then sudo mv "$TEMP_DIR/oxidepm-sandbox" "$INSTALL_DIR/"; fi
     fi
 
     chmod +x "$INSTALL_DIR/oxidepm"
     chmod +x "$INSTALL_DIR/oxidepmd"
+    if [ -f "$INSTALL_DIR/oxidepm-sandbox" ]; then chmod +x "$INSTALL_DIR/oxidepm-sandbox"; fi
+
+    install_adapters
+}
+
+# The adapters a release carries (the runtimes among them) go to share/oxidepm/adapters next to
+# the programs' directory, where "oxidepm adapter import --bundled" looks for them. A release
+# without them installs as before.
+install_adapters() {
+    BUNDLE_SRC="$TEMP_DIR/share/oxidepm/adapters"
+    BUNDLE_DIR=""
+    if [ ! -f "$BUNDLE_SRC/index.json" ]; then
+        return 0
+    fi
+    BUNDLE_DIR="$(dirname "$INSTALL_DIR")/share/oxidepm/adapters"
+    info "Installing the adapters of this release to $BUNDLE_DIR"
+    if [ -w "$INSTALL_DIR" ]; then
+        rm -rf "$BUNDLE_DIR" && mkdir -p "$BUNDLE_DIR" && cp -R "$BUNDLE_SRC/." "$BUNDLE_DIR/"
+    else
+        sudo rm -rf "$BUNDLE_DIR" && sudo mkdir -p "$BUNDLE_DIR" && sudo cp -R "$BUNDLE_SRC/." "$BUNDLE_DIR/"
+    fi
+}
+
+# The runtimes (node, npm, pnpm, yarn, python, go, rust, cargo) are adapters. One command imports
+# and enables the ones the release carries; it is printed and run, and a failure does not undo
+# the install.
+import_runtimes() {
+    if [ -z "$BUNDLE_DIR" ]; then
+        warn "This release carries no adapters, so no runtime is installed. Import one with: oxidepm adapter import <name> --enable"
+        return 0
+    fi
+    IMPORT="$INSTALL_DIR/oxidepm adapter import --bundled --tag runtime --enable --yes"
+    info "Importing the runtimes: $IMPORT"
+    if "$INSTALL_DIR/oxidepm" adapter import --bundled --tag runtime --enable --yes; then
+        success "The runtimes are installed"
+    else
+        warn "The runtimes were not imported. Run this when the reason above is dealt with:"
+        warn "  $IMPORT"
+        warn "On a machine that cannot enforce the adapters' sandbox the command stops and says so; add --allow-unenforced if you accept that."
+    fi
 }
 
 # Verify installation
@@ -104,7 +186,7 @@ main() {
     echo ""
     echo "  ╔═══════════════════════════════════╗"
     echo "  ║       OxidePM Installer           ║"
-    echo "  ║  Process Manager for Node & Rust  ║"
+    echo "  ║   Process manager with adapters   ║"
     echo "  ╚═══════════════════════════════════╝"
     echo ""
 
@@ -112,6 +194,7 @@ main() {
     get_latest_version
     install
     verify
+    import_runtimes
 }
 
 main

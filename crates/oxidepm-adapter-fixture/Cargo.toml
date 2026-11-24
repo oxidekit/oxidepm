@@ -1,0 +1,25 @@
+[package]
+name = "oxidepm-adapter-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "A scriptable test adapter that speaks the real adapter protocol (never shipped)"
+publish = false
+
+[lib]
+name = "oxidepm_adapter_fixture"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxidepm-fixture-adapter"
+path = "src/main.rs"
+
+[dependencies]
+oxidepm-adapter-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

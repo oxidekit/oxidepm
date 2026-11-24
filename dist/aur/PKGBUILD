@@ -1,24 +1,37 @@
-# Maintainer: OxideKit <hello@oxidekit.com>
+# Maintainer: Nayiem Willems <nayiem@mono-labs.org>
 pkgname=oxidepm
-pkgver=0.3.1
+_tag=v0.4.0-rc.1
+pkgver=${_tag#v}
+pkgver=${pkgver//-/}
 pkgrel=1
-pkgdesc='Fast process manager for Node.js, Python, Go, Rust, and Cosmos SDK. PM2 alternative built in Rust.'
+pkgdesc='Process manager written in Rust for any runtime, with adapter support'
 arch=('x86_64' 'aarch64')
 url='https://github.com/oxidekit/oxidepm'
-license=('MIT')
+license=('MIT OR Apache-2.0')
 depends=('gcc-libs')
 makedepends=('rust' 'cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/oxidekit/oxidepm/archive/v$pkgver.tar.gz")
+install=oxidepm.install
+source=("$pkgname-$_tag.tar.gz::$url/archive/$_tag.tar.gz")
+source_x86_64=("$pkgname-adapters-$_tag-x86_64.tar.gz::$url/releases/download/$_tag/oxidepm-adapters-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$pkgname-adapters-$_tag-aarch64.tar.gz::$url/releases/download/$_tag/oxidepm-adapters-aarch64-unknown-linux-gnu.tar.gz")
+noextract=("$pkgname-adapters-$_tag-$CARCH.tar.gz")
 sha256sums=('SKIP')
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
 
 build() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgname-${_tag#v}"
     cargo build --workspace --release
 }
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgname-${_tag#v}"
     install -Dm755 "target/release/oxidepm" "$pkgdir/usr/bin/oxidepm"
     install -Dm755 "target/release/oxidepmd" "$pkgdir/usr/bin/oxidepmd"
-    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm755 "target/release/oxidepm-sandbox" "$pkgdir/usr/bin/oxidepm-sandbox"
+    install -dm755 "$pkgdir/usr/share/oxidepm/adapters"
+    tar -xzf "$srcdir/$pkgname-adapters-$_tag-$CARCH.tar.gz" -C "$pkgdir/usr/share/oxidepm/adapters"
+    (cd "$pkgdir/usr/share/oxidepm/adapters" && sha256sum --check SHA256SUMS)
+    install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
 }

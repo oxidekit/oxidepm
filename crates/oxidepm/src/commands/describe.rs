@@ -10,7 +10,7 @@ pub async fn execute(target: &str) -> Result<()> {
     let client = super::get_client();
     let selector = Selector::parse(target);
 
-    let response = client.send(&Request::Describe { selector }).await?;
+    let response = super::send(&client, &Request::Describe { selector }).await?;
 
     match response {
         Response::Described {
@@ -19,10 +19,10 @@ pub async fn execute(target: &str) -> Result<()> {
             args,
             cwd,
             env,
-            mode,
+            runtime,
         } => {
             println!("Process: {}", name);
-            println!("Mode: {}", mode);
+            println!("Runtime: {}", runtime);
             println!("Working Directory: {}", cwd);
             println!();
             println!("Command: {}", command);
@@ -49,7 +49,7 @@ pub async fn execute(target: &str) -> Result<()> {
 
             Ok(())
         }
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             print_error(&message);
             bail!(message)
         }

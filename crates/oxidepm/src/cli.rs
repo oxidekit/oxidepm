@@ -1,11 +1,14 @@
 //! CLI argument definitions
 
-use clap::{Parser, Subcommand, Args, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "oxidepm")]
-#[command(version, about = "PM2-like process manager for Rust and Node.js")]
+#[command(
+    version,
+    about = "Process manager written in Rust for any runtime, with adapter support"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -14,24 +17,110 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
-    /// Number of instances for clustering
-    #[arg(short, long, default_value = "1", global = true)]
-    pub instances: u32,
-
-    /// Port assignment for the process
-    #[arg(long, global = true)]
-    pub port: Option<u16>,
-
-    /// HTTP health check URL endpoint
-    #[arg(long, global = true)]
-    pub health_check: Option<String>,
-
     /// Output in JSON format instead of tables
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Show what the command would do and change nothing (with --json, the output is the plan)
+    #[arg(long = "dry-run", global = true)]
+    pub dry_run: bool,
+}
+
+/// What `--dry-run` means for a command.
+pub enum DryRun {
+    /// The daemon answers with a plan.
+    Plan,
+    /// The command rehearses itself (it runs in the CLI, not in the daemon).
+    Own,
+    /// The command only reads: there is nothing to rehearse.
+    ReadOnly,
+    /// The command changes something and has no rehearsal.
+    None,
+}
+
+impl Commands {
+    /// What `--dry-run` does for this command.
+    pub fn dry_run(&self) -> DryRun {
+        match self {
+            // The preflight verb runs before the start request.
+            Commands::Start(args) if args.check => DryRun::None,
+            Commands::Start(_)
+            | Commands::Stop { .. }
+            | Commands::Restart { .. }
+            | Commands::Reload { .. }
+            | Commands::Delete { .. }
+            | Commands::Flush { .. }
+            | Commands::Save { .. }
+            | Commands::Resurrect
+            | Commands::Kill
+            | Commands::Policy { .. } => DryRun::Plan,
+            Commands::Startup { .. }
+            | Commands::Update { .. }
+            | Commands::Backup { .. }
+            | Commands::Restore { .. } => DryRun::Own,
+            Commands::Env(args) => match args.command {
+                EnvCommand::List { .. } => DryRun::ReadOnly,
+                _ => DryRun::None,
+            },
+            Commands::Status { .. }
+            | Commands::Show { .. }
+            | Commands::Logs(_)
+            | Commands::Audit(_)
+            | Commands::Ping
+            | Commands::Describe { .. }
+            | Commands::Top
+            | Commands::Completions { .. }
+            | Commands::ManPage => DryRun::ReadOnly,
+            Commands::Adapter(args) => match args.command {
+                // the rehearsal fetches, verifies and unpacks in the CLI and prints the preview
+                AdapterCommand::Import(_) | AdapterCommand::Update(_) => DryRun::Own,
+                // the daemon answers with a plan: the grant, the process, the state
+                AdapterCommand::Enable(_)
+                | AdapterCommand::Disable { .. }
+                | AdapterCommand::Remove { .. } => DryRun::Plan,
+                AdapterCommand::List { .. }
+                | AdapterCommand::Search { .. }
+                | AdapterCommand::Info { .. } => DryRun::ReadOnly,
+            },
+        }
+    }
+
+    /// The command's name as the user typed it, for messages.
+    pub fn name(&self) -> String {
+        let name = match self {
+            Commands::Start(args) if args.check => "start --check",
+            Commands::Start(_) => "start",
+            Commands::Stop { .. } => "stop",
+            Commands::Restart { .. } => "restart",
+            Commands::Delete { .. } => "delete",
+            Commands::Status { .. } => "status",
+            Commands::Policy { .. } => "policy",
+            Commands::Show { .. } => "show",
+            Commands::Logs(_) => "logs",
+            Commands::Audit(_) => "audit",
+            Commands::Ping => "ping",
+            Commands::Save { .. } => "save",
+            Commands::Resurrect => "resurrect",
+            Commands::Kill => "kill",
+            Commands::Startup { .. } => "startup",
+            Commands::Reload { .. } => "reload",
+            Commands::Flush { .. } => "flush",
+            Commands::Describe { .. } => "describe",
+            Commands::Update { .. } => "update",
+            Commands::Env(_) => "env",
+            Commands::Top => "top",
+            Commands::Completions { .. } => "completions",
+            Commands::ManPage => "man",
+            Commands::Backup { .. } => "backup",
+            Commands::Restore { .. } => "restore",
+            Commands::Adapter(_) => "adapter",
+        };
+        name.to_string()
+    }
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // Parsed once per invocation.
 pub enum Commands {
     /// Start a process
     Start(StartArgs),
@@ -56,25 +145,45 @@ pub enum Commands {
 
     /// Show process status table
     Status {
-        /// Show extended info (cwd, port)
+        /// Show extended info (cwd, port, policy markers)
         #[arg(long)]
         more: bool,
+        /// Show how the daemon itself is (audit log, agent socket, warnings) instead of the apps
+        #[arg(long, conflicts_with = "more")]
+        daemon: bool,
+    },
+
+    /// Change an app's policy markers without restarting it (see docs/AI-SAFETY.md)
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
     },
 
     /// Show detailed info for a process
     Show {
         /// Process name or id
         selector: String,
+
+        /// Show environment values and hook scripts instead of markers
+        #[arg(long)]
+        reveal: bool,
     },
 
     /// View process logs
     Logs(LogsArgs),
 
+    /// Read the audit log: what AI agents and adapters did, and every caution or dangerous request
+    Audit(AuditArgs),
+
     /// Check daemon health
     Ping,
 
     /// Save current process list
-    Save,
+    Save {
+        /// Replace a non-empty saved file even when nothing is running
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Restore saved processes
     Resurrect,
@@ -89,13 +198,7 @@ pub enum Commands {
         target: Option<StartupTarget>,
     },
 
-    /// Launch TUI dashboard for monitoring processes
-    Monit,
-
-    /// Start Web API server
-    Web(WebArgs),
-
-    /// Graceful restart of process(es)
+    /// Restart process(es), same as restart (there is no zero-downtime reload)
     Reload {
         /// Process name, id, or "all"
         selector: String,
@@ -111,20 +214,8 @@ pub enum Commands {
 
     /// Show what command would run without starting
     Describe {
-        /// Process name, id, or target file/directory
-        target: String,
-    },
-
-    /// Configure notifications (Telegram, etc.)
-    Notify(NotifyArgs),
-
-    /// Check if a project is ready to run (dependencies, configs, env)
-    Check(CheckArgs),
-
-    /// Show Cosmos node status (sync state, block height, lifecycle)
-    CosmosStatus {
         /// Process name or id
-        selector: String,
+        target: String,
     },
 
     /// Update oxidepm to the latest release (or a specific version)
@@ -132,16 +223,10 @@ pub enum Commands {
         /// Target version (e.g., "0.2.3"). Defaults to latest.
         #[arg(long)]
         version: Option<String>,
+        /// Install a version older than the one running
+        #[arg(long)]
+        force: bool,
     },
-
-    /// Initialize a config file by scanning the project directory
-    Init {
-        /// Project directory to scan (default: current directory)
-        dir: Option<String>,
-    },
-
-    /// Deploy to a remote server via SSH (pull + restart)
-    Deploy(DeployArgs),
 
     /// Manage process environment variables
     Env(EnvArgs),
@@ -159,78 +244,205 @@ pub enum Commands {
     #[command(name = "man")]
     ManPage,
 
-    /// Backup config, saved processes, and notification settings to a tarball
+    /// Back up the saved process list, state database, and adapter registry to a tarball
     Backup {
         /// Output file (default: oxidepm-backup.tar.gz)
         #[arg(short, long)]
         output: Option<String>,
     },
 
-    /// Restore from a backup tarball
+    /// Restore from a backup tarball (the daemon must not be running)
     Restore {
         /// Backup file to restore from
         file: String,
+
+        /// Overwrite existing files without asking
+        #[arg(short, long)]
+        yes: bool,
     },
 
-    /// Show git diff on a remote server (what changed since last deploy)
-    Diff(DiffArgs),
+    /// Find, inspect and import adapters (separate programs that add features)
+    Adapter(AdapterArgs),
 }
 
 #[derive(Args)]
-pub struct NotifyArgs {
+pub struct AdapterArgs {
     #[command(subcommand)]
-    pub command: NotifyCommand,
+    pub command: AdapterCommand,
 }
 
 #[derive(Subcommand)]
-pub enum NotifyCommand {
-    /// Configure Telegram notifications
-    Telegram {
-        /// Bot token from @BotFather
-        #[arg(long)]
-        token: String,
+pub enum AdapterCommand {
+    /// Fetch an adapter, verify it and show what it needs (nothing runs)
+    Import(ImportArgs),
 
-        /// Chat ID to send messages to
+    /// List the installed adapters (or, with --available, what the index offers)
+    List {
+        /// List what the signed index offers instead of what is installed
         #[arg(long)]
-        chat: String,
+        available: bool,
     },
 
-    /// Remove notification configuration
+    /// Update installed adapters to a newer release, or go back to the previous one
+    Update(UpdateArgs),
+
+    /// Enable an installed adapter: give it the rights you accept and start it
+    Enable(EnableArgs),
+
+    /// Disable an adapter: stop it and take its rights away
+    Disable {
+        /// Adapter name
+        name: String,
+    },
+
+    /// Remove an adapter's installed files (its state directory is kept unless --purge)
     Remove {
-        /// Channel to remove (e.g., "telegram")
-        channel: String,
-    },
+        /// Adapter name
+        name: String,
 
-    /// Set which events to notify on
-    Events {
-        /// Events to notify (comma-separated: start,stop,crash,restart,memory_limit,health_check)
+        /// Also delete the adapter's state directory (it may hold tokens and keys)
         #[arg(long)]
-        set: String,
+        purge: bool,
     },
 
-    /// Show current notification configuration
-    Status,
+    /// Search the index by name, summary, tag or description
+    Search {
+        /// Text to look for
+        query: String,
+    },
 
-    /// Test notifications by sending a test message
-    Test,
+    /// Show an installed adapter (or, if it is not installed, what the index says about it)
+    Info {
+        /// Adapter name
+        name: String,
+    },
+}
+
+#[derive(Args)]
+pub struct ImportArgs {
+    /// An adapter name (from the signed index), or a file or https URL of an archive you pin
+    /// with --sha256. With --bundled, the names to take from the bundle (default: all).
+    pub names: Vec<String>,
+
+    /// Take the adapters from the bundle that this release carries
+    #[arg(long)]
+    pub bundled: bool,
+
+    /// With --bundled: only the adapters that have this tag (for example `runtime`)
+    #[arg(long)]
+    pub tag: Option<String>,
+
+    /// The sha256 of the archive you trust (for a file or URL); without it the hash is printed
+    /// and nothing is installed
+    #[arg(long)]
+    pub sha256: Option<String>,
+
+    /// Allow an adapter that is not signed to use a name the core reserves for official adapters
+    #[arg(long = "allow-reserved-name")]
+    pub allow_reserved_name: bool,
+
+    /// Enable the adapter right after it is installed (the same consent as `adapter enable`)
+    #[arg(long)]
+    pub enable: bool,
+
+    /// With --enable: accept without asking, only for an adapter that needs nothing broad
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Args)]
+pub struct UpdateArgs {
+    /// The adapter to update (or use --all)
+    pub name: Option<String>,
+
+    /// Update every installed adapter
+    #[arg(long)]
+    pub all: bool,
+
+    /// Install this version instead of the newest (a lower one needs --allow-downgrade)
+    #[arg(long)]
+    pub version: Option<String>,
+
+    /// Go back to the version before the last update, without the network
+    #[arg(long)]
+    pub rollback: bool,
+
+    /// The fingerprint of the new release, when it asks for more than the installed one
+    #[arg(long)]
+    pub accept: Option<String>,
+
+    /// Allow a version lower than the installed one
+    #[arg(long = "allow-downgrade")]
+    pub allow_downgrade: bool,
+
+    /// Allow the new release to come from another source than the installed one (a pinned adapter
+    /// from the index, or the other way round)
+    #[arg(long = "switch-source")]
+    pub switch_source: bool,
+
+    /// For an adapter you pinned: the file or https URL of the new archive (with --sha256)
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// The sha256 of the new archive, for an adapter you pinned
+    #[arg(long)]
+    pub sha256: Option<String>,
+}
+
+#[derive(Args)]
+pub struct EnableArgs {
+    /// Adapter name
+    pub name: String,
+
+    /// The fingerprint of the release you read the preview of (printed by `import` and `info`)
+    #[arg(long)]
+    pub accept: Option<String>,
+
+    /// Accept without asking, only for an adapter that needs nothing broad
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Give the adapter a lower host level than it asks for (read or lifecycle)
+    #[arg(long)]
+    pub level: Option<String>,
+
+    /// Give the adapter a narrower scope than it asks for (opted-in: only the apps that list it)
+    #[arg(long)]
+    pub scope: Option<String>,
+
+    /// Accept that the OS cannot enforce something the adapter requires to be enforced
+    #[arg(long = "allow-unenforced")]
+    pub allow_unenforced: bool,
+}
+
+#[derive(Subcommand)]
+pub enum PolicyCommands {
+    /// Set the markers of process(es); an instance follows its cluster
+    Set {
+        /// Process name, id, or "all"
+        selector: String,
+
+        /// Read-only for AI actors, whatever --ai-control says (--protected or --protected=false)
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+              required_unless_present = "ai_control")]
+        protected: Option<bool>,
+
+        /// AI actors may stop, restart and reload it (--ai-control or --ai-control=false)
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        ai_control: Option<bool>,
+    },
 }
 
 #[derive(Args)]
 pub struct StartArgs {
-    /// Target: file, directory, or config file (optional if --git is used)
-    pub target: Option<String>,
-
-    /// Clone and start from a git repository URL
-    #[arg(long)]
-    pub git: Option<String>,
-
-    /// Git branch to clone (default: main/master)
-    #[arg(long)]
-    pub branch: Option<String>,
-
-    /// Directory to clone into (default: ~/.oxidepm/repos/<name> or current dir)
-    #[arg(long = "clone-dir")]
-    pub clone_dir: Option<PathBuf>,
+    /// Target: file, directory, or config file
+    // The target in `start --check -- TARGET` arrives as a trailing argument.
+    #[arg(
+        required = false,
+        required_unless_present = "args",
+        default_value_if("args", clap::builder::ArgPredicate::IsPresent, Some(""))
+    )]
+    pub target: String,
 
     /// Process name
     #[arg(short, long)]
@@ -248,32 +460,25 @@ pub struct StartArgs {
     #[arg(long)]
     pub env_file: Option<PathBuf>,
 
-    /// Enable watch mode
+    /// Restart delay in ms (default: 500)
     #[arg(long)]
-    pub watch: bool,
+    pub restart_delay: Option<u64>,
 
-    /// Ignore pattern for watch (repeatable)
+    /// Max restarts before errored (default: 15)
     #[arg(long)]
-    pub ignore: Vec<String>,
+    pub max_restarts: Option<u32>,
 
-    /// Restart delay in ms
-    #[arg(long, default_value = "500")]
-    pub restart_delay: u64,
-
-    /// Max restarts before errored
-    #[arg(long, default_value = "15")]
-    pub max_restarts: u32,
-
-    /// Kill timeout in ms
-    #[arg(long, default_value = "3000")]
-    pub kill_timeout: u64,
+    /// Kill timeout in ms (default: 3000)
+    #[arg(long)]
+    pub kill_timeout: Option<u64>,
 
     /// Disable auto-restart
     #[arg(long)]
     pub no_autorestart: bool,
 
-    /// Force mode: rust, cargo, node, npm, pnpm, yarn, cmd
-    #[arg(long)]
+    /// Force the runtime: cmd, node, npm, pnpm, yarn, cargo, rust, python, go, or any other
+    /// runtime an installed adapter provides (`--runtime` is the same option)
+    #[arg(long, alias = "runtime")]
     pub mode: Option<String>,
 
     /// Script name for npm/pnpm/yarn mode
@@ -300,7 +505,8 @@ pub struct StartArgs {
     #[arg(long = "delay")]
     pub startup_delay: Option<u64>,
 
-    /// Inherit environment variables from parent process
+    /// Give the app the daemon's whole environment (by default it gets PATH, HOME and a few
+    /// other basics, plus --env and --env-file)
     #[arg(long)]
     pub env_inherit: bool,
 
@@ -320,17 +526,56 @@ pub struct StartArgs {
     #[arg(long)]
     pub on_crash: Option<String>,
 
-    /// Auto-setup: install dependencies, create .env from template before starting
+    /// Run the check adapter before starting
     #[arg(long)]
-    pub setup: bool,
+    pub check: bool,
 
-    /// Skip preflight checks (not recommended)
+    /// Number of instances (cluster mode, default: 1)
+    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..=256))]
+    pub instances: Option<u32>,
+
+    /// Base port for the process (instance N gets port + N)
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    pub port: Option<u16>,
+
+    /// Health check: an http(s):// URL, or a script/command to run
     #[arg(long)]
-    pub no_check: bool,
+    pub health_check: Option<String>,
+
+    /// Mark the app protected: read-only for AI actors, whatever --ai-control says
+    #[arg(long)]
+    pub protected: bool,
+
+    /// Let AI actors stop, restart and reload this app (they can never start or delete it)
+    #[arg(long)]
+    pub ai_control: bool,
 
     /// Additional arguments passed to process
     #[arg(last = true)]
     pub args: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct AuditArgs {
+    /// How many of the newest matching lines to show
+    #[arg(long, default_value_t = 50)]
+    pub tail: usize,
+
+    /// Only requests of this actor: `ai:example-agent`, or `ai` for a class, or `example-agent` for a label
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Only this operation (`restart`, `stop`, `delete`, `show`, ...)
+    #[arg(long)]
+    pub op: Option<String>,
+
+    /// Only lines since this long ago (`30m`, `2h`, `1d`) or since this RFC 3339 time
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Read the security file (denials, dangerous requests, what non-humans changed)
+    #[arg(long)]
+    pub security: bool,
 }
 
 #[derive(Args)]
@@ -366,57 +611,6 @@ pub enum StartupTarget {
 }
 
 #[derive(Args)]
-pub struct WebArgs {
-    /// Port for the Web API server
-    #[arg(short, long, default_value = "9615")]
-    pub port: u16,
-
-    /// API key for authentication (optional)
-    #[arg(long)]
-    pub api_key: Option<String>,
-}
-
-#[derive(Args)]
-pub struct CheckArgs {
-    /// Target: file or directory to check
-    pub target: String,
-
-    /// Auto-fix issues (run npm install, create .env from template)
-    #[arg(long)]
-    pub fix: bool,
-
-    /// Set environment variable (can be used multiple times, KEY=VALUE format)
-    #[arg(long = "set-env", value_parser = parse_env)]
-    pub set_envs: Vec<(String, String)>,
-}
-
-#[derive(Args)]
-pub struct DeployArgs {
-    /// Remote host (user@host or SSH alias)
-    pub host: String,
-
-    /// Remote project directory
-    #[arg(long)]
-    pub cwd: Option<String>,
-
-    /// Git branch to pull (default: current branch)
-    #[arg(long)]
-    pub branch: Option<String>,
-
-    /// Process name to restart after pull (default: all)
-    #[arg(long)]
-    pub restart: Option<String>,
-
-    /// Run a post-deploy command on the remote (e.g., "npm run build")
-    #[arg(long)]
-    pub post: Option<String>,
-
-    /// Dry run: show what would be done
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Args)]
 pub struct EnvArgs {
     #[command(subcommand)]
     pub command: EnvCommand,
@@ -446,27 +640,13 @@ pub enum EnvCommand {
     },
 }
 
-#[derive(Args)]
-pub struct DiffArgs {
-    /// Remote host (user@host or SSH alias)
-    pub host: String,
-
-    /// Remote project directory
-    #[arg(long)]
-    pub cwd: Option<String>,
-
-    /// Number of commits to show (default: 5)
-    #[arg(long, default_value = "5")]
-    pub count: usize,
-}
-
 fn parse_env(s: &str) -> Result<(String, String), String> {
     let pos = s.find('=').ok_or("Expected KEY=VALUE format")?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
 /// Parse duration strings like "1h", "30m", "2d", "24h30m" into seconds
-fn parse_duration(s: &str) -> Result<u64, String> {
+pub(crate) fn parse_duration(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
     if s.is_empty() {
         return Err("Empty duration string".to_string());
@@ -511,6 +691,30 @@ fn parse_duration(s: &str) -> Result<u64, String> {
     }
 
     Ok(total_secs)
+}
+
+/// Add migration guidance to clap's error for the old start flags.
+pub(crate) fn removed_start_flag_hint(error: &clap::Error) -> Option<&'static str> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+
+    if error.kind() != ErrorKind::UnknownArgument {
+        return None;
+    }
+    let ContextValue::String(flag) = error.get(ContextKind::InvalidArg)? else {
+        return None;
+    };
+    let hint = match flag.split('=').next()? {
+        "--git" | "--branch" | "--clone-dir" => {
+            "Git checkout options moved to the git-start adapter. Use oxidepm git-start <URL> [--branch BRANCH]. Install it with oxidepm adapter import git-start"
+        }
+        "--setup" => "--setup was removed. Use the check adapter: oxidepm check <target> --fix",
+        "--no-check" => "--no-check was removed. The check adapter is optional. Checks now run only with --check",
+        _ => return None,
+    };
+    let command = std::env::args_os()
+        .skip(1)
+        .find(|arg| !arg.to_string_lossy().starts_with('-'));
+    (command.as_deref() == Some(std::ffi::OsStr::new("start"))).then_some(hint)
 }
 
 #[cfg(test)]

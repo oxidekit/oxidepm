@@ -1,0 +1,35 @@
+[package]
+name = "oxidepm-adapter-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The OxidePM adapter protocol: frames, limits, the bounded line reader, the manifest and the index"
+
+[features]
+# The async line reader (`AsyncFrameReader`). The daemon turns it on; the CLI needs only the types.
+tokio = ["dep:tokio"]
+# Throwaway test keys that sign like minisign, and an index parser that also accepts a loopback
+# http URL, so that tests can run a local index server. Never enabled in a normal build.
+test-support = ["dep:ed25519-dalek", "dep:blake2"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = "1"
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, optional = true }
+minisign-verify = "0.3"
+base64 = "0.22"
+# test-support only: a throwaway signing key for tests (never in a normal build)
+ed25519-dalek = { version = "2", optional = true }
+blake2 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+minisign = "0.7"
+# So that `cargo test` always covers the async reader.
+oxidepm-adapter-proto = { path = ".", features = ["tokio", "test-support"] }
+tempfile = { workspace = true }
+tokio = { workspace = true }

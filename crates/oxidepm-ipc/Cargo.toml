@@ -11,8 +11,11 @@ oxidepm-core = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
+nix = { workspace = true }
+libc = "0.2"
+chrono = { workspace = true }
 
 [dev-dependencies]
+socket2 = "0.6"
 tempfile = { workspace = true }

@@ -1,5 +1,6 @@
 # FastAPI + Redis worker example
 # Start with: oxidepm start examples/python-fastapi.config.toml
+# Needs the runtime adapters: oxidepm adapter import --bundled --tag runtime --enable --yes
 
 [[apps]]
 name = "api"

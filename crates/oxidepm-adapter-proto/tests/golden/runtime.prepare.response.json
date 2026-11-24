@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":4,"result":{"steps":[{"id":"install","argv":["npm","ci"],"cwd":"/srv/web","env_add":{"CI":"1"},"timeout_secs":600,"capture":"none","capture_max":65536,"optional":true,"description":"Install dependencies"}],"notes":["lockfile found"]}}

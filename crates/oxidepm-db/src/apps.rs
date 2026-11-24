@@ -1,14 +1,82 @@
 //! Apps repository - CRUD operations for applications
 
-use oxidepm_core::{AppMode, AppSpec, Error, RestartPolicy, Result};
-use sqlx::sqlite::SqlitePool;
+use chrono::{DateTime, SecondsFormat, Utc};
+use oxidepm_core::{AppSpec, Desired, Error, Result};
+use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
-use std::collections::HashMap;
-use std::path::PathBuf;
+
+/// One stored app.
+///
+/// A row whose stored spec cannot be read (a removed field after a downgrade, a hand
+/// edit) is returned as `Broken` instead of failing the whole listing, so one bad row
+/// never hides the others.
+// Records are short-lived (one per row read); boxing the spec would only complicate the API.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum AppRecord {
+    Ok {
+        spec: AppSpec,
+        parent_id: Option<u32>,
+        desired: Desired,
+    },
+    Broken {
+        id: u32,
+        name: String,
+        mode: String,
+        parent_id: Option<u32>,
+        desired: Desired,
+        error: String,
+        raw: String,
+    },
+}
+
+impl AppRecord {
+    pub fn id(&self) -> u32 {
+        match self {
+            AppRecord::Ok { spec, .. } => spec.id,
+            AppRecord::Broken { id, .. } => *id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            AppRecord::Ok { spec, .. } => &spec.name,
+            AppRecord::Broken { name, .. } => name,
+        }
+    }
+}
+
+const COLUMNS: &str =
+    "id, name, mode, parent_id, desired_state, spec_json, created_at, protected, ai_control";
 
 /// Repository for app operations
 pub struct AppsRepository {
     pool: SqlitePool,
+}
+
+fn db_err(e: impl std::fmt::Display) -> Error {
+    Error::DbError(e.to_string())
+}
+
+/// Map a failed write: a UNIQUE violation on `name` is "app exists", the rest is a DB error.
+fn write_err(e: sqlx::Error, name: &str) -> Error {
+    if let sqlx::Error::Database(d) = &e {
+        if d.is_unique_violation() {
+            return Error::AppAlreadyExists(name.to_string());
+        }
+    }
+    db_err(e)
+}
+
+fn rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+/// `spec_json` of a spec: the id is stored as 0, the `id` column is authoritative.
+fn spec_json(spec: &AppSpec) -> Result<String> {
+    let mut copy = spec.clone();
+    copy.id = 0;
+    Ok(serde_json::to_string(&copy)?)
 }
 
 impl AppsRepository {
@@ -16,234 +84,280 @@ impl AppsRepository {
         Self { pool }
     }
 
-    /// Insert a new app
-    pub async fn insert(&self, spec: &AppSpec) -> Result<u32> {
-        let args_json = serde_json::to_string(&spec.args)?;
-        let env_json = serde_json::to_string(&spec.env)?;
-        let ignore_json = serde_json::to_string(&spec.ignore_patterns)?;
+    /// Insert a new app and return its id. A name that is taken is `AppAlreadyExists`.
+    pub async fn insert_with(
+        &self,
+        spec: &AppSpec,
+        parent_id: Option<u32>,
+        desired: Desired,
+    ) -> Result<u32> {
+        let mut conn = self.pool.acquire().await.map_err(db_err)?;
+        insert_row(&mut conn, spec, parent_id, desired).await
+    }
 
+    /// Insert a group (a cluster parent and its instances) in one transaction: either
+    /// every row lands or none does. Every row starts `stopped`; the first successful
+    /// launch of the group and of each instance flips its own, so a crash before that
+    /// never resurrects a cluster that never ran. A name that is taken is
+    /// `AppAlreadyExists` naming it.
+    pub async fn insert_group(
+        &self,
+        parent: &AppSpec,
+        children: &[AppSpec],
+    ) -> Result<(u32, Vec<u32>)> {
+        self.insert_group_with_desired(parent, children, Desired::Stopped)
+            .await
+    }
+
+    /// Import a cluster atomically, with an explicit desired state for its parent.
+    /// Child rows stay stopped until their own starts succeed.
+    pub async fn insert_group_with_desired(
+        &self,
+        parent: &AppSpec,
+        children: &[AppSpec],
+        desired: Desired,
+    ) -> Result<(u32, Vec<u32>)> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let parent_id = insert_row(&mut tx, parent, None, desired).await?;
+        let mut ids = Vec::with_capacity(children.len());
+        for child in children {
+            ids.push(insert_row(&mut tx, child, Some(parent_id), Desired::Stopped).await?);
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok((parent_id, ids))
+    }
+
+    /// Replace the stored spec. `created_at`, the parent and the desired state are kept.
+    pub async fn update_spec(&self, id: u32, spec: &AppSpec) -> Result<()> {
         let result = sqlx::query(
-            r#"
-            INSERT INTO apps (
-                name, mode, command, args, cwd, env, watch, ignore_patterns,
-                auto_restart, max_restarts, restart_delay_ms, crash_window_secs, kill_timeout_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            "UPDATE apps SET name = ?, mode = ?, spec_json = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&spec.name)
         .bind(spec.mode.as_str())
-        .bind(&spec.command)
-        .bind(&args_json)
-        .bind(spec.cwd.to_string_lossy().to_string())
-        .bind(&env_json)
-        .bind(spec.watch)
-        .bind(&ignore_json)
-        .bind(spec.restart_policy.auto_restart)
-        .bind(spec.restart_policy.max_restarts as i64)
-        .bind(spec.restart_policy.restart_delay_ms as i64)
-        .bind(spec.restart_policy.crash_window_secs as i64)
-        .bind(spec.kill_timeout_ms as i64)
+        .bind(spec_json(spec)?)
+        .bind(rfc3339(Utc::now()))
+        .bind(id as i64)
         .execute(&self.pool)
         .await
-        .map_err(|e| Error::DbError(e.to_string()))?;
-
-        Ok(result.last_insert_rowid() as u32)
-    }
-
-    /// Get app by ID
-    pub async fn get_by_id(&self, id: u32) -> Result<Option<AppSpec>> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, name, mode, command, args, cwd, env, watch, ignore_patterns,
-                   auto_restart, max_restarts, restart_delay_ms, crash_window_secs,
-                   kill_timeout_ms, created_at
-            FROM apps WHERE id = ?
-            "#,
-        )
-        .bind(id as i64)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| Error::DbError(e.to_string()))?;
-
-        match row {
-            Some(row) => Ok(Some(row_to_app_spec(&row)?)),
-            None => Ok(None),
+        .map_err(|e| write_err(e, &spec.name))?;
+        if result.rows_affected() == 0 {
+            return Err(Error::AppNotFound(id.to_string()));
         }
+        Ok(())
     }
 
-    /// Get app by name
-    pub async fn get_by_name(&self, name: &str) -> Result<Option<AppSpec>> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, name, mode, command, args, cwd, env, watch, ignore_patterns,
-                   auto_restart, max_restarts, restart_delay_ms, crash_window_secs,
-                   kill_timeout_ms, created_at
-            FROM apps WHERE name = ?
-            "#,
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| Error::DbError(e.to_string()))?;
-
-        match row {
-            Some(row) => Ok(Some(row_to_app_spec(&row)?)),
-            None => Ok(None),
+    /// Set the policy markers of `ids` in one transaction: a `None` leaves that marker as it is.
+    /// Returns how many rows were changed. An id that has no row is `AppNotFound` and nothing
+    /// is changed. (`update_spec` never writes the markers; only creation and this do.)
+    pub async fn set_markers(
+        &self,
+        ids: &[u32],
+        protected: Option<bool>,
+        ai_control: Option<bool>,
+    ) -> Result<usize> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let now = rfc3339(Utc::now());
+        let mut changed = 0;
+        for id in ids {
+            let result = sqlx::query(
+                "UPDATE apps SET protected = COALESCE(?, protected), ai_control = COALESCE(?, ai_control), \
+                 updated_at = ? WHERE id = ?",
+            )
+            .bind(protected.map(i64::from))
+            .bind(ai_control.map(i64::from))
+            .bind(&now)
+            .bind(*id as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if result.rows_affected() == 0 {
+                return Err(Error::AppNotFound(id.to_string()));
+            }
+            changed += 1;
         }
+        tx.commit().await.map_err(db_err)?;
+        Ok(changed)
     }
 
-    /// Get all apps
-    pub async fn get_all(&self) -> Result<Vec<AppSpec>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, name, mode, command, args, cwd, env, watch, ignore_patterns,
-                   auto_restart, max_restarts, restart_delay_ms, crash_window_secs,
-                   kill_timeout_ms, created_at
-            FROM apps ORDER BY id
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| Error::DbError(e.to_string()))?;
-
-        rows.iter().map(row_to_app_spec).collect()
+    /// Record what the operator last asked for.
+    pub async fn set_desired(&self, id: u32, desired: Desired) -> Result<()> {
+        let result = sqlx::query("UPDATE apps SET desired_state = ?, updated_at = ? WHERE id = ?")
+            .bind(desired.as_str())
+            .bind(rfc3339(Utc::now()))
+            .bind(id as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        if result.rows_affected() == 0 {
+            return Err(Error::AppNotFound(id.to_string()));
+        }
+        Ok(())
     }
 
-    /// Delete app by ID
+    /// Stored app by id, if any.
+    pub async fn record_by_id(&self, id: u32) -> Result<Option<AppRecord>> {
+        let row = sqlx::query(&format!("SELECT {COLUMNS} FROM apps WHERE id = ?"))
+            .bind(id as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+        row.as_ref().map(read_row).transpose()
+    }
+
+    /// Stored app by name, if any.
+    pub async fn record_by_name(&self, name: &str) -> Result<Option<AppRecord>> {
+        let row = sqlx::query(&format!("SELECT {COLUMNS} FROM apps WHERE name = ?"))
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+        row.as_ref().map(read_row).transpose()
+    }
+
+    /// Every stored app, oldest first. Unreadable rows come back as `Broken`.
+    pub async fn records(&self) -> Result<Vec<AppRecord>> {
+        let rows = sqlx::query(&format!("SELECT {COLUMNS} FROM apps ORDER BY id"))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        rows.iter().map(read_row).collect()
+    }
+
+    /// Delete an app; its children go with it (`ON DELETE CASCADE`).
     pub async fn delete(&self, id: u32) -> Result<bool> {
         let result = sqlx::query("DELETE FROM apps WHERE id = ?")
             .bind(id as i64)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::DbError(e.to_string()))?;
+            .map_err(db_err)?;
 
         Ok(result.rows_affected() > 0)
-    }
-
-    /// Delete app by name
-    pub async fn delete_by_name(&self, name: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM apps WHERE name = ?")
-            .bind(name)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| Error::DbError(e.to_string()))?;
-
-        Ok(result.rows_affected() > 0)
-    }
-
-    /// Delete all apps
-    pub async fn delete_all(&self) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM apps")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| Error::DbError(e.to_string()))?;
-
-        Ok(result.rows_affected())
-    }
-
-    /// Check if app exists by name
-    pub async fn exists(&self, name: &str) -> Result<bool> {
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM apps WHERE name = ?")
-            .bind(name)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::DbError(e.to_string()))?;
-
-        Ok(row.0 > 0)
-    }
-
-    /// Get next available ID
-    pub async fn next_id(&self) -> Result<u32> {
-        let row: (i64,) = sqlx::query_as("SELECT COALESCE(MAX(id), 0) + 1 FROM apps")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| Error::DbError(e.to_string()))?;
-
-        Ok(row.0 as u32)
     }
 }
 
-fn row_to_app_spec(row: &sqlx::sqlite::SqliteRow) -> Result<AppSpec> {
-    let id: i64 = row.get("id");
-    let name: String = row.get("name");
-    let mode_str: String = row.get("mode");
-    let command: String = row.get("command");
-    let args_json: String = row.get("args");
-    let cwd_str: String = row.get("cwd");
-    let env_json: String = row.get("env");
-    let watch: bool = row.get("watch");
-    let ignore_json: String = row.get("ignore_patterns");
-    let auto_restart: bool = row.get("auto_restart");
-    let max_restarts: i64 = row.get("max_restarts");
-    let restart_delay_ms: i64 = row.get("restart_delay_ms");
-    let crash_window_secs: i64 = row.get("crash_window_secs");
-    let kill_timeout_ms: i64 = row.get("kill_timeout_ms");
-    let created_at_str: String = row.get("created_at");
+async fn insert_row(
+    conn: &mut sqlx::SqliteConnection,
+    spec: &AppSpec,
+    parent_id: Option<u32>,
+    desired: Desired,
+) -> Result<u32> {
+    let now = rfc3339(Utc::now());
+    let result = sqlx::query(
+        "INSERT INTO apps (name, mode, parent_id, desired_state, spec_json, created_at, updated_at, \
+         protected, ai_control) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&spec.name)
+    .bind(spec.mode.as_str())
+    .bind(parent_id.map(|p| p as i64))
+    .bind(desired.as_str())
+    .bind(spec_json(spec)?)
+    .bind(rfc3339(spec.created_at))
+    .bind(&now)
+    .bind(i64::from(spec.protected))
+    .bind(i64::from(spec.ai_control))
+    .execute(conn)
+    .await
+    .map_err(|e| write_err(e, &spec.name))?;
+    Ok(result.last_insert_rowid() as u32)
+}
 
-    let mode: AppMode = mode_str.parse()?;
-    let args: Vec<String> = serde_json::from_str(&args_json)?;
-    let env: HashMap<String, String> = serde_json::from_str(&env_json)?;
-    let ignore_patterns: Vec<String> = serde_json::from_str(&ignore_json)?;
-    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now());
+fn required_column<T>(row: &SqliteRow, column: &str) -> std::result::Result<T, String>
+where
+    T: for<'r> sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+{
+    row.try_get::<Option<T>, _>(column)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("column {column} is NULL"))
+}
 
-    Ok(AppSpec {
-        id: id as u32,
-        name,
-        mode,
-        command,
-        args,
-        cwd: PathBuf::from(cwd_str),
-        env,
-        watch,
-        ignore_patterns,
-        restart_policy: RestartPolicy {
-            auto_restart,
-            max_restarts: max_restarts as u32,
-            restart_delay_ms: restart_delay_ms as u64,
-            crash_window_secs: crash_window_secs as u64,
-        },
-        kill_timeout_ms: kill_timeout_ms as u64,
-        created_at,
-        // Clustering fields (defaults - not persisted in DB yet)
-        instances: 1,
-        instance_id: None,
-        // Port management fields
-        port: None,
-        port_range: None,
-        // Health check field
-        health_check: None,
-        // Memory limit field
-        max_memory_mb: None,
-        // Startup delay (defaults - not persisted in DB yet)
-        startup_delay_ms: None,
-        // Environment inheritance (defaults - not persisted in DB yet)
-        env_inherit: false,
-        // Event hooks (defaults - not persisted in DB yet)
-        hooks: oxidepm_core::Hooks::default(),
-        // Process tags (defaults - not persisted in DB yet)
-        tags: Vec::new(),
-        // Maximum uptime (defaults - not persisted in DB yet)
-        max_uptime_secs: None,
-        // Cosmos config (not persisted in DB yet)
-        cosmos_config: None,
-        // Restart mode (defaults - not persisted in DB yet)
-        restart_mode: oxidepm_core::RestartMode::default(),
-        // Dependencies (not persisted in DB yet)
-        depends_on: Vec::new(),
-        restart_cron: None,
-        // Log rotation (not persisted in DB yet)
-        log_max_size: None,
-        log_max_files: None,
-        log_compress: false,
-    })
+fn read_row(row: &SqliteRow) -> Result<AppRecord> {
+    let id = required_column::<u32>(row, "id").map_err(db_err)?;
+    let name = required_column::<String>(row, "name").map_err(db_err)?;
+    let mode = required_column::<String>(row, "mode");
+    let parent_id = row
+        .try_get::<Option<u32>, _>("parent_id")
+        .map_err(|e| e.to_string());
+    let desired = required_column::<String>(row, "desired_state");
+    let raw = required_column::<String>(row, "spec_json");
+
+    let parsed = (|| {
+        parent_id.as_ref().map_err(Clone::clone)?;
+        desired.as_ref().map_err(Clone::clone)?;
+        let created_at = required_column::<String>(row, "created_at")?;
+        let protected = required_column::<i64>(row, "protected")? != 0;
+        let ai_control = required_column::<i64>(row, "ai_control")? != 0;
+        parse_spec(
+            id,
+            &name,
+            mode.as_ref().map_err(Clone::clone)?,
+            raw.as_ref().map_err(Clone::clone)?,
+            &created_at,
+            (protected, ai_control),
+        )
+    })();
+
+    let parent_id = parent_id.unwrap_or_default();
+    let desired = desired
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_default();
+    match parsed {
+        Ok(spec) => Ok(AppRecord::Ok {
+            spec,
+            parent_id,
+            desired,
+        }),
+        Err(error) => Ok(AppRecord::Broken {
+            id,
+            name,
+            mode: mode.unwrap_or_default(),
+            parent_id,
+            desired,
+            error,
+            raw: raw.unwrap_or_default(),
+        }),
+    }
+}
+
+/// Parse `spec_json` and check it agrees with the columns. The `id` column, the `created_at`
+/// column and the two marker columns (`protected`, `ai_control`) are authoritative.
+fn parse_spec(
+    id: u32,
+    name: &str,
+    mode: &str,
+    raw: &str,
+    created_at: &str,
+    (protected, ai_control): (bool, bool),
+) -> std::result::Result<AppSpec, String> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let mut spec = AppSpec::from_json_value(value).map_err(|e| e.to_string())?;
+    if spec.name != name {
+        return Err(format!(
+            "name column '{}' disagrees with the stored spec '{}'",
+            name, spec.name
+        ));
+    }
+    if spec.mode.as_str() != mode {
+        return Err(format!(
+            "mode column '{}' disagrees with the stored spec '{}'",
+            mode, spec.mode
+        ));
+    }
+    spec.id = id;
+    spec.protected = protected;
+    spec.ai_control = ai_control;
+    spec.created_at = DateTime::parse_from_rfc3339(created_at)
+        .map_err(|e| format!("created_at {:?} is not RFC 3339: {}", created_at, e))?
+        .with_timezone(&Utc);
+    Ok(spec)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Database;
+    use oxidepm_core::Runtime;
+    use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
 
     // Return both Database and TempDir to keep the directory alive
@@ -255,46 +369,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_malformed_column_marks_only_its_own_app_broken() {
+        let (db, _dir) = setup_db().await;
+        for name in ["bad", "good"] {
+            let spec = AppSpec::new(name.into(), Runtime::CMD, "true".into(), PathBuf::from("/"));
+            db.apps()
+                .insert_with(&spec, None, Desired::Stopped)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE apps SET protected = 'invalid' WHERE name = 'bad'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let records = db.apps().records().await.unwrap();
+        assert!(
+            matches!(&records[..], [AppRecord::Broken { name, error, .. }, AppRecord::Ok { spec, .. }]
+            if name == "bad" && error.contains("protected") && spec.name == "good")
+        );
+    }
+
+    #[tokio::test]
     async fn test_insert_and_get() {
         let (db, _dir) = setup_db().await;
         let apps = db.apps();
 
         let spec = AppSpec::new(
             "test-app".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         );
 
-        let id = apps.insert(&spec).await.unwrap();
+        let id = apps
+            .insert_with(&spec, None, Desired::Running)
+            .await
+            .unwrap();
         assert!(id > 0);
 
-        let retrieved = apps.get_by_id(id).await.unwrap();
+        let retrieved = apps.record_by_id(id).await.unwrap();
         assert!(retrieved.is_some());
-        let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.name, "test-app");
-        assert_eq!(retrieved.mode, AppMode::Node);
+        match retrieved.unwrap() {
+            AppRecord::Ok { spec, .. } => {
+                assert_eq!(spec.name, "test-app");
+                assert_eq!(spec.mode, Runtime::from_static("node"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn test_get_by_name() {
+    async fn test_record_by_name() {
         let (db, _dir) = setup_db().await;
         let apps = db.apps();
 
         let spec = AppSpec::new(
             "my-app".to_string(),
-            AppMode::Cargo,
+            Runtime::from_static("cargo"),
             "main".to_string(),
             PathBuf::from("/project"),
         );
 
-        apps.insert(&spec).await.unwrap();
+        apps.insert_with(&spec, None, Desired::Running)
+            .await
+            .unwrap();
 
-        let retrieved = apps.get_by_name("my-app").await.unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().mode, AppMode::Cargo);
+        let retrieved = apps.record_by_name("my-app").await.unwrap();
+        match retrieved.unwrap() {
+            AppRecord::Ok { spec, .. } => assert_eq!(spec.mode, Runtime::from_static("cargo")),
+            other => panic!("{other:?}"),
+        }
 
-        let not_found = apps.get_by_name("nonexistent").await.unwrap();
+        let not_found = apps.record_by_name("nonexistent").await.unwrap();
         assert!(not_found.is_none());
     }
 
@@ -305,32 +452,37 @@ mod tests {
 
         let spec = AppSpec::new(
             "to-delete".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "app.js".to_string(),
             PathBuf::from("/"),
         );
 
-        let id = apps.insert(&spec).await.unwrap();
+        let id = apps
+            .insert_with(&spec, None, Desired::Running)
+            .await
+            .unwrap();
         assert!(apps.delete(id).await.unwrap());
-        assert!(apps.get_by_id(id).await.unwrap().is_none());
+        assert!(apps.record_by_id(id).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn test_get_all() {
+    async fn test_records() {
         let (db, _dir) = setup_db().await;
         let apps = db.apps();
 
         for i in 0..3 {
             let spec = AppSpec::new(
                 format!("app-{}", i),
-                AppMode::Node,
+                Runtime::from_static("node"),
                 "app.js".to_string(),
                 PathBuf::from("/"),
             );
-            apps.insert(&spec).await.unwrap();
+            apps.insert_with(&spec, None, Desired::Running)
+                .await
+                .unwrap();
         }
 
-        let all = apps.get_all().await.unwrap();
+        let all = apps.records().await.unwrap();
         assert_eq!(all.len(), 3);
     }
 }

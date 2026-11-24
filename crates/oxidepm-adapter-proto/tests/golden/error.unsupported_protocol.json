@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"unsupported protocol","data":{"supported":[1],"code":"E_ADAPTER_PROTOCOL"}}}

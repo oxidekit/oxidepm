@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"event","params":{"seq":17,"kind":"crashed","family":"lifecycle","at":"2026-11-20T10:00:00Z","app":{"id":3,"name":"web","tags":["prod"]},"data":{"exit_code":1,"restarts":2},"options":{"chat":"ops"},"dropped_before":4}}

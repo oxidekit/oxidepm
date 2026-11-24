@@ -7,7 +7,6 @@ mode = "go"
 script = "."
 cwd = "./cmd/api"
 env = { GIN_MODE = "release", PORT = "8080" }
-watch = true
 tags = ["backend"]
 
 [apps.health_check]

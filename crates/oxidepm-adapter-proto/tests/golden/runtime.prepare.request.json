@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":4,"method":"runtime.prepare","params":{"spec":{"name":"web","runtime":"node","command":"server.js","args":["--port","3000"],"cwd":"/srv/web","tags":["prod"],"ports":[3000],"instances":1,"env":{"DATABASE_URL":"<redacted>"},"options":{"node_args":["--max-old-space-size=512"]}},"path_hint":"/usr/local/bin:/usr/bin","phase":"start"}}

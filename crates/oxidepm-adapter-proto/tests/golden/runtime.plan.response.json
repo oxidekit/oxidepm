@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":5,"result":{"program":"node","args":["server.js"],"cwd":"/srv/web","extra_env":{"NODE_ENV":"production"},"binary_path":"/usr/bin/node"}}

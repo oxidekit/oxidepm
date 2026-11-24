@@ -2,14 +2,13 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::constants::*;
 use crate::error::{Error, Result};
-use once_cell::sync::Lazy;
-use regex::Regex;
 
 // Default value functions for serde
 fn default_instances() -> u32 {
@@ -20,30 +19,22 @@ fn default_kill_timeout() -> u64 {
     DEFAULT_KILL_TIMEOUT_MS
 }
 
-fn default_ignore_patterns() -> Vec<String> {
-    DEFAULT_IGNORE_PATTERNS
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+fn default_depends_timeout() -> u64 {
+    DEFAULT_DEPENDS_TIMEOUT_SECS
 }
 
 fn default_stopped_status() -> AppStatus {
     AppStatus::Stopped
 }
 
-/// Regex pattern for valid app names: only alphanumeric, underscore, and hyphen
-static APP_NAME_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid app name regex")
-});
-
-/// Validate an app name to prevent path traversal attacks
-/// Only allows alphanumeric characters, underscores, and hyphens
+/// Check an app name (see [`crate::validate::check_app_name`] for the rules:
+/// `^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`, not all digits, not `all`).
 pub fn validate_app_name(name: &str) -> bool {
-    !name.is_empty() && APP_NAME_REGEX.is_match(name)
+    crate::validate::check_app_name(name).is_ok()
 }
 
 /// Event hooks configuration - scripts to run when process events occur
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Hooks {
     /// Script to run after process starts
     pub on_start: Option<String>,
@@ -55,6 +46,19 @@ pub struct Hooks {
     pub on_crash: Option<String>,
     /// Script to run on error
     pub on_error: Option<String>,
+}
+
+impl std::fmt::Debug for Hooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |script: &Option<String>| script.as_ref().map(|_| crate::redact::SET);
+        f.debug_struct("Hooks")
+            .field("on_start", &set(&self.on_start))
+            .field("on_stop", &set(&self.on_stop))
+            .field("on_restart", &set(&self.on_restart))
+            .field("on_crash", &set(&self.on_crash))
+            .field("on_error", &set(&self.on_error))
+            .finish()
+    }
 }
 
 impl Hooks {
@@ -107,11 +111,41 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
+/// What the supervisor does when a health check fails `retries` times in a row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthAction {
+    /// Mark the app `unhealthy`, tell the hooks and notifications, leave the child alone.
+    #[default]
+    Notify,
+    /// Replace the child (an automatic restart).
+    Restart,
+}
+
+impl std::fmt::Display for HealthAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            HealthAction::Notify => "notify",
+            HealthAction::Restart => "restart",
+        })
+    }
+}
+
+/// Seconds a launched app is given before its first probe.
+pub const DEFAULT_HEALTH_START_PERIOD_SECS: u64 = 5;
+
+fn default_health_start_period() -> u64 {
+    DEFAULT_HEALTH_START_PERIOD_SECS
+}
+
 /// Health check configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HealthCheck {
     /// HTTP endpoint to check (e.g., "http://localhost:3000/health")
     pub http_url: Option<String>,
+    /// TCP address (`host:port`) that must accept a connection
+    #[serde(default)]
+    pub tcp: Option<String>,
     /// Script to execute for health check
     pub script: Option<String>,
     /// Expected HTTP status codes (default: 200)
@@ -122,17 +156,43 @@ pub struct HealthCheck {
     pub timeout_secs: u64,
     /// Number of consecutive failures before marking unhealthy
     pub retries: u32,
+    /// Seconds after the launch before the first probe; the app is `starting` until a probe
+    /// has passed.
+    #[serde(default = "default_health_start_period")]
+    pub start_period_secs: u64,
+    /// What to do once the app is unhealthy
+    #[serde(default)]
+    pub action: HealthAction,
+}
+
+impl std::fmt::Debug for HealthCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HealthCheck")
+            .field("http_url", &self.http_url)
+            .field("tcp", &self.tcp)
+            .field("script", &self.script.as_ref().map(|_| crate::redact::SET))
+            .field("expected_status", &self.expected_status)
+            .field("interval_secs", &self.interval_secs)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("retries", &self.retries)
+            .field("start_period_secs", &self.start_period_secs)
+            .field("action", &self.action)
+            .finish()
+    }
 }
 
 impl Default for HealthCheck {
     fn default() -> Self {
         Self {
             http_url: None,
+            tcp: None,
             script: None,
             expected_status: vec![200],
             interval_secs: 30,
             timeout_secs: 5,
             retries: 3,
+            start_period_secs: DEFAULT_HEALTH_START_PERIOD_SECS,
+            action: HealthAction::Notify,
         }
     }
 }
@@ -141,6 +201,13 @@ impl HealthCheck {
     pub fn http(url: impl Into<String>) -> Self {
         Self {
             http_url: Some(url.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn tcp(addr: impl Into<String>) -> Self {
+        Self {
+            tcp: Some(addr.into()),
             ..Default::default()
         }
     }
@@ -154,21 +221,21 @@ impl HealthCheck {
 }
 
 /// Application specification - defines how to run a process
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand: it prints environment keys but never their values, and shows
+/// hook and probe scripts only as set or unset, so a `{:?}` in a log line cannot leak secrets.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppSpec {
     pub id: u32,
     pub name: String,
-    pub mode: AppMode,
+    pub mode: Runtime,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     pub cwd: PathBuf,
     #[serde(default)]
     pub env: HashMap<String, String>,
-    #[serde(default)]
-    pub watch: bool,
-    #[serde(default = "default_ignore_patterns")]
-    pub ignore_patterns: Vec<String>,
     #[serde(default)]
     pub restart_policy: RestartPolicy,
     #[serde(default = "default_kill_timeout")]
@@ -205,15 +272,18 @@ pub struct AppSpec {
     // Maximum uptime in seconds before auto-restart (prevents memory leaks)
     #[serde(default)]
     pub max_uptime_secs: Option<u64>,
-    // Cosmos-specific configuration (only used when mode = Cosmos)
-    #[serde(default)]
-    pub cosmos_config: Option<CosmosConfig>,
     // Restart mode (on-crash, always, never)
     #[serde(default)]
     pub restart_mode: RestartMode,
     // Process dependencies: wait for these processes to be online before starting
     #[serde(default)]
     pub depends_on: Vec<String>,
+    // Seconds to wait for the dependencies to be running before the start fails (1 to 3600)
+    #[serde(default = "default_depends_timeout")]
+    pub depends_timeout_secs: u64,
+    // Discouraged: launch anyway (with a warning) when the dependencies are not running in time
+    #[serde(default)]
+    pub depends_fail_open: bool,
     // Cron expression for scheduled restarts (e.g., "0 4 * * *" for daily at 4am)
     #[serde(default)]
     pub restart_cron: Option<String>,
@@ -226,25 +296,124 @@ pub struct AppSpec {
     // Log rotation: gzip compress rotated files (default: false)
     #[serde(default)]
     pub log_compress: bool,
+    /// Options for adapters, one table per adapter name (`adapters.<name>`). Only the adapter
+    /// that owns a table receives its values; every client sees the option names only (see
+    /// `redact_spec`).
+    #[serde(default)]
+    pub adapters: BTreeMap<String, serde_json::Value>,
+    /// Read-only for every non-human actor, whatever `ai_control` says: they can look at the app
+    /// but not stop, restart, change or delete it. The daemon's own supervision (crash
+    /// restarts, cron, limits, the boot resurrect) is not affected.
+    #[serde(default)]
+    pub protected: bool,
+    /// The opt-in for caution operations (stop, restart, reload) by AI actors on this app.
+    #[serde(default)]
+    pub ai_control: bool,
+}
+
+impl std::fmt::Debug for AppSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Every field is named (no `..`), so adding a field to `AppSpec` fails to compile here
+        // until someone decides how it is printed.
+        let AppSpec {
+            id,
+            name,
+            mode,
+            command,
+            args,
+            cwd,
+            env,
+            restart_policy,
+            kill_timeout_ms,
+            created_at,
+            instances,
+            instance_id,
+            port,
+            port_range,
+            health_check,
+            max_memory_mb,
+            startup_delay_ms,
+            env_inherit,
+            hooks,
+            tags,
+            max_uptime_secs,
+            restart_mode,
+            depends_on,
+            depends_timeout_secs,
+            depends_fail_open,
+            restart_cron,
+            log_max_size,
+            log_max_files,
+            log_compress,
+            adapters,
+            protected,
+            ai_control,
+        } = self;
+        let mut env_keys: Vec<&String> = env.keys().collect();
+        env_keys.sort();
+        let set = |script: &Option<String>| script.as_ref().map(|_| "<set>");
+        f.debug_struct("AppSpec")
+            .field("id", id)
+            .field("name", name)
+            .field("mode", mode)
+            .field("command", command)
+            .field("args", args)
+            .field("cwd", cwd)
+            .field("env_keys", &env_keys)
+            .field("restart_policy", restart_policy)
+            .field("kill_timeout_ms", kill_timeout_ms)
+            .field("created_at", created_at)
+            .field("instances", instances)
+            .field("instance_id", instance_id)
+            .field("port", port)
+            .field("port_range", port_range)
+            .field("health_check", health_check)
+            .field("max_memory_mb", max_memory_mb)
+            .field("startup_delay_ms", startup_delay_ms)
+            .field("env_inherit", env_inherit)
+            .field("hook_on_start", &set(&hooks.on_start))
+            .field("hook_on_stop", &set(&hooks.on_stop))
+            .field("hook_on_restart", &set(&hooks.on_restart))
+            .field("hook_on_crash", &set(&hooks.on_crash))
+            .field("hook_on_error", &set(&hooks.on_error))
+            .field("tags", tags)
+            .field("max_uptime_secs", max_uptime_secs)
+            .field("restart_mode", restart_mode)
+            .field("depends_on", depends_on)
+            .field("depends_timeout_secs", depends_timeout_secs)
+            .field("depends_fail_open", depends_fail_open)
+            .field("restart_cron", restart_cron)
+            .field("log_max_size", log_max_size)
+            .field("log_max_files", log_max_files)
+            .field("log_compress", log_compress)
+            .field("adapters", &adapters.keys().collect::<Vec<_>>())
+            .field("protected", protected)
+            .field("ai_control", ai_control)
+            .finish()
+    }
 }
 
 impl AppSpec {
-    /// Create a new AppSpec. Panics if the name contains invalid characters.
+    /// Deserialise a spec from a JSON value.
+    pub fn from_json_value(value: serde_json::Value) -> serde_json::Result<Self> {
+        serde_json::from_value(value)
+    }
+
+    /// Deserialise an array of specs from JSON.
+    pub fn list_from_json_str(content: &str) -> serde_json::Result<Vec<Self>> {
+        serde_json::from_str(content)
+    }
+
+    /// Create a new AppSpec. Panics if the name is not a valid app name.
     /// Use `try_new` for a fallible version.
-    pub fn new(name: String, mode: AppMode, command: String, cwd: PathBuf) -> Self {
-        Self::try_new(name, mode, command, cwd)
-            .expect("Invalid app name: only alphanumeric characters, underscores, and hyphens are allowed")
+    pub fn new(name: String, mode: Runtime, command: String, cwd: PathBuf) -> Self {
+        Self::try_new(name, mode, command, cwd).expect("invalid app name")
     }
 
     /// Create a new AppSpec, validating the app name.
     /// Returns an error if the name contains invalid characters.
-    pub fn try_new(name: String, mode: AppMode, command: String, cwd: PathBuf) -> Result<Self> {
-        if !validate_app_name(&name) {
-            return Err(Error::ConfigError(format!(
-                "Invalid app name '{}': only alphanumeric characters, underscores, and hyphens are allowed",
-                name
-            )));
-        }
+    pub fn try_new(name: String, mode: Runtime, command: String, cwd: PathBuf) -> Result<Self> {
+        crate::validate::check_app_name(&name).map_err(Error::InvalidSpec)?;
 
         Ok(Self {
             id: 0,
@@ -254,11 +423,6 @@ impl AppSpec {
             args: Vec::new(),
             cwd,
             env: HashMap::new(),
-            watch: false,
-            ignore_patterns: DEFAULT_IGNORE_PATTERNS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
             restart_policy: RestartPolicy::default(),
             kill_timeout_ms: DEFAULT_KILL_TIMEOUT_MS,
             created_at: Utc::now(),
@@ -273,13 +437,17 @@ impl AppSpec {
             hooks: Hooks::default(),
             tags: Vec::new(),
             max_uptime_secs: None,
-            cosmos_config: None,
             restart_mode: RestartMode::default(),
             depends_on: Vec::new(),
+            depends_timeout_secs: DEFAULT_DEPENDS_TIMEOUT_SECS,
+            depends_fail_open: false,
             restart_cron: None,
             log_max_size: None,
             log_max_files: None,
             log_compress: false,
+            adapters: BTreeMap::new(),
+            protected: false,
+            ai_control: false,
         })
     }
 
@@ -333,13 +501,17 @@ impl AppSpec {
         self
     }
 
-    /// Create a clone for a specific instance in a cluster
+    /// Create the app of one instance of a cluster: named `{name}-{instance_id}`, a single
+    /// instance itself (so it can never be mistaken for a parent), with its own port if it has
+    /// one (a port range is the parent's: the instance gets the one port out of it).
     pub fn for_instance(&self, instance_id: u32, port: Option<u16>) -> Self {
         let mut instance = self.clone();
         instance.instance_id = Some(instance_id);
+        instance.instances = 1;
         instance.name = format!("{}-{}", self.name, instance_id);
         if let Some(p) = port {
             instance.port = Some(p);
+            instance.port_range = None;
             instance.env.insert("PORT".to_string(), p.to_string());
         }
         instance
@@ -354,128 +526,81 @@ impl AppSpec {
         self.env = env;
         self
     }
-
-    pub fn with_watch(mut self, watch: bool) -> Self {
-        self.watch = watch;
-        self
-    }
-
-    pub fn with_ignore_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.ignore_patterns = patterns;
-        self
-    }
 }
 
-/// Cosmos node operating mode
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum CosmosNodeMode {
-    /// Full validator node (signs blocks)
-    Validator,
-    /// Seed node (peer discovery only)
-    Seed,
-    /// Relay node (no signing)
-    Relay,
-    /// Sentry node (shields validator from public network)
-    Sentry,
-    /// Archive node (full history, pruning = "nothing")
-    Archive,
+/// How much damage a request can do, which decides who may make it (`docs/AI-SAFETY.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tier {
+    /// Reads. Every actor may make them.
+    Safe,
+    /// Changes the state of an app that exists (stop, restart): an AI needs the app's
+    /// `ai_control` marker.
+    Caution,
+    /// Runs new code, destroys data or acts on everything: humans only.
+    Dangerous,
 }
 
-impl CosmosNodeMode {
+impl Tier {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CosmosNodeMode::Validator => "validator",
-            CosmosNodeMode::Seed => "seed",
-            CosmosNodeMode::Relay => "relay",
-            CosmosNodeMode::Sentry => "sentry",
-            CosmosNodeMode::Archive => "archive",
+            Tier::Safe => "safe",
+            Tier::Caution => "caution",
+            Tier::Dangerous => "dangerous",
         }
     }
 }
 
-impl FromStr for CosmosNodeMode {
+/// What the operator last asked for, persisted with the app (`desired_state`
+/// column): `Running` apps are started again by `resurrect`, `Stopped` ones are not.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Desired {
+    #[default]
+    Running,
+    Stopped,
+}
+
+impl Desired {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Desired::Running => "running",
+            Desired::Stopped => "stopped",
+        }
+    }
+}
+
+impl std::str::FromStr for Desired {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "validator" => Ok(CosmosNodeMode::Validator),
-            "seed" => Ok(CosmosNodeMode::Seed),
-            "relay" => Ok(CosmosNodeMode::Relay),
-            "sentry" => Ok(CosmosNodeMode::Sentry),
-            "archive" => Ok(CosmosNodeMode::Archive),
-            _ => Err(Error::ConfigError(format!("Invalid cosmos node mode: {}", s))),
+        match s {
+            "running" => Ok(Desired::Running),
+            "stopped" => Ok(Desired::Stopped),
+            other => Err(Error::InvalidSpec(format!(
+                "invalid desired state '{}'",
+                other
+            ))),
         }
     }
 }
 
-impl std::fmt::Display for CosmosNodeMode {
+impl std::fmt::Display for Desired {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
 }
 
-/// Cosmos-specific configuration for blockchain node management
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CosmosConfig {
-    /// Node operating mode
-    pub node_mode: CosmosNodeMode,
-    /// RPC endpoint for health checks (e.g., "http://localhost:26657")
-    pub rpc_endpoint: String,
-    /// Chain ID (e.g., "mono_6940-1")
-    pub chain_id: String,
-    /// Start as relay, auto-enable validator key when synced
-    pub relay_until_synced: bool,
-    /// Path to priv_validator_key.json (oxidepm only renames, NEVER reads contents)
-    pub validator_key_path: Option<PathBuf>,
-    /// RLIMIT_NOFILE value for the node process
-    pub nofile_limit: Option<u64>,
-    /// Graceful shutdown timeout in seconds
-    pub shutdown_timeout: u32,
-    /// Detect x/upgrade halt messages in stdout/stderr (default: true)
-    pub detect_upgrade_halt: bool,
-    /// Auto-upgrade: download and swap binary on upgrade halt (default: false)
-    pub auto_upgrade: bool,
-    /// Trusted GitHub repo for auto-upgrade downloads (e.g., "monolythium/mono-chain")
-    pub auto_upgrade_source: Option<String>,
-    /// Require SHA256 checksum verification for auto-upgrade binaries (default: true)
-    pub auto_upgrade_require_checksum: bool,
-}
-
-impl Default for CosmosConfig {
-    fn default() -> Self {
-        Self {
-            node_mode: CosmosNodeMode::Relay,
-            rpc_endpoint: "http://localhost:26657".to_string(),
-            chain_id: String::new(),
-            relay_until_synced: false,
-            validator_key_path: None,
-            nofile_limit: None,
-            shutdown_timeout: 30,
-            detect_upgrade_halt: true,
-            auto_upgrade: false,
-            auto_upgrade_source: None,
-            auto_upgrade_require_checksum: true,
-        }
-    }
-}
-
 /// Restart mode for process crash recovery
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartMode {
     /// Restart on non-zero exit code
+    #[default]
     OnCrash,
     /// Always restart regardless of exit code
     Always,
     /// Never auto-restart
     Never,
-}
-
-impl Default for RestartMode {
-    fn default() -> Self {
-        RestartMode::OnCrash
-    }
 }
 
 impl RestartMode {
@@ -515,98 +640,75 @@ impl std::fmt::Display for RestartMode {
     }
 }
 
-/// Application runtime mode
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum AppMode {
-    Cmd,
-    Node,
-    Npm,
-    Pnpm,
-    Yarn,
-    Cargo,
-    Rust,
-    Python,
-    Go,
-    Cosmos,
-}
+/// The runtime of an app: the name of the thing that knows how to start it. `cmd` is the only
+/// one the core runs itself; every other name is served by an adapter, so a new runtime needs no
+/// change here.
+///
+/// It is a string with `#[serde(transparent)]`: the JSON key stays `mode`, the stored bytes are
+/// exactly what the old enum wrote (`"node"`, `"cmd"`, ...), and there is no data migration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct Runtime(Cow<'static, str>);
 
-impl AppMode {
-    /// Detect mode from file extension
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext.to_lowercase().as_str() {
-            "rs" => Some(AppMode::Rust),
-            "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" => Some(AppMode::Node),
-            "py" => Some(AppMode::Python),
-            "go" => Some(AppMode::Go),
-            _ => None,
-        }
+impl Runtime {
+    pub const CMD: Runtime = Runtime(Cow::Borrowed("cmd"));
+
+    /// Does `name` look like a runtime name: `^[a-z][a-z0-9]{1,15}$`? That is all `validate`
+    /// checks.
+    pub fn is_valid_name(name: &str) -> bool {
+        let b = name.as_bytes();
+        (2..=16).contains(&b.len())
+            && b[0].is_ascii_lowercase()
+            && b[1..]
+                .iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
     }
 
-    /// Detect mode from path
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Is this the runtime the core executes itself?
+    pub fn is_cmd(&self) -> bool {
+        self.as_str() == "cmd"
+    }
+
+    /// A runtime with a name that is known at compile time.
+    pub const fn from_static(name: &'static str) -> Self {
+        Runtime(Cow::Borrowed(name))
+    }
+
+    /// The runtime a file extension means (the table is in `runtime_hints`).
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        crate::runtime_hints::runtime_for_extension(ext).map(Runtime::from_static)
+    }
+
+    /// The runtime a path means: a project directory by its marker file, a file by its extension.
     pub fn detect(path: &std::path::Path) -> Option<Self> {
         if path.is_dir() {
-            if path.join("Cargo.toml").exists() {
-                return Some(AppMode::Cargo);
-            }
-            if path.join("package.json").exists() {
-                return Some(AppMode::Npm);
-            }
-            if path.join("requirements.txt").exists()
-                || path.join("pyproject.toml").exists()
-                || path.join("setup.py").exists()
-            {
-                return Some(AppMode::Python);
-            }
-            if path.join("go.mod").exists() {
-                return Some(AppMode::Go);
-            }
-            return None;
+            return crate::runtime_hints::runtime_for_dir(path).map(Runtime::from_static);
         }
-
-        // Check extension
         path.extension()
             .and_then(|e| e.to_str())
             .and_then(Self::from_extension)
     }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AppMode::Cmd => "cmd",
-            AppMode::Node => "node",
-            AppMode::Npm => "npm",
-            AppMode::Pnpm => "pnpm",
-            AppMode::Yarn => "yarn",
-            AppMode::Cargo => "cargo",
-            AppMode::Rust => "rust",
-            AppMode::Python => "python",
-            AppMode::Go => "go",
-            AppMode::Cosmos => "cosmos",
-        }
-    }
 }
 
-impl FromStr for AppMode {
+impl FromStr for Runtime {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "cmd" => Ok(AppMode::Cmd),
-            "node" => Ok(AppMode::Node),
-            "npm" => Ok(AppMode::Npm),
-            "pnpm" => Ok(AppMode::Pnpm),
-            "yarn" => Ok(AppMode::Yarn),
-            "cargo" => Ok(AppMode::Cargo),
-            "rust" => Ok(AppMode::Rust),
-            "python" | "py" => Ok(AppMode::Python),
-            "go" | "golang" => Ok(AppMode::Go),
-            "cosmos" => Ok(AppMode::Cosmos),
+        let lower = s.to_lowercase();
+        match lower.as_str() {
+            "python" | "py" => Ok(Runtime::from_static("python")),
+            "go" | "golang" => Ok(Runtime::from_static("go")),
+            name if Runtime::is_valid_name(name) => Ok(Runtime(Cow::Owned(lower))),
             _ => Err(Error::InvalidMode(s.to_string())),
         }
     }
 }
 
-impl std::fmt::Display for AppMode {
+impl std::fmt::Display for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
@@ -622,8 +724,14 @@ pub enum AppStatus {
     Stopped,
     Errored,
     Building,
-    /// Cosmos node halted for a planned upgrade (not a crash)
-    UpgradeHalted,
+    /// A start or restart is accepted but not launched yet: waiting for `depends_on` or
+    /// honouring `startup_delay_ms`. No child.
+    Waiting,
+    /// The child died and an automatic restart is scheduled (`RunState::backoff_until`). No child.
+    Backoff,
+    /// The child is alive but its health check failed `retries` times in a row. The child is
+    /// not touched unless the check's `action` is `restart`.
+    Unhealthy,
 }
 
 impl AppStatus {
@@ -635,12 +743,44 @@ impl AppStatus {
             AppStatus::Stopped => "stopped",
             AppStatus::Errored => "errored",
             AppStatus::Building => "building",
-            AppStatus::UpgradeHalted => "upgrade_halted",
+            AppStatus::Waiting => "waiting",
+            AppStatus::Backoff => "backoff",
+            AppStatus::Unhealthy => "unhealthy",
         }
     }
 
-    pub fn is_running(&self) -> bool {
-        matches!(self, AppStatus::Running | AppStatus::Starting | AppStatus::Building)
+    /// Is there a child process? (starting, running, unhealthy, stopping)
+    pub fn has_child(&self) -> bool {
+        matches!(
+            self,
+            AppStatus::Starting | AppStatus::Running | AppStatus::Unhealthy | AppStatus::Stopping
+        )
+    }
+
+    /// Is the app doing something, or about to? Stop, delete and stop-all act on every active
+    /// app; `Start` on an active app is refused. (waiting, building, starting, running,
+    /// unhealthy, backoff, stopping)
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            AppStatus::Waiting
+                | AppStatus::Building
+                | AppStatus::Starting
+                | AppStatus::Running
+                | AppStatus::Unhealthy
+                | AppStatus::Backoff
+                | AppStatus::Stopping
+        )
+    }
+
+    /// Is the app up and ready: what a dependent waits for. (running)
+    pub fn is_ready(&self) -> bool {
+        matches!(self, AppStatus::Running)
+    }
+
+    /// Is the app at rest until an operator acts? (stopped, errored)
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, AppStatus::Stopped | AppStatus::Errored)
     }
 }
 
@@ -661,7 +801,9 @@ impl FromStr for AppStatus {
             "stopped" => Ok(AppStatus::Stopped),
             "errored" => Ok(AppStatus::Errored),
             "building" => Ok(AppStatus::Building),
-            "upgrade_halted" => Ok(AppStatus::UpgradeHalted),
+            "waiting" => Ok(AppStatus::Waiting),
+            "backoff" => Ok(AppStatus::Backoff),
+            "unhealthy" => Ok(AppStatus::Unhealthy),
             _ => Err(Error::ConfigError(format!("Invalid status: {}", s))),
         }
     }
@@ -700,11 +842,18 @@ pub struct RunState {
     // Instance info for clusters
     #[serde(default)]
     pub instance_id: Option<u32>,
-    // Cosmos upgrade halt info (populated when status = UpgradeHalted)
+    /// Which automatic restart this backoff leads to (1 for the first). 0 outside a backoff.
     #[serde(default)]
-    pub upgrade_name: Option<String>,
+    pub backoff_attempt: u32,
+    /// When the automatic restart of a `backoff` app fires.
     #[serde(default)]
-    pub upgrade_halt_height: Option<u64>,
+    pub backoff_until: Option<DateTime<Utc>>,
+    /// Why the app is `errored` (or why the last launch failed).
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// The signal that killed the last child, if it died by one.
+    #[serde(default)]
+    pub last_exit_signal: Option<i32>,
 }
 
 impl RunState {
@@ -724,8 +873,10 @@ impl RunState {
             health_check_failures: 0,
             port: None,
             instance_id: None,
-            upgrade_name: None,
-            upgrade_halt_height: None,
+            backoff_attempt: 0,
+            backoff_until: None,
+            last_error: None,
+            last_exit_signal: None,
         }
     }
 
@@ -745,8 +896,10 @@ impl RunState {
             health_check_failures: 0,
             port: None,
             instance_id: None,
-            upgrade_name: None,
-            upgrade_halt_height: None,
+            backoff_attempt: 0,
+            backoff_until: None,
+            last_error: None,
+            last_exit_signal: None,
         }
     }
 
@@ -765,9 +918,25 @@ impl RunState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestartPolicy {
     pub auto_restart: bool,
+    /// Automatic restarts allowed inside any rolling `crash_window_secs`.
     pub max_restarts: u32,
+    /// Delay before the first automatic restart; it doubles for every further crash in a row.
     pub restart_delay_ms: u64,
     pub crash_window_secs: u64,
+    /// Upper bound of the doubling delay.
+    #[serde(default = "default_max_restart_delay_ms")]
+    pub max_restart_delay_ms: u64,
+    /// A run at least this long starts the doubling over.
+    #[serde(default = "default_stable_uptime_secs")]
+    pub stable_uptime_secs: u64,
+}
+
+fn default_max_restart_delay_ms() -> u64 {
+    DEFAULT_MAX_RESTART_DELAY_MS
+}
+
+fn default_stable_uptime_secs() -> u64 {
+    DEFAULT_STABLE_UPTIME_SECS
 }
 
 impl Default for RestartPolicy {
@@ -777,18 +946,27 @@ impl Default for RestartPolicy {
             max_restarts: DEFAULT_MAX_RESTARTS,
             restart_delay_ms: DEFAULT_RESTART_DELAY_MS,
             crash_window_secs: DEFAULT_CRASH_WINDOW_SECS,
+            max_restart_delay_ms: DEFAULT_MAX_RESTART_DELAY_MS,
+            stable_uptime_secs: DEFAULT_STABLE_UPTIME_SECS,
         }
     }
 }
 
 /// Selector for targeting apps by id, name, tag, or all
+///
+/// On the wire: `{"by":"all"}`, `{"by":"id","value":3}`, `{"by":"name","value":"web"}`,
+/// `{"by":"tag","value":"frontend"}`. (The variant names in Rust are kept.)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[serde(tag = "by", content = "value")]
 pub enum Selector {
+    #[serde(rename = "all")]
     All,
+    #[serde(rename = "id")]
     ById(u32),
+    #[serde(rename = "name")]
     ByName(String),
     /// Select by tag using @tagname syntax
+    #[serde(rename = "tag")]
     ByTag(String),
 }
 
@@ -850,21 +1028,158 @@ mod tests {
     use super::*;
 
     #[test]
+    fn debug_hides_secrets_in_config_and_its_nested_fields() {
+        let config: crate::config::ConfigFile = toml::from_str(
+            r#"
+[adapters]
+tools = "top-level-secret"
+[[apps]]
+name = "web"
+[apps.env]
+API_TOKEN = "environment-secret"
+[apps.hooks]
+on_start = "hook-secret"
+[apps.health_check]
+script = "probe-secret"
+[apps.adapters.tools]
+token = "adapter-secret"
+"#,
+        )
+        .unwrap();
+        let app = &config.apps[0];
+        for shown in [
+            format!("{config:?}"),
+            format!("{app:?}"),
+            format!("{:?}", app.hooks),
+            format!("{:?}", app.health_check),
+        ] {
+            for secret in [
+                "top-level-secret",
+                "environment-secret",
+                "hook-secret",
+                "probe-secret",
+                "adapter-secret",
+            ] {
+                assert!(!shown.contains(secret), "{secret} appeared in debug output");
+            }
+        }
+        let hooks = app.hooks.as_ref().unwrap();
+        let runtime_hooks = Hooks {
+            on_start: hooks.on_start.clone(),
+            ..Hooks::default()
+        };
+        let probe = HealthCheck::script("probe-secret");
+        assert!(!format!("{runtime_hooks:?}").contains("hook-secret"));
+        assert!(!format!("{probe:?}").contains("probe-secret"));
+    }
+
+    #[test]
+    fn markers_default_false() {
+        let spec = AppSpec::new("m".into(), Runtime::CMD, "true".into(), "/".into());
+        assert!(!spec.protected && !spec.ai_control);
+        // a spec written before the markers existed has neither
+        let mut value = serde_json::to_value(&spec).unwrap();
+        let map = value.as_object_mut().unwrap();
+        map.remove("protected");
+        map.remove("ai_control");
+        let old = AppSpec::from_json_value(value).unwrap();
+        assert!(!old.protected && !old.ai_control);
+        // they roundtrip when set
+        let mut set = spec.clone();
+        set.protected = true;
+        set.ai_control = true;
+        let back = AppSpec::from_json_value(serde_json::to_value(&set).unwrap()).unwrap();
+        assert!(back.protected && back.ai_control);
+        // the Debug form shows them
+        assert!(format!("{set:?}").contains("protected: true"));
+    }
+
+    #[test]
     fn test_app_mode_from_extension() {
-        assert_eq!(AppMode::from_extension("rs"), Some(AppMode::Rust));
-        assert_eq!(AppMode::from_extension("js"), Some(AppMode::Node));
-        assert_eq!(AppMode::from_extension("mjs"), Some(AppMode::Node));
-        assert_eq!(AppMode::from_extension("ts"), Some(AppMode::Node));
-        assert_eq!(AppMode::from_extension("py"), Some(AppMode::Python));
-        assert_eq!(AppMode::from_extension("go"), Some(AppMode::Go));
-        assert_eq!(AppMode::from_extension("rb"), None);
+        assert_eq!(
+            Runtime::from_extension("rs"),
+            Some(Runtime::from_static("rust"))
+        );
+        assert_eq!(
+            Runtime::from_extension("js"),
+            Some(Runtime::from_static("node"))
+        );
+        assert_eq!(
+            Runtime::from_extension("mjs"),
+            Some(Runtime::from_static("node"))
+        );
+        assert_eq!(
+            Runtime::from_extension("ts"),
+            Some(Runtime::from_static("node"))
+        );
+        assert_eq!(
+            Runtime::from_extension("py"),
+            Some(Runtime::from_static("python"))
+        );
+        assert_eq!(
+            Runtime::from_extension("go"),
+            Some(Runtime::from_static("go"))
+        );
+        assert_eq!(Runtime::from_extension("rb"), None);
     }
 
     #[test]
     fn test_app_mode_from_str() {
-        assert_eq!("cargo".parse::<AppMode>().unwrap(), AppMode::Cargo);
-        assert_eq!("node".parse::<AppMode>().unwrap(), AppMode::Node);
-        assert!("invalid".parse::<AppMode>().is_err());
+        assert_eq!(
+            "cargo".parse::<Runtime>().unwrap(),
+            Runtime::from_static("cargo")
+        );
+        assert_eq!(
+            "node".parse::<Runtime>().unwrap(),
+            Runtime::from_static("node")
+        );
+        assert!("Not A Runtime!".parse::<Runtime>().is_err());
+        assert!("x".parse::<Runtime>().is_err(), "one letter is too short");
+        assert!("9lives".parse::<Runtime>().is_err());
+        // the old aliases still work, and so does a name no built-in runner knows
+        assert_eq!(
+            "py".parse::<Runtime>().unwrap(),
+            Runtime::from_static("python")
+        );
+        assert_eq!(
+            "golang".parse::<Runtime>().unwrap(),
+            Runtime::from_static("go")
+        );
+        assert_eq!("Ruby".parse::<Runtime>().unwrap().as_str(), "ruby");
+    }
+
+    #[test]
+    fn runtime_serialises_as_the_old_mode_string() {
+        // what the old enum wrote, name by name
+        for name in [
+            "cmd", "node", "npm", "pnpm", "yarn", "cargo", "rust", "python", "go",
+        ] {
+            let runtime: Runtime = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(runtime.as_str(), name);
+            assert_eq!(
+                serde_json::to_string(&runtime).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&Runtime::from_static("node")).unwrap(),
+            "\"node\""
+        );
+        // inside a spec the key is still `mode`, and nothing else was added
+        let spec = AppSpec::new(
+            "m".into(),
+            Runtime::from_static("pnpm"),
+            "start".into(),
+            "/".into(),
+        );
+        let value = serde_json::to_value(&spec).unwrap();
+        assert_eq!(value["mode"], "pnpm");
+        assert!(value.get("runtime").is_none());
+        let back: AppSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(back.mode, Runtime::from_static("pnpm"));
+        // a name this build has never heard of is carried through unchanged
+        let odd: Runtime = serde_json::from_str("\"ruby\"").unwrap();
+        assert_eq!(serde_json::to_string(&odd).unwrap(), "\"ruby\"");
     }
 
     #[test]
@@ -876,20 +1191,39 @@ mod tests {
     }
 
     #[test]
+    fn restart_policy_without_the_new_fields_still_loads() {
+        let old = r#"{"auto_restart":true,"max_restarts":4,"restart_delay_ms":250,"crash_window_secs":60}"#;
+        let p: RestartPolicy = serde_json::from_str(old).unwrap();
+        assert_eq!(p.max_restarts, 4);
+        assert_eq!(p.crash_window_secs, 60);
+        assert_eq!(p.max_restart_delay_ms, DEFAULT_MAX_RESTART_DELAY_MS);
+        assert_eq!(p.stable_uptime_secs, DEFAULT_STABLE_UPTIME_SECS);
+    }
+
+    #[test]
     fn test_selector_parse() {
         assert_eq!(Selector::parse("all"), Selector::All);
         assert_eq!(Selector::parse("ALL"), Selector::All);
         assert_eq!(Selector::parse("123"), Selector::ById(123));
-        assert_eq!(Selector::parse("myapp"), Selector::ByName("myapp".to_string()));
-        assert_eq!(Selector::parse("@production"), Selector::ByTag("production".to_string()));
-        assert_eq!(Selector::parse("@web-servers"), Selector::ByTag("web-servers".to_string()));
+        assert_eq!(
+            Selector::parse("myapp"),
+            Selector::ByName("myapp".to_string())
+        );
+        assert_eq!(
+            Selector::parse("@production"),
+            Selector::ByTag("production".to_string())
+        );
+        assert_eq!(
+            Selector::parse("@web-servers"),
+            Selector::ByTag("web-servers".to_string())
+        );
     }
 
     #[test]
     fn test_selector_matches() {
         let spec = AppSpec::new(
             "test-app".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
@@ -914,14 +1248,17 @@ mod tests {
         assert_eq!(Selector::All.to_string(), "all");
         assert_eq!(Selector::ById(123).to_string(), "123");
         assert_eq!(Selector::ByName("myapp".to_string()).to_string(), "myapp");
-        assert_eq!(Selector::ByTag("production".to_string()).to_string(), "@production");
+        assert_eq!(
+            Selector::ByTag("production".to_string()).to_string(),
+            "@production"
+        );
     }
 
     #[test]
     fn test_app_spec_with_tags() {
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
@@ -936,7 +1273,7 @@ mod tests {
     fn test_app_spec_with_max_uptime() {
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
@@ -946,26 +1283,86 @@ mod tests {
     }
 
     #[test]
-    fn test_app_status_is_running() {
-        assert!(AppStatus::Running.is_running());
-        assert!(AppStatus::Starting.is_running());
-        assert!(!AppStatus::Stopped.is_running());
-        assert!(!AppStatus::Errored.is_running());
+    fn status_predicates_cover_every_process_state() {
+        use AppStatus::*;
+        let all = [
+            Starting, Running, Stopping, Stopped, Errored, Building, Waiting, Backoff, Unhealthy,
+        ];
+        let set = |f: fn(&AppStatus) -> bool| -> Vec<AppStatus> {
+            all.iter().copied().filter(f).collect()
+        };
+        assert_eq!(
+            set(AppStatus::has_child),
+            vec![Starting, Running, Stopping, Unhealthy]
+        );
+        assert_eq!(
+            set(AppStatus::is_active),
+            vec![Starting, Running, Stopping, Building, Waiting, Backoff, Unhealthy]
+        );
+        assert_eq!(set(AppStatus::is_ready), vec![Running]);
+        assert_eq!(set(AppStatus::is_terminal), vec![Stopped, Errored]);
+    }
+
+    #[test]
+    fn waiting_and_backoff_have_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&AppStatus::Waiting).unwrap(),
+            "\"waiting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppStatus::Backoff).unwrap(),
+            "\"backoff\""
+        );
+        assert_eq!("backoff".parse::<AppStatus>().unwrap(), AppStatus::Backoff);
+        assert_eq!("waiting".parse::<AppStatus>().unwrap(), AppStatus::Waiting);
+        assert_eq!(
+            serde_json::to_string(&AppStatus::Unhealthy).unwrap(),
+            "\"unhealthy\""
+        );
+        assert_eq!(
+            "unhealthy".parse::<AppStatus>().unwrap(),
+            AppStatus::Unhealthy
+        );
+    }
+
+    #[test]
+    fn health_check_without_the_new_fields_still_loads() {
+        let hc: HealthCheck = serde_json::from_str(
+            r#"{"http_url":"http://localhost/h","script":null,"expected_status":[200],
+                "interval_secs":30,"timeout_secs":5,"retries":3}"#,
+        )
+        .unwrap();
+        assert_eq!(hc.start_period_secs, DEFAULT_HEALTH_START_PERIOD_SECS);
+        assert_eq!(hc.action, HealthAction::Notify);
+        let hc: HealthCheck = serde_json::from_str(
+            r#"{"script":"true","expected_status":[200],"interval_secs":30,"timeout_secs":5,
+                "retries":3,"start_period_secs":0,"action":"restart"}"#,
+        )
+        .unwrap();
+        assert_eq!(hc.start_period_secs, 0);
+        assert_eq!(hc.action, HealthAction::Restart);
+    }
+
+    #[test]
+    fn run_state_without_the_new_fields_still_loads() {
+        let state: RunState = serde_json::from_str(r#"{"app_id": 3}"#).unwrap();
+        assert_eq!(state.backoff_attempt, 0);
+        assert_eq!(state.backoff_until, None);
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_exit_signal, None);
     }
 
     #[test]
     fn test_app_spec_builder() {
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
-        .with_watch(true)
         .with_args(vec!["--port".to_string(), "3000".to_string()]);
 
         assert_eq!(spec.name, "test");
-        assert!(spec.watch);
         assert_eq!(spec.args.len(), 2);
     }
 
@@ -1025,7 +1422,7 @@ mod tests {
 
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
@@ -1040,7 +1437,7 @@ mod tests {
     fn test_app_spec_with_startup_delay() {
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
@@ -1053,7 +1450,7 @@ mod tests {
     fn test_app_spec_default_no_startup_delay() {
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         );
@@ -1066,7 +1463,7 @@ mod tests {
     fn test_app_spec_with_env_inherit() {
         let spec = AppSpec::new(
             "test".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
@@ -1082,6 +1479,38 @@ mod tests {
         assert!(validate_app_name("my_app"));
         assert!(validate_app_name("MyApp123"));
         assert!(validate_app_name("app-123_test"));
+    }
+
+    fn legacy_spec_json() -> serde_json::Value {
+        let spec = AppSpec::new(
+            "legacy".to_string(),
+            Runtime::CMD,
+            "sleep".to_string(),
+            PathBuf::from("/tmp"),
+        );
+        serde_json::to_value(spec).unwrap()
+    }
+
+    #[test]
+    fn app_spec_from_json_value_still_rejects_other_unknown_keys() {
+        let mut v = legacy_spec_json();
+        v.as_object_mut()
+            .unwrap()
+            .insert("bogus_key".to_string(), serde_json::json!(true));
+        let e = AppSpec::from_json_value(v).unwrap_err().to_string();
+        assert!(e.contains("bogus_key"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_app_name_tightened_rules() {
+        assert!(validate_app_name("_x"));
+        assert!(validate_app_name("1a"));
+        assert!(validate_app_name(&"a".repeat(64)));
+        assert!(!validate_app_name(&"a".repeat(65)));
+        assert!(!validate_app_name("-x"));
+        assert!(!validate_app_name("123"));
+        assert!(!validate_app_name("all"));
+        assert!(!validate_app_name("ALL"));
     }
 
     #[test]
@@ -1100,7 +1529,7 @@ mod tests {
     fn test_app_spec_try_new_valid() {
         let result = AppSpec::try_new(
             "valid-app".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         );
@@ -1111,7 +1540,7 @@ mod tests {
     fn test_app_spec_try_new_invalid() {
         let result = AppSpec::try_new(
             "../evil".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         );

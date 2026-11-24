@@ -2,6 +2,7 @@
 
 use colored::Colorize;
 use oxidepm_core::{AppInfo, AppStatus};
+use oxidepm_ipc::{DryRunPlan, PolicyDecision};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tabled::{
@@ -15,6 +16,16 @@ static JSON_MODE: AtomicBool = AtomicBool::new(false);
 /// Enable or disable JSON output mode
 pub fn set_json_mode(enabled: bool) {
     JSON_MODE.store(enabled, Ordering::SeqCst);
+}
+
+/// `text` with every control character (C0 and C1, ESC and DEL included) replaced by U+FFFD. Any
+/// string that did not originate in the CLI (an actor's label, a reason, a note) goes through
+/// this before it reaches a terminal: cursor-movement or erase-line sequences in it could
+/// otherwise overwrite the lines around it.
+pub fn sanitize_terminal(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
 }
 
 /// Check if JSON output mode is enabled
@@ -87,7 +98,9 @@ impl From<&AppInfo> for StatusRow {
             AppStatus::Starting => "starting".yellow().to_string(),
             AppStatus::Stopping => "stopping".yellow().to_string(),
             AppStatus::Building => "building".cyan().to_string(),
-            AppStatus::UpgradeHalted => "upgrade_halted".magenta().bold().to_string(),
+            AppStatus::Waiting => "waiting".cyan().to_string(),
+            AppStatus::Backoff => "backoff".yellow().to_string(),
+            AppStatus::Unhealthy => "unhealthy".red().to_string(),
         };
 
         StatusRow {
@@ -155,6 +168,18 @@ pub struct StatusRowExtended {
     pub cwd: String,
     #[tabled(rename = "uptime")]
     pub uptime: String,
+    #[tabled(rename = "policy")]
+    pub policy: String,
+}
+
+/// The markers of an app as one word for a table: `-`, `protected`, `ai-control` or both.
+pub fn policy_text(protected: bool, ai_control: bool) -> String {
+    match (protected, ai_control) {
+        (false, false) => "-".to_string(),
+        (true, false) => "protected".to_string(),
+        (false, true) => "ai-control".to_string(),
+        (true, true) => "protected ai-control".to_string(),
+    }
 }
 
 impl From<&AppInfo> for StatusRowExtended {
@@ -166,7 +191,9 @@ impl From<&AppInfo> for StatusRowExtended {
             AppStatus::Starting => "starting".yellow().to_string(),
             AppStatus::Stopping => "stopping".yellow().to_string(),
             AppStatus::Building => "building".cyan().to_string(),
-            AppStatus::UpgradeHalted => "upgrade_halted".magenta().bold().to_string(),
+            AppStatus::Waiting => "waiting".cyan().to_string(),
+            AppStatus::Backoff => "backoff".yellow().to_string(),
+            AppStatus::Unhealthy => "unhealthy".red().to_string(),
         };
 
         // Get port from state first (actual running port), fall back to spec
@@ -194,13 +221,28 @@ impl From<&AppInfo> for StatusRowExtended {
             port,
             cwd,
             uptime: format_duration(info.state.uptime_secs),
+            policy: policy_text(info.spec.protected, info.spec.ai_control),
         }
     }
 }
 
+/// Truncate to at most `max` characters, ending in "…" when shortened.
+/// Works on characters, so multi-byte names never hit a byte boundary.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let kept: String = s.chars().take(max - 1).collect();
+    format!("{}…", kept)
+}
+
 /// Shorten a path for display by keeping last components
 fn shorten_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
+    let len = path.chars().count();
+    if len <= max_len {
         return path.to_string();
     }
 
@@ -208,13 +250,14 @@ fn shorten_path(path: &str, max_len: usize) -> String {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() >= 2 {
         let shortened = format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1]);
-        if shortened.len() <= max_len {
+        if shortened.chars().count() <= max_len {
             return shortened;
         }
     }
 
-    // Just truncate with ellipsis
-    format!("…{}", &path[path.len() - max_len + 1..])
+    // Just keep the tail with an ellipsis
+    let tail: String = path.chars().skip(len - max_len.saturating_sub(1)).collect();
+    format!("…{}", tail)
 }
 
 pub fn print_status_table_extended(apps: &[AppInfo]) {
@@ -258,13 +301,34 @@ pub struct AppDetailJson {
     pub command: String,
     pub cwd: String,
     pub args: Vec<String>,
-    pub watch: bool,
     pub last_exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     pub max_memory_mb: Option<u64>,
     pub max_uptime_secs: Option<u64>,
     pub healthy: bool,
+    pub protected: bool,
+    pub ai_control: bool,
+    /// Environment and hook scripts: present only when the user asked to reveal them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// The configured hook scripts as (name, script) pairs.
+fn hook_pairs(info: &AppInfo) -> Vec<(&'static str, &String)> {
+    let h = &info.spec.hooks;
+    [
+        ("on_start", &h.on_start),
+        ("on_stop", &h.on_stop),
+        ("on_restart", &h.on_restart),
+        ("on_crash", &h.on_crash),
+        ("on_error", &h.on_error),
+    ]
+    .into_iter()
+    .filter_map(|(name, script)| script.as_ref().map(|s| (name, s)))
+    .collect()
 }
 
 impl From<&AppInfo> for AppDetailJson {
@@ -282,19 +346,33 @@ impl From<&AppInfo> for AppDetailJson {
             command: info.spec.command.clone(),
             cwd: info.spec.cwd.display().to_string(),
             args: info.spec.args.clone(),
-            watch: info.spec.watch,
             last_exit_code: info.state.last_exit_code,
             tags: info.spec.tags.clone(),
             max_memory_mb: info.spec.max_memory_mb,
             max_uptime_secs: info.spec.max_uptime_secs,
             healthy: info.state.healthy,
+            protected: info.spec.protected,
+            ai_control: info.spec.ai_control,
+            env: None,
+            hooks: None,
         }
     }
 }
 
-pub fn print_app_detail(info: &AppInfo) {
+/// Print one app. `reveal` also prints the environment and hook scripts (the daemon only sends
+/// real values when asked, so without it these are markers and are left out).
+pub fn print_app_detail(info: &AppInfo, reveal: bool) {
     if is_json_mode() {
-        let json_detail = AppDetailJson::from(info);
+        let mut json_detail = AppDetailJson::from(info);
+        if reveal {
+            json_detail.env = Some(info.spec.env.clone().into_iter().collect());
+            json_detail.hooks = Some(
+                hook_pairs(info)
+                    .into_iter()
+                    .map(|(name, script)| (name.to_string(), script.clone()))
+                    .collect(),
+            );
+        }
         match serde_json::to_string_pretty(&json_detail) {
             Ok(json) => println!("{}", json),
             Err(e) => eprintln!("Error serializing to JSON: {}", e),
@@ -306,7 +384,11 @@ pub fn print_app_detail(info: &AppInfo) {
     println!("  {} │ {}", "Name".bold(), info.spec.name);
     println!("  {} │ {}", "ID".bold(), info.spec.id);
     println!("  {} │ {}", "Mode".bold(), info.spec.mode);
-    println!("  {} │ {}", "Status".bold(), format_status(info.state.status));
+    println!(
+        "  {} │ {}",
+        "Status".bold(),
+        format_status(info.state.status)
+    );
     println!(
         "  {} │ {}",
         "PID".bold(),
@@ -316,12 +398,12 @@ pub fn print_app_detail(info: &AppInfo) {
             .unwrap_or_else(|| "-".to_string())
     );
     println!("  {} │ {}", "Restarts".bold(), info.state.restarts);
-    println!("  {} │ {}", "Uptime".bold(), format_duration(info.state.uptime_secs));
     println!(
-        "  {} │ {:.1}%",
-        "CPU".bold(),
-        info.state.cpu_percent
+        "  {} │ {}",
+        "Uptime".bold(),
+        format_duration(info.state.uptime_secs)
     );
+    println!("  {} │ {:.1}%", "CPU".bold(), info.state.cpu_percent);
     println!(
         "  {} │ {}",
         "Memory".bold(),
@@ -333,9 +415,6 @@ pub fn print_app_detail(info: &AppInfo) {
     if !info.spec.args.is_empty() {
         println!("  {} │ {:?}", "Args".bold(), info.spec.args);
     }
-    if info.spec.watch {
-        println!("  {} │ enabled", "Watch".bold());
-    }
     if !info.spec.tags.is_empty() {
         println!("  {} │ {:?}", "Tags".bold(), info.spec.tags);
     }
@@ -343,10 +422,31 @@ pub fn print_app_detail(info: &AppInfo) {
         println!("  {} │ {}MB", "Max Memory".bold(), max_mem);
     }
     if let Some(max_uptime) = info.spec.max_uptime_secs {
-        println!("  {} │ {}", "Max Uptime".bold(), format_duration(max_uptime));
+        println!(
+            "  {} │ {}",
+            "Max Uptime".bold(),
+            format_duration(max_uptime)
+        );
     }
     if let Some(code) = info.state.last_exit_code {
         println!("  {} │ {}", "Last Exit".bold(), code);
+    }
+    if info.spec.protected || info.spec.ai_control {
+        println!(
+            "  {} │ {}",
+            "Policy".bold(),
+            policy_text(info.spec.protected, info.spec.ai_control)
+        );
+    }
+    if reveal {
+        let mut env: Vec<_> = info.spec.env.iter().collect();
+        env.sort();
+        for (key, value) in env {
+            println!("  {} │ {}={}", "Env".bold(), key, value);
+        }
+        for (name, script) in hook_pairs(info) {
+            println!("  {} │ {}", format!("Hook {}", name).bold(), script);
+        }
     }
     println!("{}", "─".repeat(50));
 }
@@ -359,7 +459,9 @@ fn format_status(status: AppStatus) -> String {
         AppStatus::Starting => "starting".yellow().to_string(),
         AppStatus::Stopping => "stopping".yellow().to_string(),
         AppStatus::Building => "building".cyan().to_string(),
-        AppStatus::UpgradeHalted => "upgrade_halted".magenta().bold().to_string(),
+        AppStatus::Waiting => "waiting".cyan().to_string(),
+        AppStatus::Backoff => "backoff".yellow().to_string(),
+        AppStatus::Unhealthy => "unhealthy".red().to_string(),
     }
 }
 
@@ -466,16 +568,107 @@ pub fn print_error_json(message: &str) {
     }
 }
 
+/// Show the plan of a rehearsal. With `--json` the output is the plan itself. A plan the policy
+/// refuses is shown and returned as an error (exit code 1), like the real request would be.
+pub fn print_plan(plan: &DryRunPlan) -> anyhow::Result<()> {
+    if is_json_mode() {
+        println!("{}", serde_json::to_string_pretty(plan)?);
+    } else {
+        match &plan.decision {
+            PolicyDecision::Allow => println!(
+                "{} Dry run of '{}': this is what would happen. Nothing was changed.",
+                "ℹ".blue(),
+                sanitize_terminal(&plan.op)
+            ),
+            PolicyDecision::Deny { code, message } => println!(
+                "{} Dry run of '{}': refused ({}): {}",
+                "✗".red(),
+                sanitize_terminal(&plan.op),
+                sanitize_terminal(code.as_str()),
+                sanitize_terminal(message)
+            ),
+        }
+        if plan.items.is_empty() && matches!(plan.decision, PolicyDecision::Allow) {
+            println!("  (nothing to do)");
+        }
+        let width = plan
+            .items
+            .iter()
+            .map(|i| i.action.chars().count())
+            .max()
+            .unwrap_or(0);
+        for item in &plan.items {
+            let order = item
+                .order
+                .map(|o| format!(" [step {o}]"))
+                .unwrap_or_default();
+            let detail = item
+                .detail
+                .as_deref()
+                .map(|d| format!("  {}", sanitize_terminal(d)))
+                .unwrap_or_default();
+            println!(
+                "  {:<width$}  {}{}{}",
+                sanitize_terminal(&item.action),
+                sanitize_terminal(&item.name),
+                order,
+                detail,
+                width = width
+            );
+        }
+        for warning in &plan.warnings {
+            println!("  {} {}", "!".yellow(), sanitize_terminal(warning));
+        }
+    }
+    match &plan.decision {
+        PolicyDecision::Allow => Ok(()),
+        PolicyDecision::Deny { message, .. } => anyhow::bail!("{}", message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxidepm_core::{AppMode, AppSpec, RunState};
+    use oxidepm_core::{AppSpec, RunState, Runtime};
     use std::path::PathBuf;
+
+    #[test]
+    fn truncate_chars_handles_multibyte_names() {
+        let name = "é".repeat(19);
+        let t = truncate_chars(&name, 16);
+        assert_eq!(t.chars().count(), 16);
+        assert!(t.ends_with('…'));
+        assert_eq!(truncate_chars("short", 16), "short");
+        assert_eq!(truncate_chars("exactly-sixteen!", 16), "exactly-sixteen!");
+        assert_eq!(truncate_chars("日本語のプロセス名前", 4), "日本語…");
+        assert_eq!(truncate_chars("abc", 0), "");
+    }
+
+    #[test]
+    fn shorten_path_handles_multibyte_paths() {
+        let long = format!("/{}", "é".repeat(40));
+        let s = shorten_path(&long, 30);
+        assert!(s.chars().count() <= 30);
+        assert!(s.starts_with('…'));
+
+        let nested = "/home/用户/项目/一个很长的目录名称/另一个很长的目录名称/应用";
+        let s = shorten_path(nested, 20);
+        assert!(s.chars().count() <= 20, "{s}");
+    }
+
+    #[test]
+    fn shorten_path_keeps_ascii_behaviour() {
+        assert_eq!(shorten_path("/a/b", 30), "/a/b");
+        assert_eq!(
+            shorten_path("/very/long/path/to/some/app", 14),
+            "…/some/app"
+        );
+    }
 
     fn create_test_app_info() -> AppInfo {
         let mut spec = AppSpec::new(
             "test-app".to_string(),
-            AppMode::Node,
+            Runtime::from_static("node"),
             "server.js".to_string(),
             PathBuf::from("/app"),
         )
