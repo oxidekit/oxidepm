@@ -160,11 +160,17 @@ async fn bind_fails_when_live_listener_owns_path() {
         .await
         .expect("first server still reachable");
     client.write_all(line("ping").as_bytes()).await.unwrap();
-    // the second bind's liveness probe is the first connection `first` sees; it just closes
-    let mut probe = first.accept().await.unwrap();
-    assert!(probe.read_request().await.unwrap().is_none());
     let mut conn = first.accept().await.unwrap();
-    assert_eq!(kind(conn.read_request().await.unwrap()), "ping");
+    let request = conn.read_request().await.unwrap();
+    // Linux delivers the closed liveness probe. On macOS peer credentials can fail
+    // after the probe disconnects, in which case accept skips it.
+    #[cfg(target_os = "linux")]
+    assert!(request.is_none());
+    let request = match request {
+        None => first.accept().await.unwrap().read_request().await.unwrap(),
+        Some(_) => request,
+    };
+    assert_eq!(kind(request), "ping");
 }
 
 #[tokio::test]
