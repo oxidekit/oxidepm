@@ -21,6 +21,16 @@ fn sleepers(marker: &str) -> Vec<u32> {
     Harness::procs_with_cmdline(&format!("sleep {marker}"))
 }
 
+async fn wait_for_sleepers(h: &Harness, marker: &str, count: usize) {
+    h.eventually(
+        "the instances to exec sleep",
+        Duration::from_secs(5),
+        || sleepers(marker).len() >= count,
+    )
+    .await;
+    assert_eq!(sleepers(marker).len(), count);
+}
+
 /// Make the launch of one app fail: its log file is a directory, so the log cannot be opened.
 fn break_launch_of(h: &Harness, name: &str) {
     let path = h.paths.log_path(name, "out");
@@ -59,6 +69,7 @@ async fn cluster_start_name_collision_leaves_no_rows() {
     h.start(h.cmd("a-1", &format!("exec sleep {m}")))
         .await
         .expect("start the app a-1");
+    wait_for_sleepers(&h, &m, 1).await;
 
     let err = h
         .start(cluster(&h, "a", &m, 3))
@@ -131,7 +142,7 @@ async fn cluster_group_start_with_one_child_stopped_starts_only_that_child() {
         pid2,
         "a running sibling is left alone"
     );
-    assert_eq!(sleepers(&m).len(), 3);
+    wait_for_sleepers(&h, &m, 3).await;
     assert_eq!(h.state("web").await.status, AppStatus::Running);
 
     // every instance is up now: starting the group says so
@@ -176,7 +187,7 @@ async fn cluster_start_failure_of_new_cluster_deletes_it() {
     h.start(cluster(&h, "fail", &m, 3))
         .await
         .expect("the retry works");
-    assert_eq!(sleepers(&m).len(), 3);
+    wait_for_sleepers(&h, &m, 3).await;
     h.stop("all").await.expect("stop all");
 }
 
@@ -308,7 +319,7 @@ async fn cluster_instance_count_change_is_rejected() {
     h.start(cluster(&h, "fixed", &m, 2))
         .await
         .expect("same count");
-    assert_eq!(sleepers(&m).len(), 2);
+    wait_for_sleepers(&h, &m, 2).await;
     h.stop("all").await.expect("stop all");
 }
 
@@ -410,7 +421,7 @@ async fn single_app_and_cluster_cannot_swap_their_instance_count() {
     h.start(dependent("lone", 1)).await.expect("same count");
     h.start(dependent("pack", 2)).await.expect("same count");
     assert_ne!(h.pid_of("lone").await, pid, "a new process");
-    assert_eq!(sleepers(&m).len(), 4);
+    wait_for_sleepers(&h, &m, 4).await;
     h.stop("all").await.expect("stop all");
 }
 

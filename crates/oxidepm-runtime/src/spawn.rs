@@ -918,24 +918,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("hooks.log");
         let m = marker(11);
+        let mut pgid = None;
         let started = Instant::now();
-        let outcome = run_script(script(
-            &format!("sleep {m} & echo started"),
-            Duration::from_secs(10),
-            Some(log),
-        ))
+        let outcome = run_script_with(
+            script(
+                &format!("sleep {m} & echo started"),
+                Duration::from_secs(10),
+                Some(log),
+            ),
+            |id| pgid = Some(id),
+        )
         .await;
+        let elapsed = started.elapsed();
+        // The shell can exit before its child has called exec and shows up as sleep.
+        let background = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pids = procs_with(&m);
+                if !pids.is_empty() {
+                    break pids;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        kill_group(pgid.expect("the script started"), Signal::SIGKILL).unwrap();
+
         assert!(outcome.success(), "{outcome:?}");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
-        // a script that exits by itself is not followed up: its background child stays
-        assert_eq!(procs_with(&m).len(), 1);
-        for pid in procs_with(&m) {
-            let _ = kill_group(pgid_of(pid).unwrap(), Signal::SIGKILL);
-        }
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert_eq!(background.expect("the background child survived").len(), 1);
         assert!(gone(&m).await);
     }
 
