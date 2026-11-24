@@ -1,18 +1,12 @@
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use crate::{check_version, install_file_atomic, FetchError, StagedFile};
 
 fn mode_of(p: &Path) -> u32 {
     std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
-}
-
-fn find_sleep() -> Option<PathBuf> {
-    ["/usr/bin/sleep", "/bin/sleep"]
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
 }
 
 /// A child process this test started, killed and reaped when the guard goes away.
@@ -27,41 +21,51 @@ impl Drop for Guard {
 
 #[test]
 fn install_replaces_a_running_binary() {
-    let Some(sleep) = find_sleep() else {
-        eprintln!("skipped: no sleep binary on this machine");
-        return;
-    };
     let dir = tempfile::tempdir().unwrap();
     let running = dir.path().join("worker");
-    std::fs::copy(&sleep, &running).unwrap();
+    std::fs::copy("/bin/bash", &running).unwrap();
     std::fs::set_permissions(&running, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = Guard(
         Command::new(&running)
-            .arg("60")
-            .stdin(Stdio::null())
+            .args(["-c", "printf 'ready\\n'; IFS= read -r line"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap(),
     );
+    let mut ready = String::new();
+    BufReader::new(child.0.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n", "the old executable started");
 
     let replacement = dir.path().join("new-worker");
     std::fs::write(&replacement, b"#!/bin/sh\nexit 0\n").unwrap();
+    let old_inode = std::fs::metadata(&running).unwrap().ino();
 
-    // what the old command did: copy onto the file. A running executable cannot be written to.
-    let copy = std::fs::copy(&replacement, &running);
-    assert_eq!(
-        copy.unwrap_err().raw_os_error(),
-        Some(26),
-        "expected ETXTBSY (text file busy)"
-    );
+    // Linux rejects opening the running executable for an in-place copy.
+    #[cfg(target_os = "linux")]
+    {
+        let copy = std::fs::copy(&replacement, &running);
+        assert_eq!(
+            copy.unwrap_err().raw_os_error(),
+            Some(26),
+            "expected ETXTBSY (text file busy)"
+        );
+    }
 
     install_file_atomic(&replacement, &running, 0o755)
         .expect("the install over a running binary succeeds");
+    assert_ne!(std::fs::metadata(&running).unwrap().ino(), old_inode);
     assert_eq!(std::fs::read(&running).unwrap(), b"#!/bin/sh\nexit 0\n");
     assert_eq!(mode_of(&running), 0o755);
     assert!(
         child.0.try_wait().unwrap().is_none(),
         "the old process keeps running"
     );
+    writeln!(child.0.stdin.take().unwrap(), "continue").unwrap();
+    assert!(child.0.wait().unwrap().success());
     assert!(
         !dir.path().join("worker.new").exists(),
         "no staging file is left"

@@ -775,7 +775,6 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1647,12 +1646,12 @@ mod tests {
 
         let fx = Fixture::new();
         fs::remove_file(fx.bin.join("oxidepm")).unwrap();
-        fs::copy("/bin/sh", fx.bin.join("oxidepm")).unwrap();
+        fs::copy("/bin/bash", fx.bin.join("oxidepm")).unwrap();
         fs::set_permissions(fx.bin.join("oxidepm"), fs::Permissions::from_mode(0o755)).unwrap();
         let mut running = Guard(
             Command::new(fx.bin.join("oxidepm"))
-                .arg0("sh")
                 .args(["-c", "printf 'ready\\n'; IFS= read -r line"])
+                .env_clear()
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()
