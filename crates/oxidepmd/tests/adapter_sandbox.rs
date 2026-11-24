@@ -1464,6 +1464,7 @@ async fn state_dir_over_quota_is_recorded_and_shown() {
 
 #[tokio::test]
 async fn daemon_status_reports_the_sandbox_probe() {
+    launcher_bin();
     let tmp = tempfile::tempdir().unwrap();
     let daemon = DaemonProc::spawn(&tmp.path().join("home"));
     let status = daemon.rpc(json!({ "type": "daemon_status" }));

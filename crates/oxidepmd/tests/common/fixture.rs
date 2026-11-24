@@ -25,17 +25,12 @@ use tokio::process::{ChildStdin, ChildStdout};
 pub fn fixture_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let exe = std::env::current_exe().expect("test binary path");
-        // <target>/<profile>/deps/<test binary>
-        let profile_dir = exe
+        // Cargo supplies the final daemon artifact path, alongside the fixture and launcher.
+        // The test harness itself can live in a separate build directory.
+        let profile_dir = Path::new(env!("CARGO_BIN_EXE_oxidepmd"))
             .parent()
-            .and_then(Path::parent)
-            .expect("profile directory")
-            .to_path_buf();
-        let target_dir = profile_dir
-            .parent()
-            .expect("target directory")
-            .to_path_buf();
+            .expect("daemon binary directory");
+        let target_dir = profile_dir.parent().expect("target directory");
         let mut cmd = std::process::Command::new(env!("CARGO"));
         // the sandbox launcher is built with it: the daemon looks for it next to its own binary
         cmd.args([
@@ -48,7 +43,7 @@ pub fn fixture_bin() -> &'static Path {
             "--quiet",
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("CARGO_TARGET_DIR", &target_dir);
+        .env("CARGO_TARGET_DIR", target_dir);
         if profile_dir.file_name().is_some_and(|n| n == "release") {
             cmd.arg("--release");
         }
