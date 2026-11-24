@@ -6,7 +6,7 @@ use oxidepm_core::{
 };
 use oxidepm_ipc::{ItemOutcome, ItemResult, Request, Response};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::StartArgs;
 use crate::commands::verb;
@@ -145,8 +145,26 @@ fn config_incompatible_flags(args: &StartArgs) -> Vec<String> {
 
 pub(crate) fn load_config_specs(config_path: &Path) -> Result<Vec<AppSpec>> {
     let config = ConfigFile::load(config_path)?;
-    let base_dir = config_path.parent().unwrap_or(Path::new("."));
-    Ok(config.into_specs(base_dir)?)
+    let base_dir = absolute_dir(containing_dir(config_path))?;
+    Ok(config.into_specs(&base_dir)?)
+}
+
+fn containing_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+fn absolute_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(canonical) = dir.canonicalize() {
+        return Ok(canonical);
+    }
+    // Keep the path absolute even if the directory does not exist yet.
+    if dir.is_absolute() {
+        Ok(dir.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(dir))
+    }
 }
 
 async fn start_from_config(config_path: &Path) -> Result<()> {
@@ -247,6 +265,7 @@ fn validate_cli_name(name: &str) -> Result<()> {
 fn build_app_spec(args: &StartArgs) -> Result<AppSpec> {
     let target = &args.target;
     let target_path = Path::new(target);
+    let target_is_dir = target_path.is_dir();
 
     // Determine mode
     let mode = if let Some(mode_str) = &args.mode {
@@ -254,51 +273,43 @@ fn build_app_spec(args: &StartArgs) -> Result<AppSpec> {
     } else if args.script.is_some() {
         // npm/pnpm/yarn mode
         Runtime::from_static("npm")
-    } else if target_path.is_dir() {
-        Runtime::detect(target_path).unwrap_or(Runtime::CMD)
-    } else if let Some(detected) = Runtime::detect(target_path) {
-        detected
     } else {
-        Runtime::CMD
+        Runtime::detect(target_path).unwrap_or(Runtime::CMD)
     };
 
     // Determine working directory
-    let cwd = if let Some(cwd) = &args.cwd {
-        cwd.canonicalize().unwrap_or_else(|_| cwd.clone())
-    } else if target_path.is_dir() {
+    let dir = if let Some(cwd) = &args.cwd {
+        cwd.as_path()
+    } else if target_is_dir {
         target_path
-            .canonicalize()
-            .unwrap_or_else(|_| target_path.to_path_buf())
-    } else if let Some(parent) = target_path.parent() {
-        parent
-            .canonicalize()
-            .unwrap_or_else(|_| parent.to_path_buf())
     } else {
-        std::env::current_dir()?
+        containing_dir(target_path)
     };
+    let cwd = absolute_dir(dir)?;
 
     // Determine command
     let command = match mode.as_str() {
         "npm" | "pnpm" | "yarn" => args.script.clone().unwrap_or_else(|| "start".to_string()),
         "cargo" => args.bin.clone().unwrap_or_else(|| ".".to_string()),
+        _ if target_path.is_absolute() => target.clone(),
+        _ if target_is_dir => ".".to_string(),
         _ => {
-            if target_path.is_absolute() {
-                target.clone()
-            } else if target_path.is_dir() {
-                ".".to_string()
+            let name = target_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(target);
+            if mode.is_cmd() && (target.contains('/') || target_path.is_file()) {
+                // A local executable is resolved against cwd instead of PATH.
+                format!("./{name}")
             } else {
-                target_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(target)
-                    .to_string()
+                name.to_string()
             }
         }
     };
 
     // Determine name
     let name = args.name.clone().unwrap_or_else(|| {
-        if target_path.is_dir() {
+        if target_is_dir {
             target_path
                 .file_name()
                 .and_then(|n| n.to_str())

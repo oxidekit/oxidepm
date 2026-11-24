@@ -89,6 +89,48 @@ fn config_start_succeeds_when_all_apps_start() {
 }
 
 #[test]
+fn relative_config_paths_send_the_absolute_config_directory() {
+    let home = TestHome::new();
+    let project = home.path().join("project");
+    let nested = project.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    for dir in [&project, &nested] {
+        std::fs::write(dir.join("apps.toml"), CONFIG).unwrap();
+    }
+    let daemon = MockDaemon::start(&home, |r| match r {
+        Request::StartBatch { specs } => Some(Response::StartedBatch {
+            items: specs
+                .iter()
+                .enumerate()
+                .map(|(i, spec)| ItemResult::changed(i as u32 + 1, spec.name.clone()))
+                .collect(),
+        }),
+        _ => None,
+    });
+
+    for (target, dir) in [
+        ("apps.toml", &project),
+        ("./apps.toml", &project),
+        ("nested/apps.toml", &nested),
+    ] {
+        home.cmd()
+            .current_dir(&project)
+            .args(["start", target])
+            .assert()
+            .success();
+        let requests = daemon.requests.lock().unwrap();
+        let Some(Request::StartBatch { specs }) = requests.last() else {
+            panic!("expected a batch start request for {target}");
+        };
+        let expected = dir.canonicalize().unwrap();
+        for spec in specs {
+            assert_eq!(spec.cwd.as_os_str(), expected.as_os_str(), "{target}");
+        }
+    }
+    assert_eq!(daemon.request_count(), 3);
+}
+
+#[test]
 fn config_start_rejects_flags_that_cannot_apply() {
     let home = TestHome::new();
     let cfg = write_config(&home);
