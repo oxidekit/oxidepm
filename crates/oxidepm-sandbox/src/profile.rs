@@ -18,6 +18,8 @@ pub const FSIZE_BYTES: u64 = 64 * 1024 * 1024;
 pub const NICE: i32 = 10;
 /// The OOM score adjustment every adapter gets: the kernel picks an adapter before an app.
 pub const OOM_SCORE_ADJ: i32 = 1000;
+/// Headroom for writable virtual reservations such as V8's code range in subprocesses.
+const UNRESTRICTED_SPAWN_DATA_HEADROOM_MB: u64 = 512;
 /// Directories every dynamically linked program reads while it starts.
 pub const LOADER_READ: &[&str] = &[
     "/lib",
@@ -33,7 +35,7 @@ pub const LOADER_READ: &[&str] = &[
 /// Everything the launcher needs to know about one adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    /// `RLIMIT_DATA`, in MiB. Zero leaves it alone.
+    /// The adapter tree's resident memory budget, in MiB. Zero leaves memory unlimited.
     pub memory_mb: u32,
     pub nofile: u64,
     pub fsize_bytes: u64,
@@ -171,9 +173,15 @@ impl Profile {
         serde_json::from_str(text).map_err(|e| format!("the profile is not valid: {e}"))
     }
 
-    /// `RLIMIT_DATA` in bytes, `None` when the profile sets none.
+    /// Per-process `RLIMIT_DATA` in bytes, `None` when the profile sets none.
+    /// The daemon still enforces `memory_mb` on the whole tree's resident memory.
     pub fn data_limit_bytes(&self) -> Option<u64> {
-        (self.memory_mb > 0).then(|| u64::from(self.memory_mb) * 1024 * 1024)
+        let headroom = if self.spawn == SpawnMode::Any {
+            UNRESTRICTED_SPAWN_DATA_HEADROOM_MB
+        } else {
+            0
+        };
+        (self.memory_mb > 0).then(|| (u64::from(self.memory_mb) + headroom) * 1024 * 1024)
     }
 }
 

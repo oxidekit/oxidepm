@@ -138,6 +138,60 @@ async fn oom_score_adj_is_set_and_data_limit_applies() {
     );
 }
 
+#[test]
+fn a_sandboxed_adapter_can_run_node_under_a_bounded_data_limit() {
+    use std::os::fd::AsRawFd;
+
+    let path: Vec<_> = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .collect();
+    let Some(node) = oxidepm_sandbox::find_program("node", &path) else {
+        eprintln!("Skipping sandboxed Node test because node is unavailable on PATH");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let permissions = common::fixture::rig_permissions(
+        &json!({
+            "memory_mb": 128,
+            "spawn": { "mode": "any" },
+            "fs": { "read": ["any"], "write": ["$STATE"] }
+        }),
+        dir.path(),
+    );
+    let profile = oxidepm_sandbox::Profile::from_permissions(
+        &permissions,
+        &oxidepm_sandbox::ProfileInput {
+            state_dir: dir.path(),
+            daemon_home: &home,
+            cwd: None,
+            search_path: &[],
+        },
+    );
+    let shell = std::fs::File::open("/bin/sh").unwrap();
+    let mut cmd = std::process::Command::new(launcher_bin());
+    cmd.args(["run", "--profile", &profile.to_json(), "--"])
+        .args(["-c", "ulimit -d; ulimit -Hd; exec \"$@\"", "sh"])
+        .arg(node)
+        .args(["-e", "console.log(6 * 7)"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .current_dir(dir.path());
+    common::fixture::inherit_descriptors(&mut cmd, vec![(shell.as_raw_fd(), 3)]);
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "655360\n655360\n42\n"
+    );
+}
+
 #[tokio::test]
 async fn adapter_inherits_only_std_descriptors() {
     let rig = sandboxed("fds", on_start(json!("echo_fds")), json!({}));
