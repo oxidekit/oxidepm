@@ -205,8 +205,12 @@ fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)>
     header.msg_iovlen = 1;
     header.msg_control = control.as_mut_ptr().cast();
     header.msg_controllen = space as _;
+    #[cfg(target_os = "linux")]
+    let flags = libc::MSG_CMSG_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = 0;
     // SAFETY: `header` points at live buffers for the duration of the call.
-    let n = unsafe { libc::recvmsg(socket, &mut header, libc::MSG_CMSG_CLOEXEC) };
+    let n = unsafe { libc::recvmsg(socket, &mut header, flags) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -226,6 +230,13 @@ fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)>
             }
             cmsg = libc::CMSG_NXTHDR(&header, cmsg);
         }
+    }
+    // Own every descriptor before setting the flags so an error closes all of them.
+    #[cfg(not(target_os = "linux"))]
+    for fd in &fds {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
+        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
     }
     if header.msg_flags & libc::MSG_CTRUNC != 0 {
         return Err(io::Error::new(
@@ -418,6 +429,8 @@ mod tests {
 
     #[tokio::test]
     async fn descriptors_travel_with_the_first_line() {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
         let (a, b) = UnixStream::pair().unwrap();
         let (mut r, w) = pipe_pair();
         send_with_fds(&a, b"hello\n", &[w.as_raw_fd(), w.as_raw_fd()])
@@ -426,6 +439,10 @@ mod tests {
         let (bytes, fds) = recv_with_fds(&b, 64).await.unwrap();
         assert_eq!(bytes, b"hello\n");
         assert_eq!(fds.len(), 2);
+        for fd in &fds {
+            let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).unwrap();
+            assert_ne!(flags & FdFlag::FD_CLOEXEC.bits(), 0);
+        }
         // the received descriptor is the pipe's write end
         let mut sent = std::fs::File::from(fds.into_iter().next().unwrap());
         std::io::Write::write_all(&mut sent, b"x").unwrap();
