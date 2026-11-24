@@ -64,6 +64,8 @@ nix = { workspace = true }
 sqlx = { workspace = true }
 # the scriptable test adapter (its library: the report reader; the binary is built by the tests)
 oxidepm-adapter-fixture = { path = "../oxidepm-adapter-fixture" }
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 # a filter in a test, to take Landlock away from the launcher
 seccompiler = "0.5"
-libc = "0.2"
