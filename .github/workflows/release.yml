@@ -174,4 +174,7 @@ jobs:
             artifacts/oxidepm.rb
           fail_on_unmatched_files: true
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # The installer and `oxidepm update` follow the latest release, so a
+          # release candidate is published as the latest release.
+          prerelease: false
+          make_latest: true
