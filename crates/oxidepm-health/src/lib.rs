@@ -447,14 +447,19 @@ mod tests {
     async fn http_probe_closed_port_is_unhealthy() {
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let result = HealthChecker::new()
-            .check(&HealthCheck::http(format!(
-                "http://{}/",
-                socket.local_addr().unwrap()
-            )))
-            .await;
+        let mut config = HealthCheck::http(format!("http://{}/", socket.local_addr().unwrap()));
+        config.timeout_secs = 1;
+        let result = timeout(Duration::from_secs(5), HealthChecker::new().check(&config))
+            .await
+            .expect("the probe must complete within its timeout");
         assert!(!result.healthy);
-        assert!(result.message.unwrap().contains("connection failed"));
+        let message = result.message.unwrap();
+        // macOS can let a connection to a bound, non-listening port time out.
+        assert!(
+            message.contains("connection failed")
+                || (cfg!(target_os = "macos") && message == "Timeout"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
@@ -467,14 +472,21 @@ mod tests {
             "an open port is healthy"
         );
 
-        // A socket that is bound but never listens refuses connections, and keeps its port
-        // reserved, so no other test can start listening on it meanwhile.
+        // Keep the port reserved without listening so no other test can use it.
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let closed = HealthCheck::tcp(socket.local_addr().unwrap().to_string());
-        let result = checker.check(&closed).await;
+        let mut closed = HealthCheck::tcp(socket.local_addr().unwrap().to_string());
+        closed.timeout_secs = 1;
+        let result = timeout(Duration::from_secs(5), checker.check(&closed))
+            .await
+            .expect("the probe must complete within its timeout");
         assert!(!result.healthy);
-        assert!(result.message.unwrap().starts_with("Connection failed"));
+        let message = result.message.unwrap();
+        assert!(
+            message.starts_with("Connection failed")
+                || (cfg!(target_os = "macos") && message == "Timeout"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
