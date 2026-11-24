@@ -465,16 +465,13 @@ fn plan_may_run_the_binary_its_build_made() {
 #[test]
 fn plan_cannot_name_a_system_program_as_the_binary_it_built() {
     if nix::unistd::geteuid().is_root() {
-        return; // everything is "owned by the daemon's user" to root
+        eprintln!("skipping: the system shell may be owned by the test user (root)");
+        return;
     }
     let dir = tempfile::tempdir().unwrap();
     let r = rules(&["cargo"], &[], &[]);
-    // a system program that is a file of its own (`sh` is a link on some systems)
-    let sh = ["sleep", "true", "head", "cat"]
-        .iter()
-        .filter_map(|n| which::which(n).ok())
-        .find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()))
-        .expect("a system program that is a regular file");
+    // Resolve the shell so the ownership check is reached even when /bin/sh is a symlink.
+    let sh = std::fs::canonicalize("/bin/sh").expect("resolve the system shell");
     let msg = is_invalid(validate_plan(
         &built_plan(&sh, dir.path()),
         &spec(dir.path()),

@@ -400,11 +400,14 @@ mod tests {
     #[tokio::test]
     async fn test_run_hook_script_command_not_found() {
         let tmp = TmpHome::new();
-        let (outcome, log) =
-            run_hook(&tmp, "/nonexistent/command", 1, "app", "start", None, None).await;
-        assert!(!outcome.success());
+        let command = "/nonexistent/command";
+        let (outcome, log) = run_hook(&tmp, command, 1, "app", "start", None, None).await;
+        match outcome {
+            ScriptOutcome::Exited(status) => assert_eq!(status.code(), Some(127)),
+            other => panic!("{other:?}"),
+        }
         assert!(
-            log.contains("No such file"),
+            log.contains(command),
             "the shell's complaint is in the hook log: {log:?}"
         );
     }

@@ -775,6 +775,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1642,25 +1643,26 @@ mod tests {
     /// the running executable is replaced, and the process keeps running.
     #[tokio::test]
     async fn update_replaces_the_binary_it_runs() {
-        let Some(sleep) = ["/usr/bin/sleep", "/bin/sleep"]
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_file())
-        else {
-            eprintln!("skipped: no sleep binary on this machine");
-            return;
-        };
+        use std::io::{BufRead, BufReader, Write};
+
         let fx = Fixture::new();
         fs::remove_file(fx.bin.join("oxidepm")).unwrap();
-        fs::copy(&sleep, fx.bin.join("oxidepm")).unwrap();
+        fs::copy("/bin/sh", fx.bin.join("oxidepm")).unwrap();
         fs::set_permissions(fx.bin.join("oxidepm"), fs::Permissions::from_mode(0o755)).unwrap();
         let mut running = Guard(
             Command::new(fx.bin.join("oxidepm"))
-                .arg("60")
-                .stdin(Stdio::null())
+                .arg0("sh")
+                .args(["-c", "printf 'ready\\n'; IFS= read -r line"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
+        let mut ready = String::new();
+        BufReader::new(running.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n", "the old executable started");
 
         let server = Server::start().await;
         standard_release(&server, None);
@@ -1674,6 +1676,8 @@ mod tests {
             running.0.try_wait().unwrap().is_none(),
             "the old process keeps running"
         );
+        writeln!(running.0.stdin.take().unwrap(), "continue").unwrap();
+        assert!(running.0.wait().unwrap().success());
     }
 
     /// `update --dry-run` downloads the archive and checks it, unpacks it in a private directory
