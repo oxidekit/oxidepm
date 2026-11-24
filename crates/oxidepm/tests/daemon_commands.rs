@@ -55,13 +55,17 @@ fn kill_without_daemon_says_not_running_and_starts_nothing() {
 fn kill_fails_when_daemon_stays_up_without_answering() {
     let home = TestHome::new();
     // Accepts the connection, never answers and keeps listening.
-    let _daemon = MockDaemon::start(&home, |_| None);
+    let daemon = MockDaemon::start(&home, |_| None);
     let out = home.cmd().arg("kill").output().unwrap();
     assert!(
         !out.status.success(),
         "kill must not claim success while the daemon is still up; stdout: {}",
         String::from_utf8_lossy(&out.stdout)
     );
+    assert!(matches!(
+        daemon.requests.lock().unwrap().as_slice(),
+        [Request::Kill]
+    ));
 }
 
 #[test]

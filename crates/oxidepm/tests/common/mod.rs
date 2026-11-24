@@ -94,9 +94,15 @@ impl MockDaemon {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         stream.set_nonblocking(false).unwrap();
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(5)))
-                            .unwrap();
+                        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(5))) {
+                            // macOS rejects socket options after a probe disconnects.
+                            if cfg!(target_os = "macos")
+                                && error.kind() == std::io::ErrorKind::InvalidInput
+                            {
+                                continue;
+                            }
+                            panic!("set mock socket read timeout: {error}");
+                        }
                         let mut reader = BufReader::new(stream.try_clone().unwrap());
                         let mut line = String::new();
                         if reader.read_line(&mut line).unwrap_or(0) == 0 {
