@@ -190,10 +190,14 @@ pub async fn recv_with_fds(stream: &UnixStream, max: usize) -> io::Result<(Vec<u
 
 fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
     let mut buf = vec![0u8; max];
-    // room for ATTACH_FDS descriptors; one more makes the kernel set MSG_CTRUNC
+    // Room for ATTACH_FDS descriptors on kernels that discard truncated rights.
     // SAFETY: CMSG_SPACE only computes a size.
     let space =
         unsafe { libc::CMSG_SPACE((ATTACH_FDS * std::mem::size_of::<RawFd>()) as u32) } as usize;
+    // macOS installs the descriptors before copying the control message out. Allow a
+    // full kernel control mbuf so all the descriptors can be closed on rejection.
+    #[cfg(target_os = "macos")]
+    let space = space.max(2048);
     let mut control = vec![0u64; space.div_ceil(8)];
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
@@ -215,21 +219,41 @@ fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)>
         return Err(io::Error::last_os_error());
     }
     let mut fds: Vec<OwnedFd> = Vec::new();
-    // SAFETY: the kernel filled `header`; the CMSG macros walk the control buffer it wrote.
+    let mut truncated = header.msg_flags & libc::MSG_CTRUNC != 0;
+    // SAFETY: the CMSG macros walk the kernel's control buffer. Each descriptor read
+    // is bounded by both its message length and the bytes actually copied out.
     unsafe {
+        let control_end = header.msg_control as usize + header.msg_controllen as usize;
+        let data_offset = libc::CMSG_LEN(0) as usize;
         let mut cmsg = libc::CMSG_FIRSTHDR(&header);
         while !cmsg.is_null() {
+            let remaining = control_end - cmsg as usize;
+            let len = (*cmsg).cmsg_len as usize;
+            if len < data_offset {
+                truncated = true;
+                break;
+            }
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                let data = libc::CMSG_DATA(cmsg);
-                let len = ((*cmsg).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize);
-                for i in 0..len / std::mem::size_of::<RawFd>() {
-                    let fd = std::ptr::read_unaligned(data.cast::<RawFd>().add(i));
+                let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
+                let bytes = len.min(remaining).saturating_sub(data_offset);
+                for i in 0..bytes / std::mem::size_of::<RawFd>() {
+                    let fd = std::ptr::read_unaligned(data.add(i));
                     // these descriptors were just made for this process; nothing else owns them
                     fds.push(OwnedFd::from_raw_fd(fd));
                 }
             }
+            if len > remaining {
+                truncated = true;
+                break;
+            }
             cmsg = libc::CMSG_NXTHDR(&header, cmsg);
         }
+    }
+    if truncated || fds.len() > ATTACH_FDS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "too many descriptors were sent",
+        ));
     }
     // Own every descriptor before setting the flags so an error closes all of them.
     #[cfg(not(target_os = "linux"))]
@@ -237,12 +261,6 @@ fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)>
         use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 
         fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-    }
-    if header.msg_flags & libc::MSG_CTRUNC != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "too many descriptors were sent",
-        ));
     }
     buf.truncate(n as usize);
     Ok((buf, fds))
@@ -454,14 +472,20 @@ mod tests {
 
     #[tokio::test]
     async fn more_descriptors_than_expected_are_refused() {
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        use std::io::Read;
+
         let (a, b) = UnixStream::pair().unwrap();
-        let (r, _w) = pipe_pair();
-        let fd = r.as_raw_fd();
+        let (mut r, w) = pipe_pair();
+        let fd = w.as_raw_fd();
         send_with_fds(&a, b"x\n", &[fd, fd, fd, fd, fd])
             .await
             .unwrap();
+        drop(w);
         let err = recv_with_fds(&b, 64).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        fcntl(r.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+        assert_eq!(r.read(&mut [0]).unwrap(), 0, "all pipe writers were closed");
     }
 
     #[tokio::test]
