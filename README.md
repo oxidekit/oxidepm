@@ -33,7 +33,7 @@ OxidePM is a process manager written in Rust for any runtime. Adapters add langu
 
 ### Quick Install
 
-The install script selects the latest stable release. To install 0.4.0-rc.1, use the [release archives](#download-binaries) or a package below.
+The install script installs the latest release (currently 0.4.0-rc.2).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/prod/scripts/install.sh | sh
@@ -45,10 +45,10 @@ Download the `.deb` from the [Releases page](https://github.com/oxidekit/oxidepm
 
 ```bash
 # x86_64
-sudo dpkg -i oxidepm_0.4.0~rc.1_amd64.deb
+sudo dpkg -i oxidepm_0.4.0.rc.2_amd64.deb
 
 # ARM64
-sudo dpkg -i oxidepm_0.4.0~rc.1_arm64.deb
+sudo dpkg -i oxidepm_0.4.0.rc.2_arm64.deb
 ```
 
 ### Homebrew (macOS/Linux)
@@ -145,7 +145,7 @@ build an archive from the [adapter sources](https://github.com/oxidekit/oxidepm-
 With the daemon running, import it using the SHA-256 from your build's `SHA256SUMS`:
 
 ```bash
-oxidepm adapter import ./watch-0.4.0-rc.1.tar.gz --sha256 <digest> --allow-reserved-name --enable
+oxidepm adapter import ./watch-0.4.0-rc.2.tar.gz --sha256 <digest> --allow-reserved-name --enable
 ```
 
 See the adapter repository for build instructions. This release ships without a configured
@@ -217,7 +217,7 @@ oxidepm stop my-app
 | `web [status\|new-key]` | Provided by the `ui-web` adapter ([install the adapter](#optional-adapters)): say where the web API listens, print its access key once, or replace the key |
 | `notify status\|test\|events\|severity\|telegram\|remove` | Provided by the `notifier` adapter ([install the adapter](#optional-adapters)): show, test and configure the notification channels |
 | `ping` | Check daemon health |
-| `update [--version X] [--force]` | Self-update to the latest stable release or an explicit version such as `0.4.0-rc.1`: the archive must match the sha256 in the release's `checksums.txt` (integrity; there is no release signing key yet, so authenticity is not checked), the asset is the one named exactly `oxidepm-<target>.tar.gz`, it is unpacked safely, a running daemon is stopped, the files are replaced atomically with the old ones kept as `.pre-update`, and the new `oxidepm --version` is run (everything is put back if that fails). An older version needs `--force` |
+| `update [--version X] [--force]` | Self-update to the latest stable release or an explicit version such as `0.4.0-rc.2`: the archive must match the sha256 in the release's `checksums.txt` (integrity; there is no release signing key yet, so authenticity is not checked), the asset is the one named exactly `oxidepm-<target>.tar.gz`, it is unpacked safely, a running daemon is stopped, the files are replaced atomically with the old ones kept as `.pre-update`, and the new `oxidepm --version` is run (everything is put back if that fails). An older version needs `--force` |
 | `init [dir]` | Generate a project config through the init adapter |
 | `deploy <host>` | Pull code and restart processes over SSH through the deploy adapter |
 | `diff <host>` | Show recent remote commits and working-tree changes through the deploy adapter |
