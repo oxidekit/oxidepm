@@ -47,11 +47,48 @@ detect_platform() {
     info "Detected platform: $TARGET"
 }
 
+valid_release_tag() {
+    case "$1" in
+        *[!A-Za-z0-9.-]*) return 1 ;;
+    esac
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
+}
+
 # Get latest version from GitHub
 get_latest_version() {
-    VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [ -z "$VERSION" ]; then
-        error "Could not determine latest version"
+    VERSION=
+    releases_url="https://github.com/$REPO/releases"
+    if latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$releases_url/latest"); then
+        VERSION=${latest_url##*/tag/}
+        [ "$latest_url" = "$releases_url/tag/$VERSION" ] || VERSION=
+    fi
+
+    if ! valid_release_tag "$VERSION"; then
+        release_json=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest") ||
+            error "Could not determine latest version"
+
+        # Scan whole JSON strings so quotes and braces in release notes stay inside the string.
+        VERSION=$(printf '%s\n' "$release_json" | LC_ALL=C awk '
+            { json = json " " $0 }
+            END {
+                if (json !~ /^[[:space:]]*\{.*\}[[:space:]]*$/) exit
+                while (match(json, /"([^"\\]|\\.)*"|[{}]/)) {
+                    token = substr(json, RSTART, RLENGTH)
+                    json = substr(json, RSTART + RLENGTH)
+                    if (token == "{") depth++
+                    if (token == "}") depth--
+                    if (depth != 1 || token != "\"tag_name\"" || json !~ /^[[:space:]]*:/) continue
+                    if (match(json, /^[[:space:]]*:[[:space:]]*"[^"\\]*"[[:space:]]*[,}]/)) {
+                        tag = substr(json, RSTART, RLENGTH)
+                        sub(/^[^"]*"/, "", tag)
+                        sub(/".*$/, "", tag)
+                        print tag
+                    }
+                    exit
+                }
+            }
+        ')
+        valid_release_tag "$VERSION" || error "Could not determine latest version"
     fi
     info "Latest version: $VERSION"
 }

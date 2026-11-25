@@ -75,7 +75,7 @@ struct Run {
     install_dir: PathBuf,
     /// The arguments of each call of the fake `oxidepm`, one call per line.
     record: PathBuf,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 impl Run {
@@ -98,6 +98,14 @@ impl Run {
     fn calls(&self) -> Vec<String> {
         std::fs::read_to_string(&self.record)
             .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn requests(&self) -> Vec<String> {
+        fs::read_to_string(self.dir.path().join("requests"))
+            .unwrap()
             .lines()
             .map(str::to_string)
             .collect()
@@ -219,7 +227,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$url" in
-  */releases/latest) printf '{"tag_name": "%s"}\n' "$FIXTURE_LATEST"; exit 0 ;;
+  https://github.com/*/releases/latest)
+    printf '%s\n' 'release page' >> "$FIXTURE_REQUESTS"
+    [ "$out" = /dev/null ] && [ "$status" = '%{url_effective}' ] || exit 22
+    [ -s "$FIXTURE_SERVED/redirect" ] || exit 22
+    printf '%s%s' "${url%/latest}" "$(cat "$FIXTURE_SERVED/redirect")"
+    exit 0
+    ;;
+  https://api.github.com/*/releases/latest)
+    printf '%s\n' 'release API' >> "$FIXTURE_REQUESTS"
+    if [ -f "$FIXTURE_SERVED/latest.json" ]; then
+      cat "$FIXTURE_SERVED/latest.json"
+    else
+      printf '{"tag_name": "%s"}\n' "$FIXTURE_LATEST"
+    fi
+    exit 0
+    ;;
+  */releases/download/*) printf '%s\n' 'download' >> "$FIXTURE_REQUESTS" ;;
+esac
+case "$url" in
   */download/"$FIXTURE_TAG"/checksums.txt) src="$FIXTURE_SERVED/checksums.txt" ;;
   */download/"$FIXTURE_TAG"/checksums.txt.minisig) src="$FIXTURE_SERVED/checksums.txt.minisig" ;;
   */download/"$FIXTURE_TAG"/oxidepm-*.tar.gz) src="$FIXTURE_SERVED/archive" ;;
@@ -243,6 +269,12 @@ cp "$src" "$out" || exit
             bin,
             install_dir,
         }
+    }
+
+    fn with_latest(self, redirect: &str, json: &str) -> Self {
+        fs::write(self.served.join("redirect"), redirect).unwrap();
+        fs::write(self.served.join("latest.json"), json).unwrap();
+        self
     }
 
     fn run(self, script: &Path, version: Option<&str>, fail_import: bool) -> Run {
@@ -282,6 +314,7 @@ cp "$src" "$out" || exit
                 ),
             )
             .env("FIXTURE_SERVED", &self.served)
+            .env("FIXTURE_REQUESTS", self.dir.path().join("requests"))
             .env("FIXTURE_SIGNATURE_STATUS", signature_status)
             .env_remove("OXIDEPM_FAIL_IMPORT")
             .env("OXIDEPM_RECORD", &record);
@@ -293,7 +326,7 @@ cp "$src" "$out" || exit
             out,
             install_dir: self.install_dir,
             record,
-            _dir: self.dir,
+            dir: self.dir,
         }
     }
 }
@@ -305,6 +338,94 @@ fn release(tamper: bool) -> Release {
         &[],
         true,
     )
+}
+
+fn install_latest(tag: &str, redirect: &str, json: &str) -> Run {
+    release(false).with_latest(redirect, json).run_with_status(
+        &script_path(),
+        None,
+        tag,
+        false,
+        "404",
+    )
+}
+
+#[test]
+fn install_script_resolves_latest_from_the_release_page() {
+    let run = install_latest(SIGNED_TAG, "/tag/v0.4.0-rc.4", "");
+    assert!(run.out.status.success(), "{}", run.text());
+    assert_eq!(run.requests(), ["release page", "download", "download"]);
+}
+
+#[test]
+fn install_script_falls_back_to_a_pretty_api_response() {
+    let run = install_latest(
+        "v0.4.0",
+        "",
+        "{\n  \"id\": 42,\n  \"tag_name\": \"v0.4.0\",\n  \"name\": \"Release\"\n}",
+    );
+    assert!(run.out.status.success(), "{}", run.text());
+    assert_eq!(
+        run.requests(),
+        ["release page", "release API", "download", "download"]
+    );
+}
+
+#[test]
+fn install_script_reads_the_tag_from_compact_json() {
+    let run = install_latest(SIGNED_TAG, "", r#"{"tag_name":"v0.4.0-rc.4","id":42}"#);
+    assert!(run.out.status.success(), "{}", run.text());
+}
+
+#[test]
+fn install_script_ignores_later_strings_in_compact_json() {
+    let run = install_latest(
+        SIGNED_TAG,
+        "",
+        concat!(
+            r#"{"body":"Release notes with \"tag_name\" and {braces}","#,
+            r#""metadata":{"tag_name":"v1.2.3"},"#,
+            r#""tag_name":"v0.4.0-rc.4","name":"v9.8.7"}"#,
+        ),
+    );
+    assert!(run.out.status.success(), "{}", run.text());
+}
+
+#[test]
+fn install_script_refuses_missing_or_malformed_latest_tags() {
+    for json in [
+        "",
+        "Not JSON",
+        r#"{"message":"Not Found"}"#,
+        r#"{"tag_name":"v0.4.0-rc.4""#,
+        r#"{"tag_name":"v0.4.0-rc.4"false}"#,
+        r#"{"tag_name":null}"#,
+        r#"{"tag_name":""}"#,
+        r#"{"tag_name":"v0.4"}"#,
+        r#"{"tag_name":"v0.4.0-"}"#,
+        r#"{"tag_name":"v0.4.0-rc-4"}"#,
+    ] {
+        let run = install_latest(SIGNED_TAG, "/", json);
+        assert!(!run.out.status.success(), "{json}: {}", run.text());
+        assert!(run.text().contains("Could not determine latest version"));
+        assert_eq!(run.requests(), ["release page", "release API"]);
+        assert!(run.installed().is_empty());
+    }
+}
+
+#[test]
+fn install_script_refuses_shell_and_path_characters_in_latest_tags() {
+    for tag in ["v0.4.0;echo bad", "v0.4.0/../tag/v0.4.0-rc.4", "v0.4.0?x=1"] {
+        let run = install_latest(
+            SIGNED_TAG,
+            &format!("/tag/{tag}"),
+            &format!(r#"{{"tag_name":"{tag}"}}"#),
+        );
+        assert!(!run.out.status.success(), "{tag}: {}", run.text());
+        assert!(run.text().contains("Could not determine latest version"));
+        assert_eq!(run.requests(), ["release page", "release API"]);
+        assert!(run.installed().is_empty());
+    }
 }
 
 struct SigningKeys {
