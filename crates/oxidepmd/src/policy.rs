@@ -241,7 +241,7 @@ fn adapter_stage1(
             level_name(needs)
         ));
     }
-    if classified.global && grant.map_or(true, |g| g.scope != HostScope::All) {
+    if classified.global && grant.is_none_or(|g| g.scope != HostScope::All) {
         return Err(
             "it acts on every app and the grant covers only the apps that list the adapter"
                 .to_string(),

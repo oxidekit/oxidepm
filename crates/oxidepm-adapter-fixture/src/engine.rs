@@ -977,7 +977,7 @@ impl Engine {
             let tail = "\"}}\n";
             let pad = bytes.saturating_sub(head.len() + tail.len());
             let mut line = head.into_bytes();
-            line.extend(std::iter::repeat(b'x').take(pad));
+            line.extend(std::iter::repeat_n(b'x', pad));
             line.extend_from_slice(tail.as_bytes());
             line
         };

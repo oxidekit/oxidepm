@@ -366,7 +366,7 @@ async fn import(args: ImportArgs, dry_run: bool) -> Result<()> {
                 .filter(|a| {
                     args.tag
                         .as_deref()
-                        .map_or(true, |t| a.tags.iter().any(|x| x == t))
+                        .is_none_or(|t| a.tags.iter().any(|x| x == t))
                 })
                 .map(|a| a.name.clone())
                 .collect();

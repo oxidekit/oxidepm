@@ -1410,7 +1410,7 @@ impl Supervisor {
                 protected: handle.markers().protected()
                     || parent.is_some_and(|p| p.markers().protected()),
                 ai_control: handle.markers().ai_control()
-                    && parent.map_or(true, |p| p.markers().ai_control()),
+                    && parent.is_none_or(|p| p.markers().ai_control()),
                 adapters,
             }
         };

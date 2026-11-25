@@ -422,7 +422,7 @@ async fn state_dir_over_quota_disables_adapter() {
     assert_eq!(view.crashes, 0, "a quota is not a crash");
     let state = rig.home.join("adapters").join("state").join("greedy");
     assert!(state.join("fill-0.bin").exists(), "the data is kept");
-    assert!(wait_until(10, || rig.entry.view().pid.map_or(true, |p| !pid_alive(p))).await);
+    assert!(wait_until(10, || rig.entry.view().pid.is_none_or(|p| !pid_alive(p))).await);
 }
 
 #[tokio::test]
