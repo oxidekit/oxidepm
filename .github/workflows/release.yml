@@ -60,23 +60,11 @@ jobs:
           cargo build --release --target "$TARGET" -p oxidepm -p oxidepmd -p oxidepm-sandbox
           test "$(target/"$TARGET"/release/oxidepm --version)" = "oxidepm ${GITHUB_REF_NAME#v}"
 
-      - name: Build the runtime adapter bundle
+      - name: Build the adapter bundle
         working-directory: oxidepm-adapters
         run: |
-          cargo build --locked --release --target "$TARGET" \
-            -p oxidepm-adapter-runtime-node -p oxidepm-adapter-runtime-python \
-            -p oxidepm-adapter-runtime-go -p oxidepm-adapter-runtime-rust \
-            -p oxidepm-adapter-bundle
-          bin="target/$TARGET/release"
-          bundle="../oxidepm/share/oxidepm/adapters"
-          "$bin/oxidepm-adapter-bundle" --out "$bundle" --target "$TARGET" \
-            --url-base "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
-            --sequence "$GITHUB_RUN_NUMBER" \
-            "runtime-node:$bin/oxidepm-runtime-node" \
-            "runtime-python:$bin/oxidepm-runtime-python" \
-            "runtime-go:$bin/oxidepm-runtime-go" \
-            "runtime-rust:$bin/oxidepm-runtime-rust"
-          (cd "$bundle" && shasum -a 256 -c SHA256SUMS)
+          bash ../oxidepm/scripts/build-adapter-bundle.sh "$TARGET" ../oxidepm/share/oxidepm/adapters \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER"
 
       - name: Package archives
         working-directory: oxidepm
@@ -91,7 +79,8 @@ jobs:
         working-directory: oxidepm
         run: |
           version=$(sh scripts/deb-version.sh "$GITHUB_REF_NAME")
-          pkg="oxidepm_${version}_${DEB_ARCH}"
+          release_version=${GITHUB_REF_NAME#v}
+          pkg="oxidepm_${release_version//-/.}_${DEB_ARCH}"
           install -dm755 "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/systemd/user" \
             "$pkg/usr/share/oxidepm" "$pkg/usr/share/doc/oxidepm"
           cp "target/$TARGET/release/"{oxidepm,oxidepmd,oxidepm-sandbox} "$pkg/usr/bin/"

@@ -419,13 +419,29 @@ fn every_install_path_carries_the_adapters_of_the_release() {
     // the runtimes are adapters, so a path that left them out would install a daemon that cannot
     // start a node app; each path puts share/oxidepm/adapters in place and says how to import
     let release = repo_file(".github/workflows/release.yml");
-    for runtime in ["node", "python", "go", "rust"] {
+    assert!(release.contains("bash ../oxidepm/scripts/build-adapter-bundle.sh"));
+    let bundle = repo_file("scripts/build-adapter-bundle.sh");
+    for name in [
+        "check",
+        "deploy",
+        "exporter-prometheus",
+        "git-start",
+        "init",
+        "notifier",
+        "runtime-go",
+        "runtime-node",
+        "runtime-python",
+        "runtime-rust",
+        "ui-tui",
+        "ui-web",
+        "watch",
+    ] {
         assert!(
-            release.contains(&format!("runtime-{runtime}:$bin/oxidepm-runtime-{runtime}")),
-            "the release bundle includes the {runtime} runtime"
+            bundle.split_whitespace().any(|word| word == name),
+            "the release bundle includes {name}"
         );
     }
-    assert!(release.contains("shasum -a 256 -c SHA256SUMS"));
+    assert!(bundle.contains("shasum -a 256 -c SHA256SUMS"));
     assert!(
         release.contains(r#"-C "$PWD" share"#),
         "the release archives hold share/"
