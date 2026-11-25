@@ -149,17 +149,60 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
       - name: Write checksums and Homebrew formula
         run: |
           (cd artifacts && sha256sum -- *.tar.gz *.deb > checksums.txt)
           ruby dist/homebrew/generate.rb "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" artifacts/checksums.txt > artifacts/oxidepm.rb
           ruby -c artifacts/oxidepm.rb
+      - name: Sign release checksums
+        env:
+          OXIDEPM_MINISIGN_KEY: ${{ secrets.OXIDEPM_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          set +x
+          : "${OXIDEPM_MINISIGN_KEY:?Missing release signing key}"
+          umask 077
+          key_dir=$(mktemp -d "$RUNNER_TEMP/oxidepm-sign.XXXXXXXX")
+          trap 'rm -f -- "$key_dir/minisign.key" && rmdir -- "$key_dir"' EXIT
+          key_file="$key_dir/minisign.key"
+          printf '%s\n' "$OXIDEPM_MINISIGN_KEY" > "$key_file"
+          unset OXIDEPM_MINISIGN_KEY
+
+          set -- artifacts/*.tar.gz artifacts/*.deb
+          if [ "$#" -ne 10 ]; then
+            echo 'Expected ten release packages' >&2
+            exit 1
+          fi
+          version=${GITHUB_REF_NAME#v}
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            for package in "oxidepm-$target.tar.gz" "oxidepm-adapters-$target.tar.gz"; do
+              test -s "artifacts/$package" || { echo "Missing release package $package" >&2; exit 1; }
+            done
+          done
+          for arch in amd64 arm64; do
+            package="oxidepm_${version//-/.}_${arch}.deb"
+            test -s "artifacts/$package" || { echo "Missing release package $package" >&2; exit 1; }
+          done
+
+          comment="oxidepm release checksums tag=$GITHUB_REF_NAME"
+          minisign -S -s "$key_file" -m artifacts/checksums.txt -x artifacts/checksums.txt.minisig -t "$comment" </dev/null
+          verified_comment=$(minisign -V -H -Q -P 'RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC' \
+            -m artifacts/checksums.txt -x artifacts/checksums.txt.minisig)
+          if [ "$verified_comment" != "$comment" ]; then
+            echo 'Release signature has an unexpected trusted comment' >&2
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/*.tar.gz
             artifacts/*.deb
             artifacts/checksums.txt
+            artifacts/checksums.txt.minisig
             artifacts/oxidepm.rb
           fail_on_unmatched_files: true
           generate_release_notes: true
