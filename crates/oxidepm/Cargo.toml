@@ -46,6 +46,7 @@ tar = { version = "0.4", default-features = false }
 flate2 = { workspace = true }
 
 [dev-dependencies]
+oxidepm-adapter-proto = { workspace = true, features = ["test-support"] }
 oxidepm-fetch = { workspace = true, features = ["test-support"] }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

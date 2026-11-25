@@ -1,11 +1,13 @@
 //! Self-update command: downloads a release from GitHub, verifies it and installs it.
 //!
-//! The archive is trusted only through its sha256 in the `checksums.txt` of the same release,
-//! and everything is checked before a single installed file is touched: the exact asset name,
-//! the size, the hash, the safe extraction. The files are staged next to their destinations
-//! first and renamed over them afterwards (a rename works over a running executable; a copy does
-//! not), the new `oxidepm` is run with `--version`, and the old files are put back if anything
-//! after the first rename fails.
+//! GitHub supplies the release listing. A minisign signature binds `checksums.txt` to the
+//! exact release tag. The archive must match the SHA-256 for its exact asset name and pass safe
+//! extraction before any installed file is touched. A downgrade requires an explicit version
+//! and force.
+//!
+//! The files are staged next to their destinations and renamed over them. The new `oxidepm`
+//! is run with `--version`, and the old files are restored if any step after the first rename
+//! fails.
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
@@ -15,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::output::print_plan;
+use oxidepm_adapter_proto::{official_keys, verify_minisign, IndexKey};
 use oxidepm_core::release_bundle::DIRECTORY as BUNDLE_PATH;
 use oxidepm_core::Error;
 use oxidepm_fetch::{
@@ -31,6 +34,8 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_RELEASE_JSON: u64 = 4 * 1024 * 1024;
 /// `checksums.txt`.
 const MAX_CHECKSUMS: u64 = 64 * 1024;
+/// `checksums.txt.minisig`.
+const MAX_SIGNATURE: u64 = 16 * 1024;
 /// The release archive.
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 /// How long a daemon gets to stop its apps and exit (the default shutdown budget is 120 s).
@@ -53,6 +58,7 @@ struct Env {
     current_exe: PathBuf,
     current_version: String,
     target: String,
+    release_keys: Vec<IndexKey>,
     client: IpcClient,
     daemon_wait: Duration,
 }
@@ -66,6 +72,7 @@ impl Env {
                 .context("Cannot determine the path of the running oxidepm")?,
             current_version: CURRENT_VERSION.to_string(),
             target: current_target(),
+            release_keys: official_keys(),
             client: super::get_client(),
             daemon_wait: DAEMON_STOP_WAIT,
         })
@@ -84,10 +91,12 @@ pub async fn execute(version: Option<String>, force: bool, dry_run: bool) -> Res
 
 /// What the release listing says about the release to install.
 struct Release {
+    tag: String,
     version: String,
     asset_name: String,
     asset_url: String,
     checksums_url: String,
+    signature_url: Option<String>,
 }
 
 /// `update`. With `dry_run` the release is looked up, the archive is downloaded, verified and
@@ -119,22 +128,23 @@ async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bo
             );
             return Ok(());
         }
-        check_version(&release.version, &env.current_version, force)?;
+        check_version(&release.version, &env.current_version, false).with_context(|| {
+            format!(
+                "Cannot install {} as the latest release. A downgrade requires an explicit --version and --force",
+                release.tag
+            )
+        })?;
     }
 
+    let (sha256, key_id) = fetch_release_checksum(env, &release).await?;
     println!(
         "Updating oxidepm: v{} → {}",
         env.current_version,
-        format!("v{}", release.version).cyan()
+        release.tag.cyan()
     );
 
     // a private working directory: the archive and its unpacked files live here and nowhere else
     let work = private_tempdir()?;
-    let checksums = fetch_bytes(&release.checksums_url, MAX_CHECKSUMS, &env.opts)
-        .await
-        .context("Could not download checksums.txt of the release")?;
-    let sha256 = checksum_for(&String::from_utf8_lossy(&checksums), &release.asset_name)?;
-
     println!("  Downloading: {}", release.asset_name);
     let archive = work.path().join("release.tar.gz");
     let verified = fetch_verified(
@@ -179,7 +189,9 @@ async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bo
     let has_bundle = bundle_source.is_dir();
     if dry_run {
         let daemon_up = env.client.connect().await.is_ok();
-        let mut plan = update_plan(env, &release, &verified, &new_files, dir, daemon_up);
+        let mut plan = update_plan(
+            env, &release, &verified, &key_id, &new_files, dir, daemon_up,
+        );
         if has_bundle {
             plan.items.push(
                 PlannedItem::new(None, bundle_destination.display().to_string(), "replace")
@@ -269,9 +281,10 @@ async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bo
     }
 
     println!(
-        "\n{} Updated to {} — integrity checked against checksums.txt of the release; authenticity is not checked (no release signing key is embedded yet).",
+        "\n{} Updated to {} (release checksums verified with signing key {}).",
         "✓".green(),
-        format!("v{}", release.version).cyan()
+        release.tag.cyan(),
+        key_id
     );
     println!("  Start the daemon again with: oxidepmd &   (or restart its service)");
     Ok(())
@@ -335,8 +348,10 @@ async fn resolve_release(env: &Env, wanted: Option<&str>) -> Result<Release> {
     let tag = json["tag_name"]
         .as_str()
         .context("No tag_name in the release")?;
-    let version = tag.strip_prefix('v').unwrap_or(tag).to_string();
-    check_version(&version, &env.current_version, true)
+    let version = tag
+        .strip_prefix('v')
+        .context("The release listing must have a v-prefixed tag")?;
+    check_version(version, &env.current_version, true)
         .context("The release has an unusable tag")?;
     if let Some(wanted) = wanted {
         if version != wanted {
@@ -371,11 +386,49 @@ async fn resolve_release(env: &Env, wanted: Option<&str>) -> Result<Release> {
     let checksums_url = url_of("checksums.txt")
         .with_context(|| format!("Release {} has no checksums.txt; refusing to install an archive that cannot be checked", tag))?;
     Ok(Release {
-        version,
+        tag: tag.to_string(),
+        version: version.to_string(),
         asset_name,
         asset_url,
         checksums_url,
+        // A same-version latest request can return without verifying any assets.
+        signature_url: url_of("checksums.txt.minisig"),
     })
+}
+
+async fn fetch_release_checksum(env: &Env, release: &Release) -> Result<([u8; 32], String)> {
+    let signature_url = release
+        .signature_url
+        .as_deref()
+        .with_context(|| format!("Release {} has no checksums.txt.minisig", release.tag))?;
+    let checksums = fetch_bytes(&release.checksums_url, MAX_CHECKSUMS, &env.opts)
+        .await
+        .context("Could not download checksums.txt of the release")?;
+    let signature = fetch_bytes(signature_url, MAX_SIGNATURE, &env.opts)
+        .await
+        .context("Could not download checksums.txt.minisig of the release")?;
+    let text = std::str::from_utf8(&checksums).context("checksums.txt is not valid UTF-8")?;
+    let signature =
+        std::str::from_utf8(&signature).context("checksums.txt.minisig is not valid UTF-8")?;
+    let mut lines = signature.lines();
+    if !lines
+        .next()
+        .is_some_and(|line| line.starts_with("untrusted comment: "))
+    {
+        bail!("checksums.txt.minisig must begin with an untrusted comment");
+    }
+    if lines.count() != 3 {
+        bail!("checksums.txt.minisig must contain exactly four lines");
+    }
+
+    let signed = verify_minisign(&checksums, signature, &env.release_keys)
+        .with_context(|| format!("Could not verify checksums.txt for {}", release.tag))?;
+    let expected_comment = format!("oxidepm release checksums tag={}", release.tag);
+    if signed.trusted_comment != expected_comment {
+        bail!("The signature's trusted comment must be {expected_comment:?}");
+    }
+    let sha256 = checksum_for(text, &release.asset_name)?;
+    Ok((sha256, signed.key_id))
 }
 
 /// A name from the network, safe to print.
@@ -426,16 +479,19 @@ fn update_plan(
     env: &Env,
     release: &Release,
     verified: &oxidepm_fetch::Verified,
+    key_id: &str,
     new_files: &[(&'static str, PathBuf)],
     dir: &Path,
     daemon_up: bool,
 ) -> DryRunPlan {
     let mut items = vec![
         PlannedItem::new(None, release.asset_name.clone(), "verified").detail(format!(
-            "{} ({} bytes, sha256 {} matches checksums.txt)",
+            "{} ({} bytes, sha256 {} matches checksums.txt for {}, verified with signing key {})",
             release.asset_url,
             verified.size,
-            hex(&verified.sha256)
+            hex(&verified.sha256),
+            release.tag,
+            key_id
         )),
     ];
     if daemon_up {
@@ -449,8 +505,8 @@ fn update_plan(
         items.push(
             PlannedItem::new(None, dir.join(name).display().to_string(), "replace").detail(
                 format!(
-                    "v{} -> v{} (the old file is kept as {}.pre-update)",
-                    env.current_version, release.version, name
+                    "v{} -> {} (the old file is kept as {}.pre-update)",
+                    env.current_version, release.tag, name
                 ),
             ),
         );
@@ -460,7 +516,6 @@ fn update_plan(
         items,
         vec![
             "the archive was downloaded into a private temporary directory, checked and unpacked there, and that directory is deleted; nothing was installed".to_string(),
-            "integrity is checked against checksums.txt of the same release; authenticity is not (no release signing key is embedded yet)".to_string(),
         ],
     )
 }
@@ -772,6 +827,7 @@ fn current_target() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxidepm_adapter_proto::signing::testkeys::TestKey;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -781,6 +837,8 @@ mod tests {
 
     const OLD_VERSION: &str = "0.3.2";
     const NEW_VERSION: &str = "9.9.9";
+    const CHECKSUMS_PATH: &str = "/dl/checksums.txt";
+    const SIGNATURE_PATH: &str = "/dl/checksums.txt.minisig";
 
     // ---- a release server on the loopback interface ----
 
@@ -797,6 +855,8 @@ mod tests {
         base: String,
         seen: Arc<Mutex<Vec<String>>>,
         routes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        signer: TestKey,
+        next_signer: TestKey,
     }
 
     impl Server {
@@ -838,7 +898,13 @@ mod tests {
                     });
                 }
             });
-            Server { base, seen, routes }
+            Server {
+                base,
+                seen,
+                routes,
+                signer: TestKey::generate(),
+                next_signer: TestKey::generate(),
+            }
         }
 
         fn requests(&self) -> Vec<String> {
@@ -849,7 +915,21 @@ mod tests {
             self.routes.lock().unwrap().insert(path.to_string(), body);
         }
 
-        /// Publish a release `tag` with these assets (name, bytes) and its checksums.txt.
+        fn body(&self, path: &str) -> Vec<u8> {
+            self.routes.lock().unwrap()[path].clone()
+        }
+
+        fn unlist_signature(&self, tag: Option<&str>) {
+            let path = release_path(tag);
+            let mut listing: serde_json::Value = serde_json::from_slice(&self.body(&path)).unwrap();
+            listing["assets"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|asset| asset["name"] != "checksums.txt.minisig");
+            self.route(&path, serde_json::to_vec(&listing).unwrap());
+        }
+
+        /// Publish a release with these assets and, if present, sign its checksums.
         fn publish(&self, tag: &str, assets: &[(String, Vec<u8>)], checksums: Checksums) {
             let mut listed: Vec<serde_json::Value> = Vec::new();
             for (name, bytes) in assets {
@@ -867,17 +947,29 @@ mod tests {
                 ),
             };
             if let Some(text) = text {
-                self.route("/dl/checksums.txt", text.into_bytes());
-                listed.push(serde_json::json!({"name": "checksums.txt", "browser_download_url": format!("{}/dl/checksums.txt", self.base)}));
+                let comment = format!("oxidepm release checksums tag={tag}");
+                let signature = self.signer.sign(text.as_bytes(), &comment);
+                self.route(CHECKSUMS_PATH, text.into_bytes());
+                self.route(SIGNATURE_PATH, signature.into_bytes());
+                for (name, path) in [
+                    ("checksums.txt", CHECKSUMS_PATH),
+                    ("checksums.txt.minisig", SIGNATURE_PATH),
+                ] {
+                    listed.push(serde_json::json!({"name": name, "browser_download_url": format!("{}{path}", self.base)}));
+                }
             }
             let json = serde_json::json!({"tag_name": tag, "assets": listed})
                 .to_string()
                 .into_bytes();
-            self.route("/repos/oxidekit/oxidepm/releases/latest", json.clone());
-            self.route(
-                &format!("/repos/oxidekit/oxidepm/releases/tags/{tag}"),
-                json,
-            );
+            self.route(&release_path(None), json.clone());
+            self.route(&release_path(Some(tag)), json);
+        }
+    }
+
+    fn release_path(tag: Option<&str>) -> String {
+        match tag {
+            Some(tag) => format!("/repos/{GITHUB_REPO}/releases/tags/{tag}"),
+            None => format!("/repos/{GITHUB_REPO}/releases/latest"),
         }
     }
 
@@ -940,6 +1032,10 @@ mod tests {
                 current_exe: self.bin.join("oxidepm"),
                 current_version: OLD_VERSION.to_string(),
                 target: current_target(),
+                release_keys: [&server.signer, &server.next_signer]
+                    .into_iter()
+                    .map(|key| IndexKey::parse(&key.public_base64()).unwrap())
+                    .collect(),
                 client: IpcClient::new(self.socket.clone()),
                 daemon_wait: Duration::from_secs(3),
             }
@@ -970,6 +1066,51 @@ mod tests {
             &[(asset_name(), tarball)],
             Checksums::Honest,
         );
+    }
+
+    async fn assert_update_refused(
+        server: &Server,
+        version: Option<&str>,
+        force: bool,
+        expected_error: &str,
+    ) {
+        for dry_run in [true, false] {
+            let fx = Fixture::new();
+            fs::write(fx.bin.join("oxidepm-sandbox"), b"old launcher").unwrap();
+            let bundle = fx.dir.path().join("share/oxidepm/adapters");
+            fs::create_dir_all(&bundle).unwrap();
+            fs::write(bundle.join("old.tar.gz"), b"old bundle").unwrap();
+            let daemon = tokio::net::UnixListener::bind(&fx.socket).unwrap();
+            let before = server.requests().len();
+            let env = fx.env(server);
+            let result = tokio::select! {
+                biased;
+                connection = daemon.accept() => panic!("update contacted the daemon: {connection:?}"),
+                result = execute_at(&env, version.map(str::to_string), force, dry_run) => result,
+            };
+            assert!(
+                tokio::time::timeout(Duration::ZERO, daemon.accept())
+                    .await
+                    .is_err(),
+                "update connected to the daemon"
+            );
+            let error = format!("{:#}", result.expect_err("the update should be refused"));
+            assert!(error.contains(expected_error), "dry_run={dry_run}: {error}");
+            let requests = server.requests();
+            assert!(
+                !requests[before..]
+                    .iter()
+                    .any(|path| path.ends_with(".tar.gz")),
+                "{requests:?}"
+            );
+            assert_eq!(fx.listing(), ["oxidepm", "oxidepm-sandbox", "oxidepmd"]);
+            assert_eq!(fx.read("oxidepm"), "old oxidepm");
+            assert_eq!(fx.read("oxidepmd"), "old oxidepmd");
+            assert_eq!(fx.read("oxidepm-sandbox"), "old launcher");
+            assert_eq!(fs::read(bundle.join("old.tar.gz")).unwrap(), b"old bundle");
+            assert_eq!(fs::read_dir(&bundle).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(bundle.parent().unwrap()).unwrap().count(), 1);
+        }
     }
 
     /// A daemon of the first protocol on `path`: it refuses any other protocol number (and closes the
@@ -1212,7 +1353,7 @@ mod tests {
                 .to_string();
             assert!(err.contains("not acceptable"), "{bad:?}: {err}");
         }
-        // a lower version needs --force, and that is decided before anything is asked of the network
+        // An explicit lower version needs --force before the client asks for the tag.
         let err = execute_at(&fx.env(&server), Some("0.1.0".to_string()), false, false)
             .await
             .unwrap_err()
@@ -1220,7 +1361,6 @@ mod tests {
         assert!(err.contains("--force"), "{err}");
         assert!(server.requests().is_empty(), "{:?}", server.requests());
 
-        // the latest release being older than this build is a downgrade as well
         server.publish(
             "v0.1.0",
             &[(
@@ -1229,22 +1369,245 @@ mod tests {
             )],
             Checksums::Honest,
         );
-        let err = execute_at(&fx.env(&server), None, false, false)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--force"), "{err}");
+        // An older latest release cannot authorize a downgrade.
+        for force in [true, false] {
+            assert_update_refused(&server, None, force, "--version and --force").await;
+        }
         assert!(
             !server.requests().iter().any(|r| r.starts_with("/dl/")),
             "{:?}",
             server.requests()
         );
         assert_eq!(fx.read("oxidepm"), "old oxidepm");
-        // with --force it is installed
-        execute_at(&fx.env(&server), None, true, false)
+        execute_at(&fx.env(&server), Some("0.1.0".to_string()), true, false)
             .await
-            .expect("forced");
+            .expect("explicit forced signed downgrade");
         assert!(fx.read("oxidepm").contains("oxidepm 0.1.0"));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_forced_downgrade_still_requires_a_signature() {
+        let server = Server::start().await;
+        server.publish(
+            "v0.1.0",
+            &[(
+                asset_name(),
+                archive(&[("oxidepm", &script("0.1.0", None))]),
+            )],
+            Checksums::Honest,
+        );
+        server.unlist_signature(Some("v0.1.0"));
+        assert_update_refused(&server, Some("0.1.0"), true, "no checksums.txt.minisig").await;
+    }
+
+    #[tokio::test]
+    async fn update_checks_the_exact_returned_tag() {
+        let server = Server::start().await;
+        standard_release(&server, None);
+        server.route(
+            &release_path(Some("v9.9.8")),
+            server.body(&release_path(None)),
+        );
+        assert_update_refused(&server, Some("9.9.8"), false, "Asked for v9.9.8").await;
+
+        server.publish(
+            NEW_VERSION,
+            &[(
+                asset_name(),
+                archive(&[("oxidepm", &script(NEW_VERSION, None))]),
+            )],
+            Checksums::Honest,
+        );
+        server.route(
+            &release_path(Some("v9.9.9")),
+            server.body(&release_path(None)),
+        );
+        assert_update_refused(&server, None, false, "v-prefixed tag").await;
+        assert_update_refused(&server, Some(NEW_VERSION), false, "v-prefixed tag").await;
+    }
+
+    #[tokio::test]
+    async fn update_requires_the_exact_signature_asset() {
+        let server = Server::start().await;
+        let cli = script(NEW_VERSION, None);
+        let tarball = archive(&[("oxidepm", &cli)]);
+        let tag = format!("v{NEW_VERSION}");
+        let checksums = format!("{}  {}\n", hex(&Sha256::digest(&tarball)), asset_name());
+        let signature = server.signer.sign(
+            checksums.as_bytes(),
+            &format!("oxidepm release checksums tag={tag}"),
+        );
+        server.publish(
+            &tag,
+            &[
+                (asset_name(), tarball),
+                (
+                    "backup-checksums.txt.minisig".to_string(),
+                    signature.into_bytes(),
+                ),
+            ],
+            Checksums::Text(checksums),
+        );
+        server.unlist_signature(None);
+        assert_update_refused(&server, None, false, "no checksums.txt.minisig").await;
+        assert_eq!(server.requests(), [release_path(None), release_path(None)]);
+
+        standard_release(&server, None);
+        server.routes.lock().unwrap().remove(SIGNATURE_PATH);
+        assert_update_refused(&server, None, false, "404").await;
+        assert!(server.requests().iter().any(|r| r == SIGNATURE_PATH));
+    }
+
+    #[tokio::test]
+    async fn update_accepts_either_trusted_signer() {
+        let server = Server::start().await;
+        standard_release(&server, None);
+        let checksums = server.body(CHECKSUMS_PATH);
+        let comment = format!("oxidepm release checksums tag=v{NEW_VERSION}");
+        for signer in [&server.signer, &server.next_signer] {
+            let before = server.requests().len();
+            server.route(
+                SIGNATURE_PATH,
+                signer.sign(&checksums, &comment).into_bytes(),
+            );
+            let fx = Fixture::new();
+            execute_at(&fx.env(&server), None, false, false)
+                .await
+                .unwrap();
+            let requests = server.requests();
+            assert_eq!(
+                requests[before..],
+                [
+                    release_path(None),
+                    CHECKSUMS_PATH.to_string(),
+                    SIGNATURE_PATH.to_string(),
+                    format!("/dl/{}", asset_name())
+                ]
+            );
+            assert_eq!(fx.read("oxidepmd"), "new oxidepmd");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_refuses_oversized_or_malformed_signatures() {
+        let server = Server::start().await;
+        standard_release(&server, None);
+        let valid = String::from_utf8(server.body(SIGNATURE_PATH)).unwrap();
+        for (signature, error) in [
+            (vec![b'x'; 16 * 1024 + 1], "16384"),
+            (vec![0xff], "valid UTF-8"),
+            (b"untrusted comment: missing lines\n".to_vec(), "four lines"),
+            (
+                valid.replacen("untrusted comment: ", "", 1).into_bytes(),
+                "untrusted comment",
+            ),
+            (format!("{valid}\n").into_bytes(), "four lines"),
+            (format!("{valid}trailing text\n").into_bytes(), "four lines"),
+            (
+                valid
+                    .replacen("trusted comment: oxidepm", "comment: oxidepm", 1)
+                    .into_bytes(),
+                "minisign signature",
+            ),
+        ] {
+            server.route(SIGNATURE_PATH, signature);
+            assert_update_refused(&server, None, false, error).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn update_refuses_legacy_signatures_and_unknown_signers() {
+        let server = Server::start().await;
+        standard_release(&server, None);
+        let checksums = server.body(CHECKSUMS_PATH);
+        let comment = format!("oxidepm release checksums tag=v{NEW_VERSION}");
+        server.route(
+            SIGNATURE_PATH,
+            server.signer.sign_legacy(&checksums, &comment).into_bytes(),
+        );
+        assert_update_refused(&server, None, false, "legacy minisign mode").await;
+
+        let stranger = TestKey::generate();
+        server.route(
+            SIGNATURE_PATH,
+            stranger.sign(&checksums, &comment).into_bytes(),
+        );
+        assert_update_refused(&server, None, false, &stranger.key_id()).await;
+    }
+
+    #[tokio::test]
+    async fn update_checks_the_original_checksum_bytes_and_requires_utf8() {
+        let server = Server::start().await;
+        standard_release(&server, None);
+        let mut checksums = server.body(CHECKSUMS_PATH);
+        checksums.push(b'\n');
+        server.route(CHECKSUMS_PATH, checksums.clone());
+        assert_update_refused(&server, None, false, "signature does not match").await;
+
+        checksums.push(0xff);
+        let comment = format!("oxidepm release checksums tag=v{NEW_VERSION}");
+        server.route(
+            SIGNATURE_PATH,
+            server.signer.sign(&checksums, &comment).into_bytes(),
+        );
+        server.route(CHECKSUMS_PATH, checksums);
+        assert_update_refused(&server, None, false, "checksums.txt is not valid UTF-8").await;
+    }
+
+    #[tokio::test]
+    async fn update_requires_a_verified_comment_for_the_exact_release() {
+        let server = Server::start().await;
+        let candidate = "9.9.9-rc.4";
+        let data = [(
+            asset_name(),
+            archive(&[("oxidepm", &script(candidate, None))]),
+        )];
+        server.publish("v9.9.9-rc.3", &data, Checksums::Honest);
+        let old_checksums = server.body(CHECKSUMS_PATH);
+        let old_signature = server.body(SIGNATURE_PATH);
+        server.publish("v9.9.9-rc.4", &data, Checksums::Honest);
+        let checksums = server.body(CHECKSUMS_PATH);
+        let signature = server.body(SIGNATURE_PATH);
+        for comment in [
+            "index sequence=42 generated=2026-11-20T10:00:00Z",
+            "oxidepm release checksums tag=9.9.9-rc.4",
+            "oxidepm release checksums tag=v9.9.9",
+            "oxidepm release checksums tag=v9.9.9-rc.4 ",
+        ] {
+            server.route(
+                SIGNATURE_PATH,
+                server.signer.sign(&checksums, comment).into_bytes(),
+            );
+            assert_update_refused(&server, Some(candidate), false, "trusted comment").await;
+        }
+
+        // The old pair is valid for its own release, including when the archive bytes match.
+        let old_tag = "v9.9.9-rc.3";
+        server.route(CHECKSUMS_PATH, old_checksums);
+        server.route(SIGNATURE_PATH, old_signature.clone());
+        execute_at(
+            &Fixture::new().env(&server),
+            Some(old_tag.to_string()),
+            false,
+            true,
+        )
+        .await
+        .expect("the original release is signed");
+        assert_update_refused(&server, Some(candidate), false, "trusted comment").await;
+
+        let spoofed = String::from_utf8(old_signature).unwrap().replacen(
+            "signature from a throwaway test key",
+            "oxidepm release checksums tag=v9.9.9-rc.4",
+            1,
+        );
+        server.route(SIGNATURE_PATH, spoofed.into_bytes());
+        assert_update_refused(&server, None, false, "trusted comment").await;
+
+        // Editing the authenticated comment without signing again invalidates the signature.
+        let mut edited = String::from_utf8(signature).unwrap();
+        edited = edited.replace("tag=v9.9.9-rc.4", "tag=v9.9.9-rc.3");
+        server.route(SIGNATURE_PATH, edited.into_bytes());
+        assert_update_refused(&server, Some(old_tag), false, "signature does not match").await;
     }
 
     #[tokio::test]
@@ -1280,6 +1643,7 @@ mod tests {
             &[(asset_name(), archive(&[("oxidepm", b"x")]))],
             Checksums::Honest,
         );
+        server.unlist_signature(None);
         execute_at(&fx.env(&server), None, false, false)
             .await
             .unwrap();
@@ -1770,12 +2134,9 @@ mod tests {
         let fx = Fixture::new();
         let server = Server::start().await;
         let env = fx.env(&server);
-        let release = Release {
-            version: NEW_VERSION.to_string(),
-            asset_name: asset_name(),
-            asset_url: "https://example.invalid/a.tar.gz".to_string(),
-            checksums_url: String::new(),
-        };
+        standard_release(&server, None);
+        let release = resolve_release(&env, None).await.unwrap();
+        let (_, key_id) = fetch_release_checksum(&env, &release).await.unwrap();
         let verified = oxidepm_fetch::Verified {
             sha256: [7; 32],
             size: 123,
@@ -1788,6 +2149,7 @@ mod tests {
             &env,
             &release,
             &verified,
+            &key_id,
             &files,
             Path::new("/opt/bin"),
             true,
@@ -1805,9 +2167,12 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("nothing was installed")));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|w| w.contains("authenticity is not")));
+        assert_eq!(plan.items[0].name, asset_name());
+        let verification = plan.items[0].detail.as_deref().unwrap();
+        assert!(verification.contains("v9.9.9"), "{verification}");
+        assert!(
+            verification.contains(&server.signer.key_id()),
+            "{verification}"
+        );
     }
 }
