@@ -25,7 +25,7 @@ OxidePM is a process manager written in Rust for any runtime. Adapters add langu
 - **TUI dashboard** — Real-time monitoring with the `monit` command, from the `ui-tui` adapter
 - **Web API + Prometheus** — REST API and WebSocket from the `ui-web` adapter; the `/metrics` endpoint for Grafana comes from the `exporter-prometheus` adapter
 - **Multi-channel notifications** — Telegram, Discord, Slack, and signed HTTP webhooks, from the `notifier` adapter
-- **Self-update** — `oxidepm update` downloads and swaps the latest release
+- **Self-update** — `oxidepm update` verifies and installs signed releases
 - **JSON output** — `--json` flag for machine-readable output on all commands
 - **Git clone & start** — The `git-start` adapter clones and launches projects, with optional dependency installation
 
@@ -33,11 +33,18 @@ OxidePM is a process manager written in Rust for any runtime. Adapters add langu
 
 ### Quick Install
 
-The install script installs the latest release (currently 0.4.0-rc.3).
+The install script installs the latest release. Have `minisign` on `PATH` to verify the
+release signature before installation. Without it, the script checks SHA-256 and reports
+that the signature was skipped.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/prod/scripts/install.sh | sh
 ```
+
+With `minisign` present, a missing signature is allowed only for an explicitly requested
+release older than 0.4.0-rc.4, and only when GitHub returns HTTP 404 for the signature.
+Set `OXIDEPM_VERSION` to the version or tag, for example
+`OXIDEPM_VERSION=0.4.0-rc.3 sh install.sh`. The script still checks SHA-256.
 
 ### APT (Debian/Ubuntu)
 
@@ -99,9 +106,37 @@ Pre-built binaries available on the [Releases page](https://github.com/oxidekit/
 | macOS | Intel | `oxidepm-x86_64-apple-darwin.tar.gz` |
 | macOS | Apple Silicon | `oxidepm-aarch64-apple-darwin.tar.gz` |
 
-To install an archive, verify its digest against `checksums.txt` and extract it.
+#### Verify a release download
+
+0.4.0-rc.4 is the first signed release. Download the exact archive for your platform,
+`checksums.txt`, and `checksums.txt.minisig` from the same release tag. Verify the
+signature with a public key from the [release signing policy](SECURITY.md).
+For `v0.4.0-rc.4`, use the current key and require this command to succeed and print
+exactly `oxidepm release checksums tag=v0.4.0-rc.4`.
+
+```sh
+PUBLIC_KEY='RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC'
+minisign -V -H -Q -P "$PUBLIC_KEY" -m checksums.txt -x checksums.txt.minisig
+```
+
+For another signed release, require the trusted comment to match its full tag, including
+the `v` prefix and any release candidate suffix. Set `ARCHIVE` to the exact filename
+you downloaded and compute its SHA-256.
+
+```sh
+ARCHIVE=oxidepm-x86_64-unknown-linux-gnu.tar.gz
+sha256sum "$ARCHIVE"       # Linux
+shasum -a 256 "$ARCHIVE"  # macOS
+```
+
+Compare the digest with the entry for that exact filename in the verified `checksums.txt`
+before extracting the archive.
 Place `oxidepm`, `oxidepmd` and `oxidepm-sandbox` in your prefix's `bin`, and copy
 `share/oxidepm/adapters` to the same path under the prefix. On Linux, import the runtimes as shown below.
+
+From 0.4.0-rc.1 through rc.3, run `oxidepm update --version 0.4.0-rc.4` to bootstrap.
+Those clients check SHA-256 during the upgrade. The new CLI verifies signatures on future
+updates. From 0.3.x, use the manual verification and installation steps above.
 
 When upgrading from 0.3.2, keep a copy of your app configuration and stop the old daemon
 before installing. The new daemon uses `state.db` and a versioned `saved.json`. Start
@@ -229,7 +264,7 @@ oxidepm stop my-app
 | `web [status\|new-key]` | Provided by the `ui-web` adapter ([install the adapter](#optional-adapters)): say where the web API listens, print its access key once, or replace the key |
 | `notify status\|test\|events\|severity\|telegram\|remove` | Provided by the `notifier` adapter ([install the adapter](#optional-adapters)): show, test and configure the notification channels |
 | `ping` | Check daemon health |
-| `update [--version X] [--force]` | Self-update to the latest stable release or an explicit version such as `0.4.0-rc.3`: the archive must match the sha256 in the release's `checksums.txt` (integrity; there is no release signing key yet, so authenticity is not checked), the asset is the one named exactly `oxidepm-<target>.tar.gz`, it is unpacked safely, a running daemon is stopped, the files are replaced atomically with the old ones kept as `.pre-update`, and the new `oxidepm --version` is run (everything is put back if that fails). An older version needs `--force` |
+| `update [--version X] [--force]` | Install the latest release or an explicit version such as `0.4.0-rc.4`. The updater verifies the signature and release tag of `checksums.txt` and checks the SHA-256 for the exact `oxidepm-<target>.tar.gz` asset before installation. A signed downgrade requires both an explicit `--version` and `--force`. The updater stops a running daemon, keeps the old files as `.pre-update`, and restores them if the new `oxidepm --version` fails. |
 | `init [dir]` | Generate a project config through the init adapter |
 | `deploy <host>` | Pull code and restart processes over SSH through the deploy adapter |
 | `diff <host>` | Show recent remote commits and working-tree changes through the deploy adapter |
