@@ -11,6 +11,7 @@ oxidepm-core = { workspace = true }
 oxidepm-runtime = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
+rustls = { workspace = true }
 webpki-roots = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }

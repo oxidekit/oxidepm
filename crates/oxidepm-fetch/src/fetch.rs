@@ -88,6 +88,51 @@ fn url_allowed(url: &reqwest::Url, loopback_http: bool) -> bool {
     }
 }
 
+/// Start building an HTTP client with the bundled public roots and system proxy settings.
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    let mut tls = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_root_certificates(rustls::RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+    ))
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let builder = reqwest::Client::builder().tls_backend_preconfigured(tls);
+
+    let from_env = |names: [&str; 2], make_proxy: fn(String) -> reqwest::Result<reqwest::Proxy>| {
+        names
+            .into_iter()
+            .filter_map(|name| std::env::var(name).ok())
+            .filter(|value| !value.trim().is_empty())
+            .filter(|value| {
+                reqwest::Url::parse(value).map_or(true, |url| {
+                    !url.has_host() || matches!(url.scheme(), "http" | "https")
+                })
+            })
+            .find_map(|value| make_proxy(value).ok())
+    };
+    let no_proxy = reqwest::NoProxy::from_env();
+    // ALL_PROXY takes priority over the scheme-specific settings.
+    if let Some(proxy) = from_env(["ALL_PROXY", "all_proxy"], reqwest::Proxy::all) {
+        return builder.proxy(proxy.no_proxy(no_proxy));
+    }
+    let http = if std::env::var_os("REQUEST_METHOD").is_none() {
+        from_env(["HTTP_PROXY", "http_proxy"], reqwest::Proxy::http)
+    } else {
+        None
+    };
+    let https = from_env(["HTTPS_PROXY", "https_proxy"], reqwest::Proxy::https);
+    // An explicit environment proxy takes priority over OS proxy discovery.
+    http.into_iter()
+        .chain(https)
+        .fold(builder, |builder, proxy| {
+            builder.proxy(proxy.no_proxy(no_proxy.clone()))
+        })
+}
+
 fn client(opts: &FetchOpts) -> Result<(reqwest::Client, Arc<Mutex<Option<RedirectIssue>>>)> {
     let issue: Arc<Mutex<Option<RedirectIssue>>> = Arc::new(Mutex::new(None));
     let loopback = loopback_http_allowed(opts);
@@ -104,7 +149,7 @@ fn client(opts: &FetchOpts) -> Result<(reqwest::Client, Arc<Mutex<Option<Redirec
         }
         attempt.follow()
     });
-    let client = reqwest::Client::builder()
+    let client = http_client_builder()
         .user_agent(opts.user_agent.clone())
         .connect_timeout(opts.connect_timeout)
         .timeout(opts.total_timeout)

@@ -3,7 +3,7 @@ name = "oxidepm-fetch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+rust-version = "1.85"
 description = "Verified download, safe archive extraction and atomic install for OxidePM (CLI side only)"
 
 [features]
@@ -13,6 +13,8 @@ test-support = []
 
 [dependencies]
 reqwest = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
 tokio = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }

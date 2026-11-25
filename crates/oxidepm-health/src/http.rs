@@ -6,9 +6,9 @@
 
 use std::sync::{Arc, OnceLock};
 
+use rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::rustls::{ClientConfig, OwnedTrustAnchor, RootCertStore, ServerName};
 use tokio_rustls::TlsConnector;
 
 /// The most of the answer that is read: the status line is the first one, so this is far more
@@ -152,19 +152,16 @@ fn tls_config() -> Arc<ClientConfig> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
-            let mut roots = RootCertStore::empty();
-            roots.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-                OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            }));
             Arc::new(
-                ClientConfig::builder()
-                    .with_safe_defaults()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
+                ClientConfig::builder_with_provider(
+                    rustls::crypto::ring::default_provider().into(),
+                )
+                .with_safe_default_protocol_versions()
+                .expect("ring supports the default TLS versions")
+                .with_root_certificates(RootCertStore::from_iter(
+                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                ))
+                .with_no_client_auth(),
             )
         })
         .clone()
@@ -179,7 +176,8 @@ pub(crate) async fn get_status(url: &str) -> Result<u16, String> {
         .map_err(|e| format!("connection failed: {e}"))?;
     if target.tls {
         let name = ServerName::try_from(target.host.as_str())
-            .map_err(|_| "the host is not a valid name for a certificate".to_string())?;
+            .map_err(|_| "the host is not a valid name for a certificate".to_string())?
+            .to_owned();
         let stream = TlsConnector::from(tls_config())
             .connect(name, stream)
             .await

@@ -29,6 +29,42 @@ fn mode_of(p: &Path) -> u32 {
 }
 
 #[tokio::test]
+async fn all_proxy_takes_precedence_over_http_proxy() {
+    const ORIGIN: &str = "OXIDEPM_FETCH_TEST_ORIGIN";
+    if let Ok(origin) = std::env::var(ORIGIN) {
+        let body = fetch_bytes(&origin, 64, &opts()).await.unwrap();
+        assert_eq!(body, b"all proxy");
+        return;
+    }
+
+    // Run the request in a fresh process so the proxy settings stay local to this test.
+    let origin = serve(|_, _| Reply::Ok(b"direct".to_vec())).await;
+    let all = serve(|_, _| Reply::Ok(b"all proxy".to_vec())).await;
+    let http = serve(|_, _| Reply::Ok(b"http proxy".to_vec())).await;
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests_fetch::all_proxy_takes_precedence_over_http_proxy",
+        ])
+        .env(ORIGIN, origin.url("/a"))
+        .env("ALL_PROXY", &all.base)
+        .env("HTTP_PROXY", &http.base)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env_remove("REQUEST_METHOD")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(all.requests(), [origin.url("/a")]);
+    assert!(http.requests().is_empty());
+}
+
+#[tokio::test]
 async fn a_matching_download_is_kept() {
     let body = b"the real archive".to_vec();
     let expected = body.clone();

@@ -4,20 +4,20 @@
 
 use std::process::Command;
 
-/// The names of every crate `package` is built from (normal and build dependencies; the tests'
-/// own dependencies are not part of the binary).
-fn crates_of(package: &str) -> Vec<String> {
+/// The normal and build dependencies of a binary, without its test dependencies.
+fn dependency_tree(package: &str, edges: &str, extra: &[&str]) -> String {
     let output = Command::new(env!("CARGO"))
         .args([
             "tree",
             "-p",
             package,
             "-e",
-            "normal,build",
+            edges,
             "--prefix",
             "none",
             "--offline",
         ])
+        .args(extra)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run cargo tree");
@@ -26,7 +26,11 @@ fn crates_of(package: &str) -> Vec<String> {
         "cargo tree failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    String::from_utf8(output.stdout).expect("cargo tree output is UTF-8")
+}
+
+fn crates_of(package: &str, extra: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = dependency_tree(package, "normal,build", extra)
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .map(str::to_string)
@@ -42,7 +46,7 @@ fn crates_of(package: &str) -> Vec<String> {
 
 #[test]
 fn daemon_binary_has_no_reqwest_dependency() {
-    let names = crates_of("oxidepmd");
+    let names = crates_of("oxidepmd", &[]);
     for banned in ["reqwest", "oxidepm-fetch", "tar"] {
         assert!(
             !names.iter().any(|n| n == banned),
@@ -55,7 +59,7 @@ fn daemon_binary_has_no_reqwest_dependency() {
 #[test]
 fn no_binary_is_built_with_a_terminal_ui() {
     for package in ["oxidepmd", "oxidepm"] {
-        let names = crates_of(package);
+        let names = crates_of(package, &[]);
         for banned in ["ratatui", "crossterm", "oxidepm-tui"] {
             assert!(
                 !names.iter().any(|n| n == banned),
@@ -70,12 +74,31 @@ fn no_binary_is_built_with_a_terminal_ui() {
 #[test]
 fn no_binary_is_built_with_a_web_server() {
     for package in ["oxidepmd", "oxidepm"] {
-        let names = crates_of(package);
-        for banned in ["axum", "tower-http", "oxidepm-web", "tungstenite"] {
+        let names = crates_of(package, &[]);
+        for banned in ["axum", "oxidepm-web", "tungstenite"] {
             assert!(
                 !names.iter().any(|n| n == banned),
                 "{package} is built with {banned}"
             );
         }
+        let features = dependency_tree(package, "normal,build,features", &[]);
+        assert!(
+            !features
+                .lines()
+                .any(|line| line.starts_with("hyper feature \"server\"")),
+            "{package} enables Hyper's server support"
+        );
+    }
+    // Reqwest uses tower-http's redirect middleware in the download client.
+    for (package, extra) in [
+        ("oxidepmd", &[][..]),
+        ("oxidepm", &["--prune", "reqwest"][..]),
+    ] {
+        assert!(
+            !crates_of(package, extra)
+                .iter()
+                .any(|name| name == "tower-http"),
+            "{package} is built with tower-http outside the download client"
+        );
     }
 }
