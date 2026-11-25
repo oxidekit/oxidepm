@@ -1,8 +1,7 @@
-//! `scripts/install.sh` checks the archive against `checksums.txt` of the release before it
-//! installs anything. The script runs for real, with a fake `curl` first in PATH that serves a
-//! release from a temporary directory (no network), and an install directory in the same place.
+//! Run `scripts/install.sh` with local release fixtures and a temporary installation prefix.
 
-use std::os::unix::fs::PermissionsExt;
+use std::fs;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -141,83 +140,410 @@ fn install_full(
     fail_import: bool,
     stale: bool,
 ) -> Run {
-    let dir = tempfile::tempdir().unwrap();
+    let release = Release::new(tamper, checksums, extra, bundle);
     if stale {
         // what an earlier release left where this one's adapters go
-        let old = dir.path().join("share/oxidepm/adapters");
+        let old = release.dir.path().join("share/oxidepm/adapters");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("stale-0.0.1.tar.gz"), "x").unwrap();
     }
-    let archive = release_archive(dir.path(), extra, bundle);
-    let mut bytes = std::fs::read(&archive).unwrap();
-    let honest = hex(&Sha256::digest(&bytes));
-    if tamper {
-        // the listed hash is for the real archive; what is served is a different file
-        bytes.extend_from_slice(b"tampered");
-        std::fs::write(&archive, &bytes).unwrap();
-    }
-    let name = format!("oxidepm-{}.tar.gz", target());
-    let served = dir.path().join("served");
-    std::fs::create_dir(&served).unwrap();
-    std::fs::rename(&archive, served.join("archive")).unwrap();
-    if let Some(text) = checksums(&name, &honest) {
-        std::fs::write(served.join("checksums.txt"), text).unwrap();
-    }
-    std::fs::write(served.join("latest"), "{\"tag_name\": \"v9.9.9\"}\n").unwrap();
+    release.run(&script_path(), None, fail_import)
+}
 
-    // a curl that serves the files above by URL, and fails (as `curl -f` does) for anything else
-    let bin = dir.path().join("fakebin");
-    std::fs::create_dir(&bin).unwrap();
-    let curl = format!(
-        r#"#!/bin/sh
+const CURRENT_PUBLIC_KEY: &str = "RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC";
+const NEXT_PUBLIC_KEY: &str = "RWTuJOozYEG8Y1hYBqUF8CBncU1PUQgqfJ/hr6Zcwgt1cDwfeRrZh+q5";
+const SIGNED_TAG: &str = "v0.4.0-rc.4";
+const TRUSTED_COMMENT: &str = "oxidepm release checksums tag=v0.4.0-rc.4";
+
+fn find_program(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find_map(|path| fs::canonicalize(path).ok().filter(|path| path.is_file()))
+}
+
+struct Release {
+    dir: tempfile::TempDir,
+    served: PathBuf,
+    bin: PathBuf,
+    install_dir: PathBuf,
+}
+
+impl Release {
+    fn new(
+        tamper: bool,
+        checksums: impl Fn(&str, &str) -> Option<String>,
+        extra: &[&str],
+        bundle: bool,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = release_archive(dir.path(), extra, bundle);
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let honest = hex(&Sha256::digest(&bytes));
+        if tamper {
+            // the listed hash is for the real archive; what is served is a different file
+            bytes.extend_from_slice(b"tampered");
+            std::fs::write(&archive, &bytes).unwrap();
+        }
+        let name = format!("oxidepm-{}.tar.gz", target());
+        let served = dir.path().join("served");
+        std::fs::create_dir(&served).unwrap();
+        std::fs::rename(&archive, served.join("archive")).unwrap();
+        if let Some(text) = checksums(&name, &honest) {
+            std::fs::write(served.join("checksums.txt"), text).unwrap();
+        }
+        // a curl that serves the files above by URL, and fails (as `curl -f` does) for anything else
+        let bin = dir.path().join("fakebin");
+        std::fs::create_dir(&bin).unwrap();
+        for program in [
+            "awk", "cat", "chmod", "cp", "cut", "dirname", "grep", "gzip", "mkdir", "mktemp", "mv",
+            "rm", "sed", "tar", "uname",
+        ] {
+            symlink(find_program(program).unwrap(), bin.join(program)).unwrap();
+        }
+        let checksum = if find_program("sha256sum").is_some() {
+            "sha256sum"
+        } else {
+            "shasum"
+        };
+        symlink(find_program(checksum).unwrap(), bin.join(checksum)).unwrap();
+        let curl = r#"#!/bin/sh
 out=""
+status=""
 url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
+    -w) status="$2"; shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 case "$url" in
-  */releases/latest) src="{served}/latest" ;;
-  */checksums.txt) src="{served}/checksums.txt" ;;
-  */oxidepm-*.tar.gz) src="{served}/archive" ;;
+  */releases/latest) printf '{"tag_name": "%s"}\n' "$FIXTURE_LATEST"; exit 0 ;;
+  */download/"$FIXTURE_TAG"/checksums.txt) src="$FIXTURE_SERVED/checksums.txt" ;;
+  */download/"$FIXTURE_TAG"/checksums.txt.minisig) src="$FIXTURE_SERVED/checksums.txt.minisig" ;;
+  */download/"$FIXTURE_TAG"/oxidepm-*.tar.gz) src="$FIXTURE_SERVED/archive" ;;
   *) exit 22 ;;
 esac
-[ -f "$src" ] || exit 22
-if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
-"#,
-        served = served.display()
-    );
-    std::fs::write(bin.join("curl"), curl).unwrap();
-    std::fs::set_permissions(bin.join("curl"), std::fs::Permissions::from_mode(0o755)).unwrap();
+if [ ! -f "$src" ]; then
+    [ -z "$status" ] || printf '%s' "${FIXTURE_SIGNATURE_STATUS:-404}"
+    exit 22
+fi
+cp "$src" "$out" || exit
+[ -z "$status" ] || printf '%s' 200
+"#;
+        std::fs::write(bin.join("curl"), curl).unwrap();
+        std::fs::set_permissions(bin.join("curl"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let install_dir = dir.path().join("installed");
-    std::fs::create_dir(&install_dir).unwrap();
-    let record = dir.path().join("record");
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
+        let install_dir = dir.path().join("installed");
+        std::fs::create_dir(&install_dir).unwrap();
+        Self {
+            dir,
+            served,
+            bin,
+            install_dir,
+        }
+    }
+
+    fn run(self, script: &Path, version: Option<&str>, fail_import: bool) -> Run {
+        self.run_with_status(script, version, SIGNED_TAG, fail_import, "404")
+    }
+
+    fn run_with_status(
+        self,
+        script: &Path,
+        version: Option<&str>,
+        latest: &str,
+        fail_import: bool,
+        signature_status: &str,
+    ) -> Run {
+        let record = self.dir.path().join("record");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg(script)
+            .env("PATH", &self.bin)
+            .env("INSTALL_DIR", &self.install_dir)
+            .env("HOME", self.dir.path())
+            .env("OXIDEPM_HOME", self.dir.path().join("oxidepm-home"))
+            .env("TMPDIR", self.dir.path())
+            .env("OXIDEPM_VERSION", version.unwrap_or_default())
+            .env("FIXTURE_LATEST", latest)
+            .env(
+                "FIXTURE_TAG",
+                version.map_or_else(
+                    || latest.to_owned(),
+                    |tag| {
+                        if tag.starts_with('v') {
+                            tag.to_owned()
+                        } else {
+                            format!("v{tag}")
+                        }
+                    },
+                ),
+            )
+            .env("FIXTURE_SERVED", &self.served)
+            .env("FIXTURE_SIGNATURE_STATUS", signature_status)
+            .env_remove("OXIDEPM_FAIL_IMPORT")
+            .env("OXIDEPM_RECORD", &record);
+        if fail_import {
+            command.env("OXIDEPM_FAIL_IMPORT", "1");
+        }
+        let out = command.output().expect("run sh");
+        Run {
+            out,
+            install_dir: self.install_dir,
+            record,
+            _dir: self.dir,
+        }
+    }
+}
+
+fn release(tamper: bool) -> Release {
+    Release::new(
+        tamper,
+        |name, hash| Some(format!("{hash}  {name}\n")),
+        &[],
+        true,
+    )
+}
+
+struct SigningKeys {
+    minisign: PathBuf,
+    dir: tempfile::TempDir,
+    current: String,
+    next: String,
+}
+
+impl SigningKeys {
+    fn new() -> Option<Self> {
+        let Some(minisign) = find_program("minisign") else {
+            eprintln!("Skipping signature test because minisign is not on PATH.");
+            return None;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let current = Self::generate(&minisign, dir.path(), "current");
+        let next = Self::generate(&minisign, dir.path(), "next");
+        Some(Self {
+            minisign,
+            dir,
+            current,
+            next,
+        })
+    }
+
+    fn generate(minisign: &Path, dir: &Path, name: &str) -> String {
+        let out = Command::new(minisign)
+            .current_dir(dir)
+            .args(["-G", "-W", "-p", &format!("{name}.pub"), "-s", name])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        fs::read_to_string(dir.join(format!("{name}.pub")))
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap()
+            .to_owned()
+    }
+
+    fn installer(&self, release: &Release) -> PathBuf {
+        symlink(&self.minisign, release.bin.join("minisign")).unwrap();
+        let script = release.dir.path().join("install.sh");
+        let body = fs::read_to_string(script_path())
+            .unwrap()
+            .replace(CURRENT_PUBLIC_KEY, &self.current)
+            .replace(NEXT_PUBLIC_KEY, &self.next);
+        fs::write(&script, body).unwrap();
+        script
+    }
+
+    fn sign(&self, release: &Release, key: &str, trusted_comment: &str, extra: &[&str]) {
+        let out = Command::new(&self.minisign)
+            .current_dir(&release.served)
+            .args(["-S", "-s"])
+            .arg(self.dir.path().join(key))
+            .args(["-m", "checksums.txt", "-t", trusted_comment])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+fn protect_existing_install(release: &Release) {
+    for name in ["oxidepm", "oxidepmd", "oxidepm-sandbox"] {
+        fs::write(release.install_dir.join(name), name).unwrap();
+    }
+    let adapters = release.dir.path().join("share/oxidepm/adapters");
+    fs::create_dir_all(&adapters).unwrap();
+    fs::write(adapters.join("index.json"), "old index").unwrap();
+    fs::write(adapters.join("SHA256SUMS"), "old checksums").unwrap();
+}
+
+fn assert_untouched(run: &Run, message: &str) {
+    let output = run.text();
+    assert!(!run.out.status.success(), "{output}");
+    assert!(output.contains(message), "{output}");
+    assert!(!output.contains("Extracting"), "{output}");
+    assert_eq!(run.installed(), ["oxidepm", "oxidepm-sandbox", "oxidepmd"]);
+    for name in run.installed() {
+        assert_eq!(
+            fs::read_to_string(run.install_dir.join(&name)).unwrap(),
+            name
+        );
+    }
+    let adapters = run.adapters_dir();
+    assert_eq!(
+        fs::read_to_string(adapters.join("index.json")).unwrap(),
+        "old index"
     );
-    let mut command = Command::new("sh");
-    command
-        .arg(script_path())
-        .env("PATH", path)
-        .env("INSTALL_DIR", &install_dir)
-        .env("TMPDIR", dir.path())
-        .env("OXIDEPM_RECORD", &record);
-    if fail_import {
-        command.env("OXIDEPM_FAIL_IMPORT", "1");
+    assert_eq!(
+        fs::read_to_string(adapters.join("SHA256SUMS")).unwrap(),
+        "old checksums"
+    );
+    assert_eq!(fs::read_dir(adapters).unwrap().count(), 2);
+    assert!(run.calls().is_empty());
+}
+
+#[test]
+fn install_script_accepts_either_pinned_signer() {
+    let Some(keys) = SigningKeys::new() else {
+        return;
+    };
+    for key in ["current", "next"] {
+        let release = release(false);
+        keys.sign(&release, key, TRUSTED_COMMENT, &[]);
+        let script = keys.installer(&release);
+        let run = release.run(&script, None, false);
+        assert!(run.out.status.success(), "{}", run.text());
+        assert!(
+            run.text().contains("Release signature verified"),
+            "{}",
+            run.text()
+        );
+        assert!(run.adapters_dir().join("index.json").is_file());
+        assert_eq!(run.calls(), [IMPORT_RUNTIMES]);
     }
-    let out = command.output().expect("run sh");
-    Run {
-        out,
-        install_dir,
-        record,
-        _dir: dir,
+}
+
+#[test]
+fn install_script_refuses_a_missing_signature_for_a_signed_release() {
+    let Some(keys) = SigningKeys::new() else {
+        return;
+    };
+    for version in [None, Some(SIGNED_TAG), Some("v0.4.0-rc.10"), Some("v0.4.0")] {
+        let release = release(false);
+        protect_existing_install(&release);
+        let script = keys.installer(&release);
+        assert_untouched(&release.run(&script, version, false), "Could not download");
     }
+}
+
+#[test]
+fn install_script_allows_unsigned_older_releases_only_when_requested_explicitly() {
+    let Some(keys) = SigningKeys::new() else {
+        return;
+    };
+    for version in ["0.4.0-rc.3", "v0.3.2"] {
+        let release = release(false);
+        let script = keys.installer(&release);
+        let run = release.run(&script, Some(version), false);
+        assert!(run.out.status.success(), "{}", run.text());
+        assert!(
+            run.text().contains("predates release signatures"),
+            "{}",
+            run.text()
+        );
+        assert!(run.text().contains("Checksum verified"), "{}", run.text());
+    }
+
+    for (version, latest, status) in [
+        (None, "v0.4.0-rc.3", "404"),
+        (Some("v0.4.0-rc.3"), SIGNED_TAG, "503"),
+    ] {
+        let release = release(false);
+        protect_existing_install(&release);
+        let script = keys.installer(&release);
+        assert_untouched(
+            &release.run_with_status(&script, version, latest, false, status),
+            "Could not download",
+        );
+    }
+}
+
+#[test]
+fn install_script_refuses_invalid_signatures() {
+    let Some(keys) = SigningKeys::new() else {
+        return;
+    };
+    SigningKeys::generate(&keys.minisign, keys.dir.path(), "unknown");
+    for (case, comment, extra) in [
+        ("malformed", TRUSTED_COMMENT, vec![]),
+        ("extra line", TRUSTED_COMMENT, vec![]),
+        ("legacy", TRUSTED_COMMENT, vec!["-l"]),
+        ("unknown", TRUSTED_COMMENT, vec![]),
+        ("altered checksums", TRUSTED_COMMENT, vec![]),
+        (
+            "wrong tag",
+            "oxidepm release checksums tag=v0.4.0-rc.3",
+            vec!["-c", TRUSTED_COMMENT],
+        ),
+        (
+            "wrong purpose",
+            "oxidepm adapter index tag=v0.4.0-rc.4",
+            vec![],
+        ),
+    ] {
+        let release = release(false);
+        protect_existing_install(&release);
+        let signer = if case == "unknown" {
+            "unknown"
+        } else {
+            "current"
+        };
+        keys.sign(&release, signer, comment, &extra);
+        let sig = release.served.join("checksums.txt.minisig");
+        if case == "malformed" {
+            fs::write(&sig, "invalid signature\n").unwrap();
+        } else if case == "extra line" {
+            let text = fs::read_to_string(&sig).unwrap();
+            fs::write(&sig, format!("{text}extra line\n")).unwrap();
+        } else if case == "altered checksums" {
+            let sums = release.served.join("checksums.txt");
+            let text = fs::read_to_string(&sums).unwrap();
+            fs::write(sums, format!("{text}\n")).unwrap();
+        }
+        let script = keys.installer(&release);
+        let run = release.run(&script, None, false);
+        assert!(!run.out.status.success(), "{case}: {}", run.text());
+        assert_untouched(&run, "Release signature");
+    }
+}
+
+#[test]
+fn install_script_refuses_a_tampered_archive_even_with_signed_checksums() {
+    let Some(keys) = SigningKeys::new() else {
+        return;
+    };
+    let release = release(true);
+    protect_existing_install(&release);
+    keys.sign(&release, "current", TRUSTED_COMMENT, &[]);
+    let script = keys.installer(&release);
+    let run = release.run(&script, None, false);
+    assert!(
+        run.text().contains("Release signature verified"),
+        "{}",
+        run.text()
+    );
+    assert_untouched(&run, "Checksum mismatch");
 }
 
 #[test]
@@ -230,6 +556,14 @@ fn install_script_installs_an_archive_that_matches_checksums_txt() {
     });
     assert!(run.out.status.success(), "{}", run.text());
     assert!(run.text().contains("Checksum verified"), "{}", run.text());
+    assert_eq!(
+        run.text()
+            .lines()
+            .filter(|line| *line
+                == "Release signature was not checked because minisign is unavailable.")
+            .count(),
+        1
+    );
     assert_eq!(run.installed(), ["oxidepm", "oxidepmd"]);
 }
 

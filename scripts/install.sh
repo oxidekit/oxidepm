@@ -56,6 +56,19 @@ get_latest_version() {
     info "Latest version: $VERSION"
 }
 
+select_version() {
+    case "${OXIDEPM_VERSION:-}" in
+        "") get_latest_version ;;
+        v*) VERSION="$OXIDEPM_VERSION" ;;
+        *) VERSION="v$OXIDEPM_VERSION" ;;
+    esac
+    case "$VERSION" in
+        *[!A-Za-z0-9.-]*) error "Invalid release tag: $VERSION" ;;
+        v[0-9]*) ;;
+        *) error "Invalid release tag: $VERSION" ;;
+    esac
+}
+
 # Print the sha256 of a file (sha256sum on Linux, shasum on macOS)
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -67,14 +80,48 @@ sha256_of() {
     fi
 }
 
-# Check the archive against checksums.txt of the same release. This checks that the file
-# arrived whole and is the one the release lists; it is not a signature check.
+verify_signature() {
+    if ! command -v minisign >/dev/null 2>&1; then
+        printf '%s\n' 'Release signature was not checked because minisign is unavailable.'
+        return 0
+    fi
+
+    signature="$TEMP_DIR/checksums.txt.minisig"
+    if status=$(curl -fsSL -w '%{http_code}' "$CHECKSUMS_URL.minisig" -o "$signature"); then
+        :
+    else
+        if [ "$?" -eq 22 ] && [ "$status" = 404 ] && [ -n "${OXIDEPM_VERSION:-}" ] &&
+            printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq '^v0\.([0-3]\.[0-9]+(-[A-Za-z0-9.-]+)?|4\.0-rc\.[0-3])$'; then
+            printf 'Release %s predates release signatures. Checking SHA-256 only.\n' "$VERSION"
+            return 0
+        fi
+        error "Could not download $CHECKSUMS_URL.minisig"
+    fi
+
+    awk 'NR == 1 && $0 !~ /^untrusted comment: / { exit 1 } END { if (NR != 4) exit 1 }' "$signature" ||
+        error "Release signature has an invalid format for $VERSION"
+
+    for public_key in \
+        'RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC' \
+        'RWTuJOozYEG8Y1hYBqUF8CBncU1PUQgqfJ/hr6Zcwgt1cDwfeRrZh+q5'; do
+        if comment=$(minisign -V -H -Q -P "$public_key" -m "$TEMP_DIR/checksums.txt" -x "$signature" 2>/dev/null); then
+            [ "$comment" = "oxidepm release checksums tag=$VERSION" ] ||
+                error "Release signature has an unexpected trusted comment for $VERSION"
+            success "Release signature verified for $VERSION"
+            return 0
+        fi
+    done
+    error "Release signature verification failed for $VERSION"
+}
+
+# Authenticate checksums.txt when possible, then check the archive's exact filename and digest.
 verify_checksum() {
     ARCHIVE="$1"
     NAME="oxidepm-$TARGET.tar.gz"
     CHECKSUMS_URL="https://github.com/$REPO/releases/download/$VERSION/checksums.txt"
 
     curl -fsSL "$CHECKSUMS_URL" -o "$TEMP_DIR/checksums.txt" || error "Could not download $CHECKSUMS_URL"
+    verify_signature
 
     # the line for exactly this file name (sha256sum output: "<hash>  <name>")
     EXPECTED=$(awk -v n="$NAME" '{ f = $2; sub(/^\*/, "", f); if (f == n) print $1 }' "$TEMP_DIR/checksums.txt")
@@ -100,7 +147,7 @@ install() {
     info "Downloading from $DOWNLOAD_URL"
 
     TEMP_DIR=$(mktemp -d)
-    trap "rm -rf $TEMP_DIR" EXIT
+    trap 'rm -rf "$TEMP_DIR"' EXIT
 
     curl -fsSL "$DOWNLOAD_URL" -o "$TEMP_DIR/oxidepm.tar.gz"
 
@@ -191,7 +238,7 @@ main() {
     echo ""
 
     detect_platform
-    get_latest_version
+    select_version
     install
     verify
     import_runtimes
