@@ -122,8 +122,11 @@ pub fn bundle_dir() -> Result<PathBuf> {
 
 /// Read the release's local catalog after checking it against the bundle checksum list.
 pub fn bundled_index() -> Result<(ReleaseBundle, Index)> {
-    let bundle =
-        ReleaseBundle::read(bundle_dir()?).context("Could not read the release adapter bundle")?;
+    read_bundled_index(bundle_dir()?)
+}
+
+pub(super) fn read_bundled_index(dir: PathBuf) -> Result<(ReleaseBundle, Index)> {
+    let bundle = ReleaseBundle::read(dir).context("Could not read the release adapter bundle")?;
     let mut bytes = Vec::new();
     bundle
         .copy_verified("index.json", INDEX_MAX_BYTES as u64, &mut bytes)

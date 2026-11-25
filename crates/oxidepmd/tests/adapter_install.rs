@@ -2382,6 +2382,166 @@ fn version_of(kit: &Kit, name: &str) -> String {
         .to_string()
 }
 
+fn run_without_index(kit: &Kit, args: &[&str]) -> Run {
+    Run::of(
+        kit.cli()
+            .env_remove("OXIDEPM_TEST_INDEX_URL")
+            .args(args)
+            .output()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn bundled_update_by_name_keeps_an_enabled_adapter_enabled() {
+    let old = alpha();
+    let new = Pkg::tool("alpha", "0.2.0").package();
+    let kit = kit_with(&[&old]);
+    let _daemon = kit.daemon();
+    let import = kit.run(&[
+        "adapter",
+        "import",
+        "--bundled",
+        "alpha",
+        "--enable",
+        "--yes",
+    ]);
+    assert_eq!(import.code, 0, "{}", import.all());
+
+    kit.publish(&[&new], &seq(2));
+    let run = run_without_index(&kit, &["adapter", "update", "alpha"]);
+    assert_eq!(run.code, 0, "{}", run.all());
+    assert!(
+        run.stdout.contains("Updated alpha 0.1.0 to 0.2.0"),
+        "{}",
+        run.all()
+    );
+    let info = info_json(&kit, "alpha");
+    assert_eq!(info["version"], "0.2.0");
+    assert_eq!(info["prev_version"], "0.1.0");
+    assert_eq!(info["source"], "bundled");
+    assert_eq!(info["enabled"], true);
+}
+
+#[test]
+fn bundled_update_all_continues_past_an_adapter_that_needs_consent() {
+    let old_alpha = alpha();
+    let new_alpha = Pkg::tool("alpha", "0.2.0")
+        .perms(json!({"network": {"mode": "outbound"}}))
+        .package();
+    let old_beta = Pkg::tool("beta", "0.1.0").package();
+    let new_beta = Pkg::tool("beta", "0.2.0").package();
+    let kit = kit_with(&[&old_alpha, &old_beta]);
+    let _daemon = kit.daemon();
+    let import = kit.run(&["adapter", "import", "--bundled", "--enable", "--yes"]);
+    assert_eq!(import.code, 0, "{}", import.all());
+
+    kit.publish(&[&new_alpha, &new_beta], &seq(2));
+    let run = run_without_index(&kit, &["adapter", "update", "--all"]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    let fingerprint = new_alpha.fingerprint();
+    assert!(
+        run.stderr.contains(&format!(
+            "oxidepm adapter update alpha --accept {fingerprint}"
+        )) && run.stderr.contains("Not updated: alpha"),
+        "{}",
+        run.all()
+    );
+    assert!(
+        run.stdout.contains("Updated beta 0.1.0 to 0.2.0"),
+        "{}",
+        run.all()
+    );
+    assert_eq!(version_of(&kit, "alpha"), "0.1.0");
+    assert_eq!(version_of(&kit, "beta"), "0.2.0");
+    assert_eq!(info_json(&kit, "alpha")["enabled"], true);
+    assert_eq!(info_json(&kit, "beta")["enabled"], true);
+
+    let accepted = run_without_index(
+        &kit,
+        &["adapter", "update", "alpha", "--accept", &fingerprint],
+    );
+    assert_eq!(accepted.code, 0, "{}", accepted.all());
+    let info = info_json(&kit, "alpha");
+    assert_eq!(info["version"], "0.2.0");
+    assert_eq!(info["grant"]["network"]["mode"], "outbound");
+    assert_eq!(info["enabled"], true);
+}
+
+#[test]
+fn bundled_update_dry_run_verifies_the_archive_and_changes_nothing() {
+    let old = alpha();
+    let new = Pkg::tool("alpha", "0.2.0").package();
+    let kit = kit_with(&[&old]);
+    let _daemon = kit.daemon();
+    let import = kit.run(&["adapter", "import", "--bundled", "alpha"]);
+    assert_eq!(import.code, 0, "{}", import.all());
+    kit.publish(&[&new], &seq(2));
+    let before = (info_json(&kit, "alpha"), kit.adapters_tree());
+    let args = ["--dry-run", "adapter", "update", "alpha"];
+    let run = run_without_index(&kit, &args);
+    assert_eq!(run.code, 0, "{}", run.all());
+    assert!(
+        run.stdout.contains("Update    from 0.1.0 to 0.2.0")
+            && run.stdout.contains("Dry run: verified"),
+        "{}",
+        run.all()
+    );
+    assert_eq!((info_json(&kit, "alpha"), kit.adapters_tree()), before);
+
+    std::fs::write(kit.bundle.join("alpha-0.2.0.tar.gz"), b"changed archive").unwrap();
+    let run = run_without_index(&kit, &args);
+    assert_eq!(run.code, 1, "{}", run.all());
+    assert!(run.stderr.contains("E_CHECKSUM_MISMATCH"), "{}", run.all());
+    assert_eq!((info_json(&kit, "alpha"), kit.adapters_tree()), before);
+}
+
+#[test]
+fn bundled_update_reports_when_the_bundle_has_no_newer_release() {
+    let old = alpha();
+    let new = Pkg::tool("alpha", "0.2.0").package();
+    let kit = kit_with(&[&new]);
+    let _daemon = kit.daemon();
+    let import = kit.run(&["adapter", "import", "--bundled", "alpha"]);
+    assert_eq!(import.code, 0, "{}", import.all());
+
+    for releases in [&[&new][..], &[&old][..], &[]] {
+        kit.publish(releases, &seq(2));
+        let run = run_without_index(&kit, &["adapter", "update", "alpha"]);
+        assert_eq!(run.code, 0, "{}", run.all());
+        assert!(run.stdout.contains("alpha is up to date"), "{}", run.all());
+        assert_eq!(version_of(&kit, "alpha"), "0.2.0");
+    }
+}
+
+#[test]
+fn pinned_update_does_not_use_a_matching_bundle() {
+    let old = alpha();
+    let new = Pkg::tool("alpha", "0.2.0").package();
+    let kit = kit_with(&[&new]);
+    let _daemon = kit.daemon();
+    let archive = kit.dir.path().join("local.tar.gz");
+    std::fs::write(&archive, &old.archive).unwrap();
+    let import = kit.run(&[
+        "adapter",
+        "import",
+        archive.to_str().unwrap(),
+        "--sha256",
+        &old.archive_sha,
+    ]);
+    assert_eq!(import.code, 0, "{}", import.all());
+    let run = run_without_index(&kit, &["adapter", "update", "alpha"]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    assert!(
+        run.stderr.contains("no index is configured"),
+        "{}",
+        run.all()
+    );
+    let info = info_json(&kit, "alpha");
+    assert_eq!(info["version"], "0.1.0");
+    assert_eq!(info["trust"], "pinned");
+}
+
 #[test]
 fn update_with_more_permissions_needs_consent() {
     let v1 = Pkg::tool("alpha", "0.1.0").package();

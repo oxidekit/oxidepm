@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::output::print_plan;
 use oxidepm_adapter_proto::{official_keys, verify_minisign, IndexKey};
 use oxidepm_core::release_bundle::DIRECTORY as BUNDLE_PATH;
-use oxidepm_core::Error;
+use oxidepm_core::{Error, Paths};
 use oxidepm_fetch::{
     check_version, extract_tar_gz, fetch_bytes, fetch_verified, hex, Expect, ExtractLimits,
     ExtractedKind, FetchOpts, StagedFile,
@@ -60,6 +60,7 @@ struct Env {
     target: String,
     release_keys: Vec<IndexKey>,
     client: IpcClient,
+    adapter_db: Option<PathBuf>,
     daemon_wait: Duration,
 }
 
@@ -74,6 +75,7 @@ impl Env {
             target: current_target(),
             release_keys: official_keys(),
             client: super::get_client(),
+            adapter_db: Paths::from_env().ok().map(|paths| paths.adapters_db()),
             daemon_wait: DAEMON_STOP_WAIT,
         })
     }
@@ -86,7 +88,10 @@ impl Env {
 }
 
 pub async fn execute(version: Option<String>, force: bool, dry_run: bool) -> Result<()> {
-    execute_at(&Env::real()?, version, force, dry_run).await
+    if let Some(hint) = execute_at(&Env::real()?, version, force, dry_run).await? {
+        println!("{hint}");
+    }
+    Ok(())
 }
 
 /// What the release listing says about the release to install.
@@ -102,7 +107,12 @@ struct Release {
 /// `update`. With `dry_run` the release is looked up, the archive is downloaded, verified and
 /// unpacked in a private temporary directory that is deleted again, and the plan printed;
 /// nothing is installed and no daemon is stopped.
-async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bool) -> Result<()> {
+async fn execute_at(
+    env: &Env,
+    version: Option<String>,
+    force: bool,
+    dry_run: bool,
+) -> Result<Option<String>> {
     // `--version` goes into a URL: check it first
     let wanted = match &version {
         Some(v) => {
@@ -126,7 +136,7 @@ async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bo
                 "✓".green(),
                 env.current_version
             );
-            return Ok(());
+            return Ok(None);
         }
         check_version(&release.version, &env.current_version, false).with_context(|| {
             format!(
@@ -198,7 +208,8 @@ async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bo
                     .detail("The bundled adapters are installed with the executables."),
             );
         }
-        return print_plan(&plan);
+        print_plan(&plan)?;
+        return Ok(None);
     }
 
     // 1. stage every file next to its destination: a failure here changes nothing installed
@@ -287,7 +298,19 @@ async fn execute_at(env: &Env, version: Option<String>, force: bool, dry_run: bo
         key_id
     );
     println!("  Start the daemon again with: oxidepmd &   (or restart its service)");
-    Ok(())
+    let Some(adapter_db) = env.adapter_db.as_deref().filter(|_| has_bundle) else {
+        return Ok(None);
+    };
+    // The hint is advisory and must not fail a completed release update.
+    Ok(super::adapter::bundle_update_hint(
+        adapter_db,
+        bundle_destination,
+        &env.target,
+        &release.version,
+    )
+    .await
+    .ok()
+    .flatten())
 }
 
 struct InstallationLock(fs::File);
@@ -1037,6 +1060,7 @@ mod tests {
                     .map(|key| IndexKey::parse(&key.public_base64()).unwrap())
                     .collect(),
                 client: IpcClient::new(self.socket.clone()),
+                adapter_db: Some(self.dir.path().join("adapters.db")),
                 daemon_wait: Duration::from_secs(3),
             }
         }
@@ -1819,6 +1843,106 @@ mod tests {
             b"old archive"
         );
         assert_eq!(fs::read(bundle.join("new.tar.gz")).unwrap(), b"new archive");
+    }
+
+    #[tokio::test]
+    async fn update_reports_only_installed_bundled_adapters_with_newer_releases() {
+        let fx = Fixture::new();
+        let server = Server::start().await;
+        let env = fx.env(&server);
+        let adapters = ["notifier", "exporter", "dashboard"].map(|name| {
+            serde_json::json!({
+                "name": name, "kind": "tool", "summary": "A bundled adapter",
+                "releases": [{
+                    "version": "0.4.0-rc.10", "released": "2026-11-24",
+                    "min_daemon": NEW_VERSION, "protocol": [1],
+                    "artifacts": {(&env.target): {
+                        "url": format!("https://example.com/{name}.tar.gz"), "size": 1,
+                        "sha256": "a".repeat(64), "exe_sha256": "b".repeat(64)
+                    }}
+                }]
+            })
+        });
+        let index = serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "sequence": 1, "generated": "2026-11-24T00:00:00Z",
+            "expires": "2026-12-24T00:00:00Z", "adapters": adapters
+        }))
+        .unwrap();
+        let sums = format!("{}  index.json\n", hex(&Sha256::digest(&index)));
+        let cli = script(NEW_VERSION, None);
+        let tarball = archive(&[
+            ("oxidepm", &cli),
+            ("share/oxidepm/adapters/index.json", &index),
+            ("share/oxidepm/adapters/SHA256SUMS", sums.as_bytes()),
+        ]);
+        server.publish(
+            &format!("v{NEW_VERSION}"),
+            &[(asset_name(), tarball)],
+            Checksums::Honest,
+        );
+
+        let path = fx.dir.path().join("adapters.db");
+        assert_eq!(execute_at(&env, None, false, false).await.unwrap(), None);
+        assert!(!path.exists());
+
+        let db = oxidepm_db::Database::open_adapters(&path).await.unwrap();
+        let repo = db.adapters();
+        for (name, source, version) in [
+            ("exporter", "bundled", "0.4.0-rc.10"),
+            ("dashboard", "pinned:/local/dashboard.tar.gz", "0.4.0-rc.9"),
+        ] {
+            repo.insert(&installed_adapter(name, source, version))
+                .await
+                .unwrap();
+        }
+        db.close().await;
+        assert_eq!(execute_at(&env, None, false, false).await.unwrap(), None);
+
+        let db = oxidepm_db::Database::open_adapters(&path).await.unwrap();
+        db.adapters()
+            .insert(&installed_adapter("notifier", "bundled", "0.4.0-rc.9"))
+            .await
+            .unwrap();
+        db.close().await;
+        let before = fs::read(&path).unwrap();
+        assert_eq!(execute_at(&env, None, false, true).await.unwrap(), None);
+        let hint = execute_at(&env, None, false, false).await.unwrap().unwrap();
+        assert!(
+            hint.contains("notifier (0.4.0-rc.9 → 0.4.0-rc.10)"),
+            "{hint}"
+        );
+        assert!(
+            !hint.contains("exporter") && !hint.contains("dashboard"),
+            "{hint}"
+        );
+        assert_eq!(
+            hint.lines().last(),
+            Some("Run oxidepm adapter update --all to update them.")
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    fn installed_adapter(name: &str, source: &str, version: &str) -> oxidepm_db::AdapterRow {
+        oxidepm_db::AdapterRow {
+            name: name.into(),
+            source: source.into(),
+            version: version.into(),
+            kind: "tool".into(),
+            trust: "bundled".into(),
+            exe_sha256: "a".repeat(64),
+            manifest_json: "{}".into(),
+            enabled: false,
+            grant_json: None,
+            grant_fingerprint: None,
+            enforced_json: None,
+            prev_version: None,
+            prev_exe_sha256: None,
+            prev_manifest_json: None,
+            prev_grant_json: None,
+            state_note: None,
+            installed_at: "2026-11-24T00:00:00Z".into(),
+            updated_at: "2026-11-24T00:00:00Z".into(),
+        }
     }
 
     #[cfg(target_os = "linux")]

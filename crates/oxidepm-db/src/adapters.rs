@@ -2,8 +2,9 @@
 //! plan cache). Strings that hold JSON are stored as given; this layer never interprets them.
 
 use oxidepm_core::{Error, Result};
-use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePool, SqliteRow};
+use sqlx::{Connection, Row};
+use std::path::Path;
 
 /// One installed adapter. `kind` is `service` or `tool` (the table refuses anything else);
 /// `prev_*` hold the single version an update can be rolled back to.
@@ -97,6 +98,21 @@ fn plan_from(r: &SqliteRow) -> Result<PlanRow> {
 impl AdapterRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Read the installed bundled versions without creating or migrating the database.
+    pub async fn bundled_versions_at(path: &Path) -> Result<Vec<(String, String)>> {
+        if !path.try_exists()? {
+            return Ok(Vec::new());
+        }
+        let options = SqliteConnectOptions::new().filename(path).read_only(true);
+        let mut connection = SqliteConnection::connect_with(&options)
+            .await
+            .map_err(db_err)?;
+        sqlx::query_as("SELECT name, version FROM adapters WHERE source = 'bundled' ORDER BY name")
+            .fetch_all(&mut connection)
+            .await
+            .map_err(db_err)
     }
 
     /// Insert a new adapter. A name that is taken, or a `kind` other than `service` or `tool`,

@@ -11,9 +11,11 @@ mod stage;
 
 use anyhow::{bail, Result};
 use colored::Colorize;
-use oxidepm_adapter_proto::{host_target, Kind, Manifest};
+use oxidepm_adapter_proto::{host_target, Kind, Manifest, SUPPORTED_PROTOCOLS};
 use oxidepm_core::{constants, Paths};
+use oxidepm_db::AdapterRepository;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 
 use crate::cli::{AdapterArgs, AdapterCommand, ImportArgs, UpdateArgs};
 use crate::output::is_json_mode;
@@ -439,6 +441,36 @@ async fn import(args: ImportArgs, dry_run: bool) -> Result<()> {
 
 // ---- update ----------------------------------------------------------------------------------
 
+pub(super) async fn bundle_update_hint(
+    adapter_db: &Path,
+    bundle: PathBuf,
+    target: &str,
+    release_version: &str,
+) -> Result<Option<String>> {
+    let installed = AdapterRepository::bundled_versions_at(adapter_db).await?;
+    if installed.is_empty() {
+        return Ok(None);
+    }
+    let (_, index) = index_src::read_bundled_index(bundle)?;
+    let daemon_version = semver::Version::parse(release_version)?;
+    let updates: Vec<_> = installed
+        .iter()
+        .filter_map(|(name, version)| {
+            let offer = index.latest_offer(name, target, &daemon_version, SUPPORTED_PROTOCOLS)?;
+            let newest = &offer.release.version;
+            stage::is_newer(newest, version)
+                .then(|| format!("  {name} ({} → {newest})", sanitize(version, false)))
+        })
+        .collect();
+    if updates.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Bundled adapters with updates\n{}\nRun oxidepm adapter update --all to update them.",
+        updates.join("\n")
+    )))
+}
+
 async fn update(args: UpdateArgs, dry_run: bool) -> Result<()> {
     if args.rollback {
         let Some(name) = &args.name else {
@@ -491,9 +523,9 @@ async fn update_one(name: &str, args: &UpdateArgs, dry_run: bool) -> Result<()> 
     };
     let old_manifest = Manifest::parse(installed.manifest_json.as_bytes())
         .map_err(|e| coded("E_ADAPTER_INVALID", e.detail))?;
-    // where the new release comes from: the index, or what the user names for a pinned adapter
     let source = match &args.from {
         Some(from) => source_of(from),
+        None if installed.source == "bundled" => Source::Bundled(name.to_string()),
         None => Source::Index(name.to_string()),
     };
     let paths = Paths::new(constants::oxidepm_home());

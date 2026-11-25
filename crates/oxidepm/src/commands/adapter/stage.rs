@@ -82,25 +82,39 @@ pub struct StageOpts<'a> {
     pub only_newer_than: Option<&'a str>,
 }
 
-/// The index offers nothing newer than what is installed.
+/// The catalog offers nothing newer than what is installed.
 #[derive(Debug)]
 pub struct UpToDate {
     pub name: String,
     pub installed: String,
-    pub newest: String,
+    pub newest: Option<String>,
 }
 
 impl std::fmt::Display for UpToDate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} is up to date: {} is installed and the newest release is {}",
-            self.name, self.installed, self.newest
-        )
+            "{} is up to date: {} is installed",
+            self.name, self.installed
+        )?;
+        match &self.newest {
+            Some(version) => write!(f, " and the newest release is {version}"),
+            None => write!(f, " and the bundle offers no compatible release"),
+        }
     }
 }
 
 impl std::error::Error for UpToDate {}
+
+pub(super) fn is_newer(offered: &str, installed: &str) -> bool {
+    match (
+        semver::Version::parse(offered),
+        semver::Version::parse(installed),
+    ) {
+        (Ok(new), Ok(old)) => new > old,
+        _ => offered != installed,
+    }
+}
 
 fn daemon_version() -> semver::Version {
     semver::Version::parse(env!("CARGO_PKG_VERSION"))
@@ -253,9 +267,9 @@ async fn stage_indexed(name: &str, bundled: bool, opts: &StageOpts<'_>) -> Resul
                 .index
         }
     };
-    let Some(adapter) = index.adapter(name) else {
+    if index.adapter(name).is_none() && (!bundled || opts.only_newer_than.is_none()) {
         return Err(coded("E_ADAPTER_MISSING", format!("the index has no adapter named '{name}'. `oxidepm adapter search` lists what it has")));
-    };
+    }
     let target = host_target();
     let offers = index.offered(
         name,
@@ -274,26 +288,20 @@ async fn stage_indexed(name: &str, bundled: bool, opts: &StageOpts<'_>) -> Resul
         }
         None => offers.first().copied(),
     };
-    if let (Some(offer), Some(installed), None) = (&chosen, opts.only_newer_than, opts.version) {
-        let newer = match (
-            semver::Version::parse(&offer.release.version),
-            semver::Version::parse(installed),
-        ) {
-            (Ok(new), Ok(old)) => new > old,
-            _ => offer.release.version != installed,
-        };
-        if !newer {
+    if let (Some(installed), None) = (opts.only_newer_than, opts.version) {
+        let newest = chosen.map(|offer| offer.release.version.as_str());
+        if newest.map_or(bundled, |version| !is_newer(version, installed)) {
             return Err(anyhow::Error::new(UpToDate {
                 name: name.to_string(),
                 installed: installed.to_string(),
-                newest: offer.release.version.clone(),
+                newest: newest.map(str::to_string),
             }));
         }
     }
     let Some(offer) = chosen else {
         return Err(coded(
             "E_ADAPTER_MISSING",
-            format!("no release of '{}' can be installed here (target {target}, daemon {}): all are yanked, revoked, need a newer daemon or have no archive for this target", adapter.name, daemon_version()),
+            format!("no release of '{name}' can be installed here (target {target}, daemon {}): all are yanked, revoked, need a newer daemon or have no archive for this target", daemon_version()),
         ));
     };
     let artifact = offer.artifact.clone();

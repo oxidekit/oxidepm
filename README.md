@@ -138,6 +138,9 @@ From 0.4.0-rc.1 through rc.3, run `oxidepm update --version 0.4.0-rc.4` to boots
 Those clients check SHA-256 during the upgrade. The new CLI verifies signatures on future
 updates. From 0.3.x, use the manual verification and installation steps above.
 
+After `oxidepm update`, restart the daemon and run `oxidepm adapter update --all`
+to update your installed bundled adapters from the new release.
+
 When upgrading from 0.3.2, keep a copy of your app configuration and stop the old daemon
 before installing. The new daemon uses `state.db` and a versioned `saved.json`. Start
 your apps from their configs and run `oxidepm save` to record the new state.
