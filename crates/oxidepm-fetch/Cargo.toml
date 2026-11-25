@@ -3,7 +3,7 @@ name = "oxidepm-fetch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.85"
+rust-version.workspace = true
 description = "Verified download, safe archive extraction and atomic install for OxidePM (CLI side only)"
 
 [features]
