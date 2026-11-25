@@ -52,10 +52,10 @@ Download the `.deb` from the [Releases page](https://github.com/oxidekit/oxidepm
 
 ```bash
 # x86_64
-sudo dpkg -i oxidepm_0.4.0.rc.3_amd64.deb
+sudo dpkg -i oxidepm_0.4.0.rc.4_amd64.deb
 
 # ARM64
-sudo dpkg -i oxidepm_0.4.0.rc.3_arm64.deb
+sudo dpkg -i oxidepm_0.4.0.rc.4_arm64.deb
 ```
 
 ### Homebrew (macOS/Linux)
@@ -193,7 +193,7 @@ If you build an archive from the [adapter sources](https://github.com/oxidekit/o
 import the file using the digest from your build's `SHA256SUMS`:
 
 ```bash
-oxidepm adapter import ./watch-0.4.0-rc.3.tar.gz --sha256 <digest> --allow-reserved-name --enable
+oxidepm adapter import ./watch-0.4.0-rc.4.tar.gz --sha256 <digest> --allow-reserved-name --enable
 ```
 
 Use `--allow-reserved-name` for locally built adapters with reserved names, as shown above.
