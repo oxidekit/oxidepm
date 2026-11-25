@@ -1,4 +1,4 @@
-//! The signature of the index.
+//! Minisign verification for release checksums and adapter indexes.
 //!
 //! The index is signed with minisign (Ed25519, prehashed mode). A signature made in the legacy
 //! mode is refused: the library accepts it unless told not to. The trusted comment of the
@@ -14,11 +14,12 @@ use minisign_verify::{PublicKey, Signature};
 
 use crate::index::Index;
 
-/// The keys the daemon and the CLI embed: the current one and the next one, as minisign public
-/// keys in base64. There are no user-added keys and no third-party index. Empty until the
-/// owner creates a signing key; with none embedded, nothing can be signed by an official key and
-/// only the pinned-hash path works.
-pub const OFFICIAL_INDEX_KEYS: &[&str] = &[];
+/// The current and next release signing keys, as base64 minisign public keys. The CLI and daemon
+/// also use these keys for the official adapter index.
+pub const OFFICIAL_INDEX_KEYS: &[&str] = &[
+    "RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC",
+    "RWTuJOozYEG8Y1hYBqUF8CBncU1PUQgqfJ/hr6Zcwgt1cDwfeRrZh+q5",
+];
 
 /// A public key the index may be signed with.
 #[derive(Clone)]
@@ -49,7 +50,7 @@ pub enum SigError {
     Malformed(String),
     #[error("the signature was made by key {0}, which is not one of the keys this build trusts")]
     UnknownKey(String),
-    #[error("the signature does not match the index")]
+    #[error("the signature does not match the signed data")]
     Invalid,
     #[error("the signature uses the legacy minisign mode, which is refused")]
     Legacy,
@@ -120,8 +121,8 @@ fn signature_header(sig_text: &str) -> Result<([u8; 2], [u8; 8]), SigError> {
     Ok((alg, id))
 }
 
-/// Check `sig_text` (the contents of `index.json.minisig`) over `body` against `keys`. The legacy
-/// mode is refused, and so is a key that is not in `keys` (there is no trust on first use).
+/// Check the minisign signature over `body` against `keys`. Only prehashed signatures from these
+/// keys are accepted.
 pub fn verify_minisign(
     body: &[u8],
     sig_text: &str,

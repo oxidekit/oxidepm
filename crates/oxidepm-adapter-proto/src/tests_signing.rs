@@ -67,9 +67,11 @@ fn a_tampered_body_is_refused() {
     let sig = k.sign_index(&body(42));
     let mut other = body(42);
     other.extend_from_slice(b" ");
+    let error = verify_minisign(&other, &sig, &[key_of(&k)]).unwrap_err();
+    assert_eq!(error, SigError::Invalid);
     assert_eq!(
-        verify_minisign(&other, &sig, &[key_of(&k)]),
-        Err(SigError::Invalid)
+        error.to_string(),
+        "the signature does not match the signed data"
     );
 }
 
@@ -157,9 +159,17 @@ fn the_key_file_of_minisign_is_accepted_whole() {
 }
 
 #[test]
-fn no_official_key_is_embedded_yet() {
-    assert!(crate::signing::OFFICIAL_INDEX_KEYS.is_empty());
-    assert!(crate::official_keys().is_empty());
+fn both_official_signing_keys_are_embedded() {
+    assert_eq!(
+        crate::signing::OFFICIAL_INDEX_KEYS,
+        [
+            "RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC",
+            "RWTuJOozYEG8Y1hYBqUF8CBncU1PUQgqfJ/hr6Zcwgt1cDwfeRrZh+q5",
+        ],
+    );
+    let keys = crate::official_keys();
+    let ids: Vec<_> = keys.iter().map(|key| key.key_id.as_str()).collect();
+    assert_eq!(ids, ["04BF7D2A1951790C", "63BC416033EA24EE"]);
 }
 
 #[test]
