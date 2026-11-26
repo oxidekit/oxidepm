@@ -14,10 +14,35 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use oxidepmd::daemon::{check_state, Daemon, RunExit};
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let check = std::env::args().skip(1).any(|a| a == "--check");
+fn main() -> ExitCode {
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next()) {
+        (None, None) => run_daemon(false),
+        (Some(arg), None) if arg == "--check" => run_daemon(true),
+        (Some(arg), None) if arg == "--version" || arg == "-V" => {
+            println!("oxidepmd {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        (Some(arg), None) if arg == "--help" || arg == "-h" => {
+            println!(concat!(
+                "Usage: oxidepmd [OPTION]\n\n",
+                "Run the daemon when no option is given.\n\n",
+                "  --check         Check the daemon state\n",
+                "  --version, -V   Print the version\n",
+                "  --help, -h      Print this help"
+            ));
+            ExitCode::SUCCESS
+        }
+        (_, Some(arg)) | (Some(arg), None) => {
+            eprintln!("oxidepmd: unknown argument '{}'", arg.to_string_lossy());
+            eprintln!("Run 'oxidepmd --help' for usage.");
+            ExitCode::from(2)
+        }
+    }
+}
 
+#[tokio::main]
+async fn run_daemon(check: bool) -> ExitCode {
     let paths = match Paths::from_env() {
         Ok(paths) => Arc::new(paths),
         Err(e) => {
