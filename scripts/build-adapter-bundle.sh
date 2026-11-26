@@ -2,11 +2,6 @@
 set -euo pipefail
 
 # Run from the adapters checkout, next to the core checkout.
-target=${1:?usage: build-adapter-bundle.sh TARGET BUNDLE_DIR URL_BASE SEQUENCE}
-bundle=${2:?missing bundle directory}
-url_base=${3:?missing catalog URL base}
-sequence=${4:?missing catalog sequence}
-bin="${CARGO_TARGET_DIR:-target}/$target/release"
 adapters=(
     check
     deploy
@@ -22,6 +17,17 @@ adapters=(
     ui-web
     watch
 )
+
+if [[ ${1-} == --list && $# -eq 1 ]]; then
+    printf '%s\n' "${adapters[@]}"
+    exit 0
+fi
+
+target=${1:?usage: build-adapter-bundle.sh TARGET BUNDLE_DIR URL_BASE SEQUENCE}
+bundle=${2:?missing bundle directory}
+url_base=${3:?missing catalog URL base}
+sequence=${4:?missing catalog sequence}
+bin="${CARGO_TARGET_DIR:-target}/$target/release"
 
 packages=(-p oxidepm-adapter-bundle)
 inputs=()
