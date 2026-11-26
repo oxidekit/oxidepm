@@ -12,9 +12,10 @@ use oxidepm_fetch::{fetch_bytes, FetchOpts};
 
 use super::coded;
 
-/// The index of the official adapters. Empty until the owner publishes one; with it empty
-/// `search` and `list --available` say so, and import by `--bundled` or a pinned hash still work.
-pub const DEFAULT_INDEX_URL: &str = "";
+/// The signed catalogue of the official adapters, published by the release workflow on the
+/// `catalogue` branch. Its signature is fetched from the same URL with `.minisig` appended.
+pub const DEFAULT_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/oxidekit/oxidepm/catalogue/index.json";
 
 /// The largest signature file read.
 const MAX_SIG_BYTES: u64 = 16 * 1024;
