@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use oxidepm_adapter_proto::{
-    official_keys, verify_index, Index, IndexKey, VerifiedIndex, INDEX_MAX_BYTES,
+    manifest::Rule, official_keys, verify_index, Index, IndexKey, VerifiedIndex, INDEX_MAX_BYTES,
 };
 use oxidepm_core::release_bundle::{self, ReleaseBundle};
 use oxidepm_fetch::{fetch_bytes, FetchOpts};
@@ -32,17 +32,16 @@ pub struct Fetched {
 
 /// The index URL, or why there is none.
 pub fn index_url() -> Result<String> {
+    let url = DEFAULT_INDEX_URL.to_string();
     #[cfg(feature = "test-support")]
-    if let Ok(url) = std::env::var("OXIDEPM_TEST_INDEX_URL") {
-        return Ok(url);
-    }
-    if DEFAULT_INDEX_URL.is_empty() {
+    let url = std::env::var("OXIDEPM_TEST_INDEX_URL").unwrap_or(url);
+    if url.is_empty() {
         anyhow::bail!(
             "no index is configured in this build. Import by a pinned hash (`oxidepm adapter import <file or url> --sha256 <hex>`) \
              or from the bundle of a release (`oxidepm adapter import --bundled`)"
         );
     }
-    Ok(DEFAULT_INDEX_URL.to_string())
+    Ok(url)
 }
 
 /// The keys an index may be signed with: the embedded ones (a test build reads
@@ -72,10 +71,11 @@ pub fn fetch_opts() -> FetchOpts {
 fn verify(bytes: Vec<u8>, sig: String, origin: String) -> Result<Fetched> {
     let keys = trusted_keys();
     let verified = verify_index(&bytes, &sig, &keys).map_err(|e| {
-        coded(
-            e.rule.error_code(),
-            format!("the index from {origin}: {}", e.detail),
-        )
+        let mut message = format!("the index from {origin}: {}", e.detail);
+        if e.rule == Rule::Signature {
+            message.push_str(". If the index was just published, retry shortly");
+        }
+        coded(e.rule.error_code(), message)
     })?;
     verified.index.check_fresh(Utc::now(), None).map_err(|e| {
         coded(

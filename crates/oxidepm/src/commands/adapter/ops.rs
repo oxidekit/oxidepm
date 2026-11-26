@@ -4,8 +4,10 @@
 use anyhow::{bail, Result};
 use colored::Colorize;
 use oxidepm_adapter_proto::{Kind, Manifest, Permissions};
+use oxidepm_core::{Error, Paths};
 use oxidepm_ipc::{
-    AdapterInfo, AdapterReply, AdapterRequest, EnableArgs, InstallArgs, Request, Response,
+    AdapterInfo, AdapterReply, AdapterRequest, EnableArgs, InstallArgs, PolicyDecision, Request,
+    Response,
 };
 use serde_json::json;
 
@@ -50,34 +52,64 @@ pub fn interactive() -> bool {
     atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout)
 }
 
-/// Give a fetched index to the daemon: it checks the signature again, compares the sequence with
-/// the last one it saw under that key (`E_INDEX_STALE`), keeps the index and disables what it
-/// revokes. A command that only reads the index goes on without a daemon (`needs_daemon` false):
-/// there is nothing to compare with then, and it says so on stderr.
+/// Ask the daemon to check the index against its history before using it. A dry run checks
+/// without recording the index or applying revocations. Reads and previews can proceed without
+/// a daemon only if there is no adapter state.
 pub async fn index_update(fetched: &super::index_src::Fetched, needs_daemon: bool) -> Result<()> {
     let index_bytes = String::from_utf8(fetched.bytes.clone())
         .map_err(|_| coded("E_ADAPTER_INVALID", "the index is not text"))?;
-    let request = AdapterRequest::IndexUpdate {
+    let request = Request::Adapter(Box::new(AdapterRequest::IndexUpdate {
         index_bytes,
         index_sig: fetched.sig.clone(),
+    }));
+    let client = crate::commands::get_client();
+    let options = crate::commands::call_options(false);
+    let response = if needs_daemon && !options.dry_run {
+        client.send_autostart(&request).await
+    } else {
+        client.send_with(&request, &options).await
     };
-    match call(request, needs_daemon).await {
-        Ok(Some(AdapterReply::IndexAccepted { disabled, .. })) => {
-            for name in disabled {
-                eprintln!(
-                    "{} adapter '{}' was disabled: the index revokes its executable",
-                    "!".yellow(),
-                    sanitize(&name, false)
-                );
+    match response {
+        Ok(Response::Adapter(reply)) if !options.dry_run => {
+            if let AdapterReply::IndexAccepted { disabled, .. } = *reply {
+                for name in disabled {
+                    eprintln!(
+                        "{} adapter '{}' was disabled: the index revokes its executable",
+                        "!".yellow(),
+                        sanitize(&name, false)
+                    );
+                }
+                return Ok(());
             }
-            Ok(())
+            bail!("Unexpected response from the daemon")
         }
-        Ok(_) => Ok(()),
-        Err(e) if !needs_daemon && format!("{e:#}").contains("Daemon is not running") => {
+        Ok(Response::DryRun { plan }) if options.dry_run => match plan.decision {
+            PolicyDecision::Deny { code, message } => Err(coded(code.as_str(), message)),
+            PolicyDecision::Allow => {
+                // Older daemons return a plan without checking the index.
+                if !matches!(plan.items.as_slice(), [item] if item.action == "index_checked") {
+                    bail!("The running daemon cannot check the adapter index during a dry run. Restart it with the current oxidepmd and retry");
+                }
+                Ok(())
+            }
+        },
+        Ok(Response::Error { code, message }) => Err(coded(code.as_str(), message)),
+        Ok(_) => bail!("Unexpected response from the daemon"),
+        Err(Error::DaemonNotRunning) if !needs_daemon || options.dry_run => {
+            let paths = Paths::from_env()?;
+            let clean = [paths.adapters_dir(), paths.adapters_db()]
+                .iter()
+                .all(|path| {
+                    std::fs::symlink_metadata(path)
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                });
+            if !clean {
+                bail!("Daemon is not running. Run `oxidepm resurrect` before using the adapter index in this home");
+            }
             eprintln!("{} The daemon is not running, so the index was not compared with the last one seen", "!".yellow());
             Ok(())
         }
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 

@@ -94,6 +94,48 @@ impl IndexState {
 impl AdapterHost {
     // ---- the index -------------------------------------------------------------------------
 
+    fn verify_index_candidate(&self, bytes: &[u8], sig: &str) -> Result<VerifiedIndex> {
+        if sig.len() > MAX_SIG_BYTES as usize {
+            return Err(Error::AdapterInvalid(
+                "the index signature exceeds its size limit".into(),
+            ));
+        }
+        verify_index(bytes, sig, &self.cfg.index_keys).map_err(index_error)
+    }
+
+    async fn check_index_candidate(
+        &self,
+        verified: &VerifiedIndex,
+        store: Option<&AdapterStore>,
+    ) -> Result<IndexState> {
+        let state = self.index_state(store).await?;
+        let last = state.sequences.get(&verified.signed_by.key_id).copied();
+        verified
+            .index
+            .check_fresh(Utc::now(), last)
+            .map_err(index_error)?;
+        Ok(state)
+    }
+
+    pub(super) async fn plan_index(&self, bytes: &[u8], sig: &str) -> Result<()> {
+        let _admin = self.admin.lock().await;
+        let verified = self.verify_index_candidate(bytes, sig)?;
+        let store = self.store.lock().clone();
+        self.check_index_candidate(&verified, store.as_deref())
+            .await?;
+        if store.is_none() {
+            // An unopened database can still carry sequence history, including from a backup.
+            match std::fs::symlink_metadata(self.ctx()?.paths.adapters_db()) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_error("checking for the adapter database", e)),
+                Ok(_) => return Err(Error::AdapterInvalid(
+                    "the adapter database is not open. Run `oxidepm adapter list --available` to check the index against its history before retrying the dry run".into(),
+                )),
+            }
+        }
+        Ok(())
+    }
+
     /// Check an index the CLI fetched (the signature with the embedded keys, the trusted comment,
     /// the limits, the expiry, the sequence against the last one seen under that key), remember its
     /// sequence, keep it as the cached index and disable what it revokes. The caller holds `admin`.
@@ -102,21 +144,11 @@ impl AdapterHost {
         bytes: &[u8],
         sig: &str,
     ) -> Result<(VerifiedIndex, Vec<String>)> {
-        if sig.len() > MAX_SIG_BYTES as usize {
-            return Err(Error::AdapterInvalid(
-                "the index signature exceeds its size limit".into(),
-            ));
-        }
-        let verified = verify_index(bytes, sig, &self.cfg.index_keys).map_err(index_error)?;
+        let verified = self.verify_index_candidate(bytes, sig)?;
         let store = self.store_or_create().await?;
         let paths = &self.ctx()?.paths;
-        let mut state = self.index_state(&store).await?;
+        let mut state = self.check_index_candidate(&verified, Some(&store)).await?;
         let meta_key = format!("last_sequence:{}", verified.signed_by.key_id);
-        let last = state.sequences.get(&verified.signed_by.key_id).copied();
-        verified
-            .index
-            .check_fresh(Utc::now(), last)
-            .map_err(index_error)?;
         state.record(&verified);
         state.latest = Some((
             String::from_utf8(bytes.to_vec()).map_err(|e| Error::AdapterInvalid(e.to_string()))?,
@@ -163,16 +195,18 @@ impl AdapterHost {
         }
     }
 
-    async fn index_state(&self, store: &AdapterStore) -> Result<IndexState> {
+    async fn index_state(&self, store: Option<&AdapterStore>) -> Result<IndexState> {
         let paths = &self.ctx()?.paths;
         let mut state = IndexState::read(paths)?.unwrap_or_default();
         let migrate = state.latest.is_none();
-        for (key, value) in store.repo().meta_with_prefix("last_sequence:").await? {
-            if let (Some(key), Ok(sequence)) =
-                (key.strip_prefix("last_sequence:"), value.parse::<u64>())
-            {
-                let high = state.sequences.entry(key.to_string()).or_default();
-                *high = (*high).max(sequence);
+        if let Some(store) = store {
+            for (key, value) in store.repo().meta_with_prefix("last_sequence:").await? {
+                if let (Some(key), Ok(sequence)) =
+                    (key.strip_prefix("last_sequence:"), value.parse::<u64>())
+                {
+                    let high = state.sequences.entry(key.to_string()).or_default();
+                    *high = (*high).max(sequence);
+                }
             }
         }
         if migrate {
@@ -200,7 +234,7 @@ impl AdapterHost {
         name: &str,
         hash: &str,
     ) -> Result<()> {
-        let state = self.index_state(store).await?;
+        let state = self.index_state(Some(store)).await?;
         state.require_history()?;
         if let Some(reason) = state.revocations.get(&hash.to_ascii_lowercase()) {
             return Err(Error::AdapterInvalid(format!(
@@ -211,7 +245,7 @@ impl AdapterHost {
     }
 
     pub(super) async fn apply_cached_revocations(&self, store: &Arc<AdapterStore>) -> Result<()> {
-        let state = self.index_state(store).await?;
+        let state = self.index_state(Some(store)).await?;
         state.require_history()?;
         self.apply_revocations(&state, store).await;
         Ok(())

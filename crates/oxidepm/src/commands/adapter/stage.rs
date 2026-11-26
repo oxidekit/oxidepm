@@ -73,8 +73,7 @@ pub struct StageOpts<'a> {
     pub staging_parent: Option<&'a Path>,
     /// The names and verbs the core reserves, and the verbs of the CLI.
     pub reserved: &'a super::Reserved,
-    /// A real import gives the index to the daemon at once (it compares the sequence with the
-    /// last one seen), before the archive is downloaded; a rehearsal sends nothing.
+    /// Record the index for a real install. A rehearsal checks it without recording it.
     pub record_index: bool,
     /// Install this version of an indexed adapter instead of the newest one.
     pub version: Option<&'a str>,
@@ -252,9 +251,7 @@ async fn stage_indexed(name: &str, bundled: bool, opts: &StageOpts<'_>) -> Resul
         None
     } else {
         let fetched = index_src::fetch_index().await?;
-        if opts.record_index {
-            super::ops::index_update(&fetched, true).await?;
-        }
+        super::ops::index_update(&fetched, opts.record_index).await?;
         Some(fetched)
     };
     let index = match &local {
@@ -338,7 +335,15 @@ async fn stage_indexed(name: &str, bundled: bool, opts: &StageOpts<'_>) -> Resul
     } else {
         fetch_verified(&artifact.url, &expect, &archive, &index_src::fetch_opts())
             .await
-            .map_err(|e| fetch_error(&artifact.url, e))?;
+            .map_err(|e| {
+                fetch_error(
+                    &format!(
+                        "the archive for '{name}' {version} ({target}) at {}",
+                        artifact.url
+                    ),
+                    e,
+                )
+            })?;
         let fetched = fetched.as_ref().expect("fetched a remote index");
         (
             Trust::Signed {

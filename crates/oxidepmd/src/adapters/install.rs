@@ -1975,10 +1975,15 @@ impl AdapterHost {
                         .detail(format!("source {}", args.source)),
                 );
             }
-            AdapterRequest::IndexUpdate { .. } => {
-                items.push(PlannedItem::new(None, "index", "would_store").detail(
-                    "the index would be checked, its sequence remembered and revocations applied",
-                ));
+            AdapterRequest::IndexUpdate {
+                index_bytes,
+                index_sig,
+            } => {
+                self.plan_index(index_bytes.as_bytes(), index_sig).await?;
+                items
+                    .push(PlannedItem::new(None, "index", "index_checked").detail(
+                        "the index passed verification and its sequence would be recorded",
+                    ));
             }
             AdapterRequest::List | AdapterRequest::Info { .. } => {}
             // a relayed verb is rehearsed by the tool itself (`dry_run` in `command.invoke`)

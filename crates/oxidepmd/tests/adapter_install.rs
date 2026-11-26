@@ -93,11 +93,59 @@ fn available_listing_search_and_info_read_the_signed_index() {
 }
 
 #[test]
+fn search_requires_the_daemon_when_index_history_exists() {
+    let a = alpha();
+    let kit = kit_with(&[&a]);
+    let daemon = kit.daemon();
+    let listing = kit.run(&["adapter", "list", "--available"]);
+    assert_eq!(listing.code, 0, "{}", listing.all());
+    stop(daemon);
+
+    for args in [
+        &["adapter", "search", "alpha"][..],
+        &["--dry-run", "adapter", "import", "alpha"][..],
+    ] {
+        let hits = kit.http.hits();
+        let run = kit.run(args);
+        assert_eq!(run.code, 1, "{}", run.all());
+        assert!(run.stdout.is_empty(), "{}", run.all());
+        assert!(run.stderr.contains("oxidepm resurrect"), "{}", run.all());
+        assert_eq!(kit.http.hits() - hits, 2, "only the index and signature");
+    }
+
+    let daemon = kit.daemon();
+    kit.publish(&[&a], &seq(41));
+    let hits = kit.http.hits();
+    let run = kit.run(&["--dry-run", "adapter", "import", "alpha"]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    assert!(run.stdout.is_empty(), "{}", run.all());
+    assert!(run.stderr.contains("E_INDEX_STALE"), "{}", run.all());
+    assert_eq!(kit.http.hits() - hits, 2, "only the index and signature");
+
+    kit.publish(&[&a], &IndexOpts::default());
+    let hits = kit.http.hits();
+    let run = kit.run(&["--dry-run", "adapter", "import", "alpha"]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    assert!(
+        run.stderr.contains("adapter list --available"),
+        "{}",
+        run.all()
+    );
+    assert_eq!(kit.http.hits() - hits, 2, "only the index and signature");
+
+    let listing = kit.run(&["adapter", "list", "--available"]);
+    assert_eq!(listing.code, 0, "{}", listing.all());
+    let run = kit.run(&["--dry-run", "adapter", "import", "alpha"]);
+    assert_eq!(run.code, 0, "{}", run.all());
+    stop(daemon);
+}
+
+#[test]
 fn without_an_index_the_commands_say_so_and_pinned_import_still_works() {
     let a = alpha();
     let kit = Kit::new();
     let mut cmd = kit.cli();
-    cmd.env_remove("OXIDEPM_TEST_INDEX_URL")
+    cmd.env("OXIDEPM_TEST_INDEX_URL", "")
         .args(["adapter", "list", "--available"]);
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -128,6 +176,30 @@ fn import_with_tampered_index_is_refused() {
     assert_eq!(run.code, 1, "{}", run.all());
     assert!(run.stderr.contains("E_SIGNATURE_INVALID"), "{}", run.stderr);
     no_adapter_files(&kit);
+}
+
+#[test]
+fn import_with_mixed_index_generations_is_refused() {
+    let a = alpha();
+    let kit = kit_with(&[&a]);
+    let old_body = kit.http_index_body();
+    let old_sig = kit.http_index_sig();
+    kit.publish(&[&a], &seq(43));
+    let new_body = kit.http_index_body();
+    let new_sig = kit.http_index_sig();
+
+    for (body, sig) in [(new_body, old_sig), (old_body, new_sig)] {
+        kit.http.route("/index.json", body);
+        kit.http.route("/index.json.minisig", sig.into_bytes());
+        let hits = kit.http.hits();
+        let run = kit.run(&["--dry-run", "adapter", "import", "alpha"]);
+        assert_eq!(run.code, 1, "{}", run.all());
+        assert!(run.stdout.is_empty(), "{}", run.all());
+        assert!(run.stderr.contains("E_SIGNATURE_INVALID"), "{}", run.all());
+        assert!(run.stderr.contains("retry shortly"), "{}", run.all());
+        assert_eq!(kit.http.hits() - hits, 2, "only the index and signature");
+        no_adapter_files(&kit);
+    }
 }
 
 #[test]
@@ -491,7 +563,7 @@ fn unsigned_release_bundle_installs_without_index_keys() {
     let daemon = DaemonProc::spawn_with_env(&kit.home, &[("OXIDEPM_TEST_BUNDLE_DIR", bundle)]);
     let out = kit
         .cli()
-        .env_remove("OXIDEPM_TEST_INDEX_URL")
+        .env("OXIDEPM_TEST_INDEX_URL", "")
         .env_remove("OXIDEPM_TEST_INDEX_KEYS")
         .args([
             "adapter",
@@ -561,7 +633,7 @@ fn bundled_import_refuses_changed_archives_and_catalogs() {
     let kit = kit_with(&[&a, &b]);
     // the release catalog and archives are both checked offline
     let mut cmd = kit.cli();
-    cmd.env_remove("OXIDEPM_TEST_INDEX_URL").args([
+    cmd.env("OXIDEPM_TEST_INDEX_URL", "").args([
         "--dry-run",
         "adapter",
         "import",
@@ -1990,7 +2062,7 @@ fn bundled_import_can_enable_the_pure_adapters_at_once() {
     let kit = kit_with(&[&a, &b]);
     let daemon = kit.daemon();
     let mut cmd = kit.cli();
-    cmd.env_remove("OXIDEPM_TEST_INDEX_URL").args([
+    cmd.env("OXIDEPM_TEST_INDEX_URL", "").args([
         "adapter",
         "import",
         "--bundled",
@@ -2385,7 +2457,7 @@ fn version_of(kit: &Kit, name: &str) -> String {
 fn run_without_index(kit: &Kit, args: &[&str]) -> Run {
     Run::of(
         kit.cli()
-            .env_remove("OXIDEPM_TEST_INDEX_URL")
+            .env("OXIDEPM_TEST_INDEX_URL", "")
             .args(args)
             .output()
             .unwrap(),
@@ -3175,7 +3247,12 @@ fn update_dry_run_downloads_and_verifies_and_changes_nothing() {
     let daemon = kit.daemon();
     import(&kit, "alpha");
     kit.publish(&[&v1, &v2], &seq(2));
-    let before = (info_json(&kit, "alpha"), kit.adapters_tree());
+    let state = kit.home.join("adapters/accepted-index.json");
+    let before = (
+        info_json(&kit, "alpha"),
+        kit.adapters_tree(),
+        std::fs::read(&state).unwrap(),
+    );
     let run = kit.run(&["--dry-run", "adapter", "update", "alpha"]);
     assert_eq!(run.code, 0, "{}", run.all());
     assert!(
@@ -3184,6 +3261,93 @@ fn update_dry_run_downloads_and_verifies_and_changes_nothing() {
         "{}",
         run.stdout
     );
-    assert_eq!((info_json(&kit, "alpha"), kit.adapters_tree()), before);
+    assert!(!run.stdout.contains("index_checked"), "{}", run.stdout);
+    assert_eq!(
+        (
+            info_json(&kit, "alpha"),
+            kit.adapters_tree(),
+            std::fs::read(state).unwrap(),
+        ),
+        before
+    );
+    drop(daemon);
+}
+
+#[test]
+fn dry_run_refuses_a_stale_index_before_download() {
+    let v1 = alpha();
+    let v2 = Pkg::tool("alpha", "0.2.0").package();
+    let kit = Kit::new();
+    kit.publish(&[&v1], &seq(42));
+    let daemon = kit.daemon();
+    import(&kit, "alpha");
+    let state = kit.home.join("adapters/accepted-index.json");
+    let before = (
+        info_json(&kit, "alpha"),
+        kit.adapters_tree(),
+        std::fs::read(&state).unwrap(),
+    );
+
+    kit.publish(&[&v1, &v2], &seq(41));
+    let hits = kit.http.hits();
+    let run = kit.run(&["--dry-run", "adapter", "update", "alpha"]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    assert!(run.stdout.is_empty(), "{}", run.all());
+    assert!(run.stderr.contains("E_INDEX_STALE"), "{}", run.all());
+    assert!(
+        run.stderr.contains("41") && run.stderr.contains("42"),
+        "{}",
+        run.all()
+    );
+    assert_eq!(kit.http.hits() - hits, 2, "only the index and signature");
+    assert_eq!(
+        (
+            info_json(&kit, "alpha"),
+            kit.adapters_tree(),
+            std::fs::read(state).unwrap(),
+        ),
+        before
+    );
+    drop(daemon);
+}
+
+#[test]
+fn an_index_archive_404_keeps_the_installed_version() {
+    let v1 = alpha();
+    let v2 = Pkg::tool("alpha", "0.2.0").package();
+    let kit = Kit::new();
+    kit.publish(&[&v1], &seq(1));
+    let daemon = kit.daemon();
+    import(&kit, "alpha");
+    let before = kit.adapters_tree();
+
+    let mut body = kit.index_json(&[&v1, &v2], &seq(2));
+    let target = target();
+    let missing = kit.http.url(&format!(
+        "/releases/download/v0.2.0/oxidepm-adapter-alpha-{target}.tar.gz"
+    ));
+    body["adapters"][0]["releases"][1]["artifacts"][&target]["url"] = json!(missing);
+    let body = body.to_string().into_bytes();
+    let sig = kit.key.sign_index(&body);
+    kit.http.route("/index.json", body);
+    kit.http.route("/index.json.minisig", sig.into_bytes());
+
+    let hits = kit.http.hits();
+    let run = kit.run(&["adapter", "update", "alpha"]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    for detail in [&format!("'alpha' 0.2.0 ({target})"), "HTTP 404", &missing] {
+        assert!(
+            run.stderr.contains(detail),
+            "missing {detail}: {}",
+            run.all()
+        );
+    }
+    assert_eq!(
+        kit.http.hits() - hits,
+        3,
+        "only the index, signature and missing archive"
+    );
+    assert_eq!(version_of(&kit, "alpha"), "0.1.0");
+    assert_eq!(kit.adapters_tree(), before);
     drop(daemon);
 }

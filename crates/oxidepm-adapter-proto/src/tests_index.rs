@@ -120,6 +120,26 @@ fn index_unknown_target_not_offered() {
 }
 
 #[test]
+fn index_offers_the_hashes_for_the_exact_target() {
+    let mut v = base_index();
+    let artifacts = &mut v["adapters"][0]["releases"][0]["artifacts"];
+    artifacts["aarch64-apple-darwin"] = artifact(SHA_B, SHA_A);
+    let index = parse_index(&v).unwrap();
+
+    for (target, archive_sha, exe_sha) in [
+        (TARGET, SHA_A, SHA_B),
+        ("aarch64-apple-darwin", SHA_B, SHA_A),
+    ] {
+        let offer = index
+            .latest_offer("notifier", target, &daemon(), &[1])
+            .unwrap();
+        assert_eq!(offer.release.version, "0.1.0");
+        assert_eq!(offer.artifact.sha256, archive_sha);
+        assert_eq!(offer.artifact.exe_sha256, exe_sha);
+    }
+}
+
+#[test]
 fn index_limits_enforced() {
     let bad = |edit: &dyn Fn(&mut Value), want: Rule, what: &str| {
         let mut v = base_index();
