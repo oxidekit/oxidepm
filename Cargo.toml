@@ -31,8 +31,6 @@ async-trait = "0.1"
 # CLI
 clap = { version = "4.4", features = ["derive", "env"] }
 dialoguer = "0.11"
-console = "0.15"
-indicatif = "0.17"
 tabled = "0.15"
 colored = "2.1"
 
@@ -78,14 +76,10 @@ clap_mangen = "0.2"
 
 # Utils
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.0", features = ["v4"] }
-bytes = "1.5"
-dotenvy = "0.15"
 dirs = "5.0"
 which = "6.0"
 nix = { version = "0.28", features = ["signal", "process", "fs", "user"] }
 regex = "1.10"
-once_cell = "1.19"
 atty = "0.2"
 subtle = "2"
 sha2 = "0.10"
@@ -93,7 +87,6 @@ sha2 = "0.10"
 # Testing
 tempfile = "3.10"
 assert_cmd = "2.0"
-predicates = "3.1"
 
 # Internal crates
 oxidepm-core = { path = "crates/oxidepm-core" }

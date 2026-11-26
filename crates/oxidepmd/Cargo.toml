@@ -59,8 +59,6 @@ oxidepmd = { path = ".", features = ["test-hooks", "test-stats"] }
 tempfile = { workspace = true }
 # the paused clock of the dependency-wait unit tests
 tokio = { workspace = true, features = ["test-util"] }
-serde_json = { workspace = true }
-nix = { workspace = true }
 sqlx = { workspace = true }
 # the scriptable test adapter (its library: the report reader; the binary is built by the tests)
 oxidepm-adapter-fixture = { path = "../oxidepm-adapter-fixture" }
