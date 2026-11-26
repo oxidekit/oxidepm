@@ -33,7 +33,14 @@ fn main() -> ExitCode {
             ));
             ExitCode::SUCCESS
         }
-        (_, Some(arg)) | (Some(arg), None) => {
+        (first, second) => {
+            // name the first argument that is not an option; with two options, the second is extra
+            let known = ["--check", "--version", "-V", "--help", "-h"];
+            let arg = match (first, second) {
+                (Some(first), Some(second)) if known.iter().any(|k| first == *k) => second,
+                (Some(arg), _) | (None, Some(arg)) => arg,
+                (None, None) => unreachable!("no arguments run the daemon"),
+            };
             eprintln!("oxidepmd: unknown argument '{}'", arg.to_string_lossy());
             eprintln!("Run 'oxidepmd --help' for usage.");
             ExitCode::from(2)

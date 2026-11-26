@@ -99,3 +99,8 @@ fn an_unknown_argument_is_rejected() {
 fn a_second_argument_is_rejected() {
     assert_unknown(&["--check", "--version"], "--version");
 }
+
+#[test]
+fn the_unknown_argument_is_named_before_a_known_one() {
+    assert_unknown(&["--bogus", "--version"], "--bogus");
+}
