@@ -268,6 +268,14 @@ minisign -S -s "$work/key.sec" -m "$release/checksums.txt" -x "$release/checksum
     -t 'oxidepm release checksums tag=v9.0.0' </dev/null
 reject 'unexpected trusted comment' publish advance "$repo" "$remote" v1.0.0 --bootstrap
 mv "$work/original.minisig" "$release/checksums.txt.minisig"
+
+cp "$release/checksums.txt" "$work/original.sums"
+cp "$release/checksums.txt.minisig" "$work/original.minisig"
+awk -v name="$archive" '$2 != name' "$work/original.sums" > "$release/checksums.txt"
+minisign -S -s "$work/key.sec" -m "$release/checksums.txt" -t 'oxidepm release checksums tag=v1.0.0' </dev/null
+reject 'missing signed checksum' publish advance "$repo" "$remote" v1.0.0 --bootstrap
+mv "$work/original.sums" "$release/checksums.txt"
+mv "$work/original.minisig" "$release/checksums.txt.minisig"
 test -z "$(git ls-remote --refs "$remote" "$branch")"
 
 publish advance "$repo" "$remote" v1.0.0 --bootstrap
@@ -294,6 +302,9 @@ reject 'changed at the same version' publish advance "$repo" "$remote" v1.1.0
 test "$(head_commit)" = "$seed"
 printf 'ok - rejects version reuse with different bytes\n'
 
+make_release v0.9.0 0.9.0
+prepare v0.9.0 "$work/releases/v0.9.0"
+
 policy=$work/policy
 git init --quiet "$policy"
 git -C "$policy" fetch --quiet "$remote" "$branch"
@@ -310,8 +321,9 @@ sign_policy() {
         -t "index sequence=$sequence generated=$generated" </dev/null
 }
 
-jq '.sequence=2 | .generated="2025-01-01T00:00:00Z" | .expires="2025-04-01T00:00:00Z" |
+jq --slurpfile older "$work/releases/v0.9.0/$input" '.sequence=2 | .generated="2025-01-01T00:00:00Z" | .expires="2025-04-01T00:00:00Z" |
     (.adapters[] | select(.name == "deploy") | .releases[0]) |= (.yanked=true | .yank_reason="Withdrawn") |
+    (.adapters[] | select(.name == "deploy") | .releases) += ($older[0].adapters[] | select(.name == "deploy") | .releases) |
     .revoked=[{exe_sha256:(.adapters[] | select(.name == "init") | .releases[0].artifacts["x86_64-unknown-linux-gnu"].exe_sha256), reason:"Revoked"}]' \
     "$work/live.json" > "$policy/index.json"
 sign_policy
@@ -322,6 +334,16 @@ mv "$release/$archive" "$work/hidden-archive"
 reject 'HTTP 404' publish renew "$repo" "$remote"
 mv "$work/hidden-archive" "$release/$archive"
 test "$(head_commit)" = "$old"
+
+cat > "$remote/hooks/pre-receive" <<'HOOK'
+#!/bin/sh
+exit 1
+HOOK
+chmod +x "$remote/hooks/pre-receive"
+reject 'catalogue push was rejected' publish renew "$repo" "$remote"
+test "$(head_commit)" = "$old"
+rm -- "$remote/hooks/pre-receive"
+printf 'ok - keeps the previous pair when the server rejects the push\n'
 
 cat > "$work/compete" <<MOCK
 #!/bin/sh
@@ -364,6 +386,11 @@ git --git-dir="$remote" show "$seed:index.json.minisig" > "$policy/index.json.mi
 policy_commit
 reject 'does not follow' publish renew "$repo" "$remote"
 printf 'ok - rejects reverted signed pairs in branch history\n'
+
+cp "$work/live.json" "$work/mixed.json"
+git --git-dir="$remote" show "$seed:index.json.minisig" > "$work/mixed.minisig"
+reject 'signature does not match' "$tool" verify_pair "$work/mixed.json" "$work/mixed.minisig" "$CATALOGUE_PUBLIC_KEY" 3
+printf 'ok - rejects mixed catalogue generations\n'
 
 touch "$work/fail-upload"
 reject 'Upload failed' publish release "$repo" v1.0.0 "$release"
