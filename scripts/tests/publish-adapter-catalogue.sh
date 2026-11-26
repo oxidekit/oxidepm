@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 publisher=$root/scripts/publish-adapter-catalogue.sh
 tool=${CATALOGUE_TOOL:-${CARGO_TARGET_DIR:-$root/target}/debug/examples/catalogue}
-work=$(mktemp -d "${TMPDIR:-/mnt/storage}/oxidepm-catalogue-test.XXXXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/oxidepm-catalogue-test.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 export HOME="$work/home" OXIDEPM_HOME="$work/oxidepm"
 export GIT_AUTHOR_NAME='Release tests' GIT_COMMITTER_NAME='Release tests'

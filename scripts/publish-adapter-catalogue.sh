@@ -8,7 +8,7 @@ fail() {
     exit 1
 }
 
-work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/mnt/storage}}/oxidepm-catalogue.XXXXXXXX")
+work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/oxidepm-catalogue.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 trap 'exit 1' HUP INT TERM
 tool=${CATALOGUE_TOOL:-target/debug/examples/catalogue}
