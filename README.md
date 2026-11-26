@@ -188,6 +188,22 @@ the grant at the prompt. For unattended use, `--yes` applies to pure adapters su
 runtimes. For broader grants, import first and run the printed
 `oxidepm adapter enable <name> --accept <fingerprint>` command after reviewing the permissions.
 
+With a network connection, the CLI can also find and import adapters by name from the signed
+online catalogue:
+
+```bash
+oxidepm adapter search watch
+oxidepm adapter import watch --enable
+```
+
+The catalogue is published with each release at
+`https://raw.githubusercontent.com/oxidekit/oxidepm/catalogue/index.json` and signed with the
+release key (see [SECURITY.md](SECURITY.md)). It carries a sequence number and an expiry date and is
+renewed before it expires. The CLI and daemon refuse a catalogue that is unsigned, expired, older than
+one they have already seen, or out of step with its signature, and every archive is checked against
+the hash the catalogue lists before it is unpacked. Adapters imported from the release bundle keep
+updating from the bundle.
+
 `--tag dev` selects `watch`, `check`, and `init`. Use `--tag deploy` for `git-start` and
 `deploy`, `--tag ui` for `ui-web` and `ui-tui`, `--tag notifier` for `notifier`, and
 `--tag exporter` for `exporter-prometheus`.
