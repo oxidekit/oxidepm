@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "sequence": 2,
-  "generated": "2026-11-26T03:16:44Z",
-  "expires": "2027-02-24T03:16:44Z",
+  "sequence": 3,
+  "generated": "2026-11-26T07:06:00Z",
+  "expires": "2027-02-24T07:06:00Z",
   "revoked": [],
   "adapters": [
     {
@@ -15,7 +15,7 @@
       "description": "Checks a project directory for dependencies, lockfiles, environment files and port conflicts. With --fix it installs Node dependencies and creates .env from a template; with --set-env it updates .env.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -25,32 +25,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-check-aarch64-apple-darwin.tar.gz",
-              "size": 419207,
-              "sha256": "ce7ffde3063cce5373066171589ff77a554a878cf6847630bf6cddb0208ec96d",
-              "exe_sha256": "66626d39db806ae4458f4c1faaef660c9de6b54b77a6cbd48280731f170ef9d0",
-              "manifest_sha256": "f7b56d90251329e3fef5c39b29f331103cb41c69df8682fdd2bd88803c2bc5b8"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-check-aarch64-apple-darwin.tar.gz",
+              "size": 419205,
+              "sha256": "631a5187317669efa18bdf385856ae080037daa654df78bbeb6d2308799fd1ec",
+              "exe_sha256": "51eece78a85294e5a677931b2eeea43a014363133598e75bbee5ef1cb29ce1f0",
+              "manifest_sha256": "f845db12c2afde3c335e428991fa3a6bf487410ebd3ec91fe92f8aee22fe6807"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-check-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 462242,
-              "sha256": "c852dcc1008477da64727bcfd76912b4e47b2edf5405afa3a47e696da04b184f",
-              "exe_sha256": "42067d18388ff62fbb406638b855f1e3da9ab8794fa8157847c054362f5bf034",
-              "manifest_sha256": "f7b56d90251329e3fef5c39b29f331103cb41c69df8682fdd2bd88803c2bc5b8"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-check-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 462327,
+              "sha256": "728ae1df438c6be5e0cb043d7442c5cb98d92283b5d24e244396f5e20d754e28",
+              "exe_sha256": "3fb11a23d90c28c216a6434ffbdce2ae1e0e0ef07ca0c949a0e0e068a31c4578",
+              "manifest_sha256": "f845db12c2afde3c335e428991fa3a6bf487410ebd3ec91fe92f8aee22fe6807"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-check-x86_64-apple-darwin.tar.gz",
-              "size": 447136,
-              "sha256": "d05dcfda90f365ce4fb932eee3d5d80fe56d3822a9aa41cd5a8885e8a5e28153",
-              "exe_sha256": "db58789945375300faf9c3d6626c1badf7bddbd19e3f2153ba7e085b0ea18bde",
-              "manifest_sha256": "f7b56d90251329e3fef5c39b29f331103cb41c69df8682fdd2bd88803c2bc5b8"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-check-x86_64-apple-darwin.tar.gz",
+              "size": 447165,
+              "sha256": "87939737b912a70061afb737d1ee611788a97cbebc9f1a20cd5d3690bff44afd",
+              "exe_sha256": "a05e782c90932ef2f48f75c30a687420b8f5a5540b9596109f9892ed6dcb0529",
+              "manifest_sha256": "f845db12c2afde3c335e428991fa3a6bf487410ebd3ec91fe92f8aee22fe6807"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-check-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 488513,
-              "sha256": "1d148070dae10a47be56b7f82ac14c9e8575c55cbae55d752a6689cad3a7aad7",
-              "exe_sha256": "92d74120a3bddc585f6fcbc6a13532434a4f914963c3d98f6d14d07b3a3e6dec",
-              "manifest_sha256": "f7b56d90251329e3fef5c39b29f331103cb41c69df8682fdd2bd88803c2bc5b8"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-check-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 488366,
+              "sha256": "6f1e1f6fc98182b89b717aa93d1941565836d9b44200632a3383ddb3139e72cb",
+              "exe_sha256": "900fe287a76088cd459ef037da05b4c17a9ce461cc92fc5f734ca37a8e333c48",
+              "manifest_sha256": "f845db12c2afde3c335e428991fa3a6bf487410ebd3ec91fe92f8aee22fe6807"
             }
           }
         }
@@ -66,7 +66,7 @@
       "description": "Provides the deploy (git pull, optional post-deploy command, remote oxidepm restart) and diff (remote git log, status and diff stat) commands over SSH. It has no daemon write access and writes nothing locally.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -76,32 +76,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-deploy-aarch64-apple-darwin.tar.gz",
-              "size": 419384,
-              "sha256": "c51e2c8e206b67805f9a3c2b73fb63f7604d85517676eeccc8c91d048aa65cf2",
-              "exe_sha256": "1befa95ce88a9b76be89870afac007841ba99d944e4bced9776a97be48c3dab8",
-              "manifest_sha256": "5fdf386376d1e2e140340b9d0665db14802a4bde0fec5df4b993fb9a387d6761"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-deploy-aarch64-apple-darwin.tar.gz",
+              "size": 419349,
+              "sha256": "399bba601d84dae718d1bdbda8e6a0b93cd30af347235a857b21f615fe7df0dc",
+              "exe_sha256": "0ecab33adae7b5b79d1be9666ef8504f17778af880c4dcf7668a4e65d0d37932",
+              "manifest_sha256": "5f0a58131c5f69d1f3167b6e2f30792539551e76069f2a9e96ebe24392aaa944"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-deploy-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 464230,
-              "sha256": "6ccf6b979f6ee2ccc17a11813b186bd62ad3ecf29e1c6739cdc6ad86ea6d3e78",
-              "exe_sha256": "9db1077d6e3a48d5799656095cd690b0c1351bad8ca8383fa8d7788fa9d8103c",
-              "manifest_sha256": "5fdf386376d1e2e140340b9d0665db14802a4bde0fec5df4b993fb9a387d6761"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-deploy-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 464382,
+              "sha256": "67f5eda0e18ac937e279323da0184f983e96e08124524a1424aa6e5706b06e46",
+              "exe_sha256": "ce9cc38372d1dce1df08182341c7585320162173e9156d13fe7ab32509408df1",
+              "manifest_sha256": "5f0a58131c5f69d1f3167b6e2f30792539551e76069f2a9e96ebe24392aaa944"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-deploy-x86_64-apple-darwin.tar.gz",
-              "size": 449483,
-              "sha256": "88a639efbe1c37876e68ba90c88685554eb7c6bdc75078c2c6d23a350b8b4ab7",
-              "exe_sha256": "7ff0d758dfff2975c21185260f0257899640cde6833a668c348a62b56e66df58",
-              "manifest_sha256": "5fdf386376d1e2e140340b9d0665db14802a4bde0fec5df4b993fb9a387d6761"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-deploy-x86_64-apple-darwin.tar.gz",
+              "size": 449400,
+              "sha256": "e80082938025a8be75058f8e1cbb4419122710e6eb33386bfee906824bafc1d3",
+              "exe_sha256": "a7ee838e76f4eb77bbe932725584c2ef252d50521f460a84a720ec1b786f8af7",
+              "manifest_sha256": "5f0a58131c5f69d1f3167b6e2f30792539551e76069f2a9e96ebe24392aaa944"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-deploy-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 492575,
-              "sha256": "09d211b26e90a5cff6330ed44f1e6f04cf0f36c152923f88ae7bc5510f6a7878",
-              "exe_sha256": "e6a6313a1efd18e6177da4d1a5f085a8789c3790db270b57e468ef6a9e95dc2c",
-              "manifest_sha256": "5fdf386376d1e2e140340b9d0665db14802a4bde0fec5df4b993fb9a387d6761"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-deploy-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 494444,
+              "sha256": "7a7d6ab6e92a70602c3f37ddb5fe1ed24bcba9f2dc5087e07d867f6e4f30d229",
+              "exe_sha256": "5944583bf4d0f60d75a7b7fb49136a6bd8ac34e59eb902b586b493ffe4510c93",
+              "manifest_sha256": "5f0a58131c5f69d1f3167b6e2f30792539551e76069f2a9e96ebe24392aaa944"
             }
           }
         }
@@ -117,7 +117,7 @@
       "description": "Serves /metrics in the Prometheus text format on 127.0.0.1:9616. On each scrape it asks the daemon for the status of the apps (read access only) and never touches them. It listens on loopback unless its config.toml says otherwise, and any other address needs an access key in that file. If the daemon cannot be reached the answer is HTTP 503 and oxidepm_up 0.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -127,32 +127,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-exporter-prometheus-aarch64-apple-darwin.tar.gz",
-              "size": 603476,
-              "sha256": "9ee4970a8b9cf1a15416b620f00db09f6f40466783da7c47b165699453f99639",
-              "exe_sha256": "65bb06b54bebba463774939d19c9d43d24bfcd92a2b3063ae97f797407a2ed27",
-              "manifest_sha256": "772896294ac07ebc4349abe10bb4353701a7e7abac9695a74a4a6207ce2273e2"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-exporter-prometheus-aarch64-apple-darwin.tar.gz",
+              "size": 603481,
+              "sha256": "b15e0521acc0ad2f6f3c5b27c11214eaf98988795ef55e5ce7efe125d205f0cf",
+              "exe_sha256": "2ccf1352f7662acf4c16b1de50032fe0df237f48482e947ecad72bbc841598ef",
+              "manifest_sha256": "b729994f060f955a5fb23c9b760c949a429b3ede923e4020bf394c06c9e90c10"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-exporter-prometheus-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 645807,
-              "sha256": "2ecbe7112c120929695cd6f4c2eed51757f73ff7064f97f9c2c14594eb0323a3",
-              "exe_sha256": "cbfcd7583de533f52f334020df3493efa158d9f4e27355a337adf01f94290b38",
-              "manifest_sha256": "772896294ac07ebc4349abe10bb4353701a7e7abac9695a74a4a6207ce2273e2"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-exporter-prometheus-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 645366,
+              "sha256": "15e025447dd7dd1cf977d144cd246234dd4d446f63cebeaf299f4996741f9f20",
+              "exe_sha256": "200866550d6194b04aafd606f16aa80385da9e2285a5edad7bbad34130199870",
+              "manifest_sha256": "b729994f060f955a5fb23c9b760c949a429b3ede923e4020bf394c06c9e90c10"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-exporter-prometheus-x86_64-apple-darwin.tar.gz",
-              "size": 636562,
-              "sha256": "62c391034a4456e97832d2fac9e5e614bec3b2213ec88abbb6d3bc5223ba86ad",
-              "exe_sha256": "c6d70040e06c20d669359def987359f26fff19b50e1e3ceefa3fe021c7d269c9",
-              "manifest_sha256": "772896294ac07ebc4349abe10bb4353701a7e7abac9695a74a4a6207ce2273e2"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-exporter-prometheus-x86_64-apple-darwin.tar.gz",
+              "size": 636738,
+              "sha256": "66c85f1155a11ba8b8195f31fb9965dc4f0da022c12634743257693b899edc3e",
+              "exe_sha256": "cf20a6ae1a237ef0a980c0bdf150fb5c6efdc30cec06b9d57df6384249ba2106",
+              "manifest_sha256": "b729994f060f955a5fb23c9b760c949a429b3ede923e4020bf394c06c9e90c10"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-exporter-prometheus-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 679935,
-              "sha256": "a622fbcc6696f70dc6cb73b046d3029527c8ce878b796a41dc408b1f09ee4769",
-              "exe_sha256": "498435d5687326bc674a00f9605c1c5407258d5dd0620b4cf76d7c055a74a002",
-              "manifest_sha256": "772896294ac07ebc4349abe10bb4353701a7e7abac9695a74a4a6207ce2273e2"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-exporter-prometheus-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 679950,
+              "sha256": "3c36d3e868f05080a6b4833d4b4bdd1f3676f34cbf68b01fb929b34a48da55d2",
+              "exe_sha256": "c0b12538faa4e192a6ac56593080e39611e481b82d676da97a53ba6d7f73a6d3",
+              "manifest_sha256": "b729994f060f955a5fb23c9b760c949a429b3ede923e4020bf394c06c9e90c10"
             }
           }
         }
@@ -168,7 +168,7 @@
       "description": "Clones an HTTPS or SSH repository into its own state directory, prints the exact commit, and returns a launch spec for the CLI to start. It has read-only access to the daemon and writes only to its state directory. Subprocess execution is unrestricted so Git can use its transport helpers and optional npm installs can run. Dependency lifecycle scripts are disabled unless requested.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -178,32 +178,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-git-start-aarch64-apple-darwin.tar.gz",
-              "size": 540962,
-              "sha256": "ce47875cda54eab058a60cbc1467e8bdd0a27180e7b50fd5bee61f96044d1920",
-              "exe_sha256": "a2200ac2d8218deeb548b6607e6a290ab667395fc491f1189a880efc62802826",
-              "manifest_sha256": "6f841475ae1bdf13720b4f07bc615bb6c4614fc26213611dbd1ff73874590dff"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-git-start-aarch64-apple-darwin.tar.gz",
+              "size": 540801,
+              "sha256": "d2ecddfa598069fc4c6e32527a6df5969c4f646d347e977ac4e4dc75bd470041",
+              "exe_sha256": "4636a1964c5c5a4b86a4b59586260e15c840b18eafe6b74f81b6365e27831f05",
+              "manifest_sha256": "f4fe1392df7a42103676ce7c7711e637c73d1e24b2ff5991012e9d20a977122a"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-git-start-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 585971,
-              "sha256": "84b37589f7aaac4d52d04ca99d332fc943e01e5d24018828c8ef51d28d6cd0e8",
-              "exe_sha256": "02a43374e76dc3778128bc78588be6d2e7e844ae965c4e803114626afea36bc8",
-              "manifest_sha256": "6f841475ae1bdf13720b4f07bc615bb6c4614fc26213611dbd1ff73874590dff"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-git-start-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 585985,
+              "sha256": "c4590662b4cd778f1ba75db20978114e5643b6f5ff5ca648904043ee5440b07f",
+              "exe_sha256": "8b99c426fe032e01c8a2d5b7e4fe48482db259d18dac8e8f919f834764b8536c",
+              "manifest_sha256": "f4fe1392df7a42103676ce7c7711e637c73d1e24b2ff5991012e9d20a977122a"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-git-start-x86_64-apple-darwin.tar.gz",
-              "size": 575591,
-              "sha256": "5696dbcf88c2dfb5df7cecb72c46750fae55ef863194988f87a847495b3f94a7",
-              "exe_sha256": "9173675f781b7a70f5778fdc5d509a641e803ad81961dcd3210df2defc9d18d1",
-              "manifest_sha256": "6f841475ae1bdf13720b4f07bc615bb6c4614fc26213611dbd1ff73874590dff"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-git-start-x86_64-apple-darwin.tar.gz",
+              "size": 575584,
+              "sha256": "65e88c1b0e48deb6b378ec1844ddcbb02add8983f36f2d3bee20b687ac2b6884",
+              "exe_sha256": "99083cc247899519aae29ccc8d27ff5a79cb472220d93bda9f84062b8d52923e",
+              "manifest_sha256": "f4fe1392df7a42103676ce7c7711e637c73d1e24b2ff5991012e9d20a977122a"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-git-start-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 621910,
-              "sha256": "dc0c785701d0c49ba6d2bff0403609a12bfb4b88fcc2a71a3ab14f557ea47da8",
-              "exe_sha256": "2d71e1218c5ba2d1ef38ed92aece920c4f6ad2a99abf427b3ad773db6ffd6da1",
-              "manifest_sha256": "6f841475ae1bdf13720b4f07bc615bb6c4614fc26213611dbd1ff73874590dff"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-git-start-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 623519,
+              "sha256": "f1520f39a642352ba817283832a34a81b93fa9c9774d4a6f8673753cf717f94d",
+              "exe_sha256": "e5dc55fe56042a1142f63bbdaf8441abe6213626c8133b69d445f02b24e079e1",
+              "manifest_sha256": "f4fe1392df7a42103676ce7c7711e637c73d1e24b2ff5991012e9d20a977122a"
             }
           }
         }
@@ -219,7 +219,7 @@
       "description": "Detects Cargo, Node.js, Python and Go projects in the current directory and writes a validated oxidepm.config.toml. It has no network access and spawns no programs.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -229,32 +229,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-init-aarch64-apple-darwin.tar.gz",
-              "size": 678284,
-              "sha256": "18fa69aa207c194a3bc1fd138217efd5340037feed0da2bc063549597ddc456e",
-              "exe_sha256": "881c74a2b21f94c2da5419b4374a3f9b3aecaa54faef212f89d7d55223a20387",
-              "manifest_sha256": "24e6fa96a24b9a818096895c37e04995ab228fe1d8afc5b5cbbd11e3874a3f88"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-init-aarch64-apple-darwin.tar.gz",
+              "size": 678289,
+              "sha256": "a3ffc9172930390a47b607dc9872bc4b63abedea7aee0a0dcbe0511762e42c02",
+              "exe_sha256": "d38a353ae221ff84107b02f7e1930a3575db1401f939562d3f4d0687f84c654e",
+              "manifest_sha256": "2d0e8bc2120c872d40c28438736f6552631b3c5065ee722fb2366e861360215e"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-init-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 717812,
-              "sha256": "1149e9ac16b1e9af5829b8727788ed0cadca0943f166be8f1ee35ee88493db8e",
-              "exe_sha256": "961cfe0db9d3a0803c786ca58fecef8c16cc08dd3f4b7113cf6bdeedb738b4bb",
-              "manifest_sha256": "24e6fa96a24b9a818096895c37e04995ab228fe1d8afc5b5cbbd11e3874a3f88"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-init-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 718123,
+              "sha256": "921ff008d2c8938051f4d387bbd560d5498dd91c4c3bddcb6cc0cdf10681a084",
+              "exe_sha256": "f300e314d0577f1e123d3b529650987ed416de57b045c60722386277b021ba92",
+              "manifest_sha256": "2d0e8bc2120c872d40c28438736f6552631b3c5065ee722fb2366e861360215e"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-init-x86_64-apple-darwin.tar.gz",
-              "size": 728583,
-              "sha256": "9198af2ed238b4bdb435e0bbea48ea66e699a13e565bc27f1e13748ed00bf20f",
-              "exe_sha256": "993d81e54eeefc9f40209a1986f6f73b51fc3f7666ef171018dff9039ddd10b0",
-              "manifest_sha256": "24e6fa96a24b9a818096895c37e04995ab228fe1d8afc5b5cbbd11e3874a3f88"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-init-x86_64-apple-darwin.tar.gz",
+              "size": 728553,
+              "sha256": "61105b0aad34bc6e667ff6e27d7225f07bcfdee6e55506d6605718d1c71f094a",
+              "exe_sha256": "23b5fa86c97cae0b897c80445b4c3c7a17f2225041450bf0c0f326238a62e1fb",
+              "manifest_sha256": "2d0e8bc2120c872d40c28438736f6552631b3c5065ee722fb2366e861360215e"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-init-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 773191,
-              "sha256": "4f9538488fb5b557e9097bb20d7f7cf46e09f0cc1b86e2fa2da788cff1cb52be",
-              "exe_sha256": "701a086fbcc65b41d2b77f604ac9b406fe7df8c49ff9bcc530cf7b2ad639ab76",
-              "manifest_sha256": "24e6fa96a24b9a818096895c37e04995ab228fe1d8afc5b5cbbd11e3874a3f88"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-init-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 775075,
+              "sha256": "1361f2d713295206798bdef02ead60e97bff0256ebfa40e5da412130fd8e0966",
+              "exe_sha256": "66a702c115581dc4a552c3dccfb2e21a6a6c7aab85648ded5d470854a80df37d",
+              "manifest_sha256": "2d0e8bc2120c872d40c28438736f6552631b3c5065ee722fb2366e861360215e"
             }
           }
         }
@@ -270,7 +270,7 @@
       "description": "Sends a message to the channels you configure when an app starts, stops, restarts, crashes, loops, goes over its memory limit or fails its health check. It reads only those events and its own config.toml, and it never touches your apps.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -280,32 +280,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-notifier-aarch64-apple-darwin.tar.gz",
-              "size": 1767430,
-              "sha256": "625b7cb9e9c34fdb93eb2e35d9e8bbc7dbbd5aaaa2c319581f1b2630408285ab",
-              "exe_sha256": "bb364327ff7f71d2cd4d2639bb989cb2dbc2432bf5fcf920631b3588bdd1160b",
-              "manifest_sha256": "a1484640886e376eaf57a3cfcca5ade3203b59fef12a614492fb23f40966a6ee"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-notifier-aarch64-apple-darwin.tar.gz",
+              "size": 1767276,
+              "sha256": "a261a9e3919d007105cd53ef84410861b1f1706816930d5fcc48768bec94d24e",
+              "exe_sha256": "cc179529a6eb0e349df236a37bb3ddf0a71f29eb7398f1e45cb42983ad443929",
+              "manifest_sha256": "0d831211a18f037a1f3b423be4ae2f5f07a3a33fb0e95ef3ce2d19c637809228"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-notifier-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 1873462,
-              "sha256": "32b0d4e52c2bfb87a2727cb0dddad0c496e8459041c1676c8213db5441d1bcef",
-              "exe_sha256": "fc69415f551c894163ca0bfab5e97fb01a39d5ec1e34bf1814b8374891fc04b6",
-              "manifest_sha256": "a1484640886e376eaf57a3cfcca5ade3203b59fef12a614492fb23f40966a6ee"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-notifier-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 1874054,
+              "sha256": "84a6486ee549621984fdc0d9a260a0f26c1be9c86807f7059db0c710eea96fbc",
+              "exe_sha256": "af71dee7bc1ee12e0d10ce9bc6d8ecf991ce710f5007012711e86ba8250b6b94",
+              "manifest_sha256": "0d831211a18f037a1f3b423be4ae2f5f07a3a33fb0e95ef3ce2d19c637809228"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-notifier-x86_64-apple-darwin.tar.gz",
-              "size": 1888177,
-              "sha256": "dab51752cda6a8246d183a4945e6e3d1b30f90866a0fffab6e38e1f1928e871b",
-              "exe_sha256": "3c9d3584523b4fe9ebbec3832f2631ecfda2fe32e82b7f2f4d0e8205a97668d0",
-              "manifest_sha256": "a1484640886e376eaf57a3cfcca5ade3203b59fef12a614492fb23f40966a6ee"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-notifier-x86_64-apple-darwin.tar.gz",
+              "size": 1888583,
+              "sha256": "7dca55faaaf3bb4b29ac3ee7d31757f9d50f30dd132abdff63ad0ecd9536d3b2",
+              "exe_sha256": "e4489c6b5e68ba13549d4e0f2d17633944ef0ade9669cd7737e585f854bca011",
+              "manifest_sha256": "0d831211a18f037a1f3b423be4ae2f5f07a3a33fb0e95ef3ce2d19c637809228"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-notifier-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 1986746,
-              "sha256": "6ffe4b3c7dfe46ed5b2655676eab9965ebfae0c095002f1a3f019869970f1c52",
-              "exe_sha256": "eb938098b4cb8f2925650effbeb0e2a5512fa87e09dd2cc4fa3c05754b4927a7",
-              "manifest_sha256": "a1484640886e376eaf57a3cfcca5ade3203b59fef12a614492fb23f40966a6ee"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-notifier-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 1985169,
+              "sha256": "fb055059c932aa921f4882de7f3a2d6fc633db047e149f7279f2bd8f5a0c80d6",
+              "exe_sha256": "3dd77313686e269f32a8d4a6e917a1472c77ed2fcfdb686c0036f738ed9eb7f6",
+              "manifest_sha256": "0d831211a18f037a1f3b423be4ae2f5f07a3a33fb0e95ef3ce2d19c637809228"
             }
           }
         }
@@ -321,7 +321,7 @@
       "description": "Provides the go runtime: the app is started with go run. It tells OxidePM what to run and OxidePM runs it; this adapter starts nothing, reads none of your files and has no network.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -331,32 +331,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-go-aarch64-apple-darwin.tar.gz",
-              "size": 372200,
-              "sha256": "bf26f70ca5408ca5a87c36943296d90981c318d85e7a192bfa90a6f3ce874dd6",
-              "exe_sha256": "ccc439d62fdb5d4bfe45fa356044b5e2bd9760780fa45089c5ccef74a8b4490f",
-              "manifest_sha256": "c863bb85020aa6f48c432c7d946119162ee9e75f7ee2a2baf13cfd95415e6b56"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-go-aarch64-apple-darwin.tar.gz",
+              "size": 372125,
+              "sha256": "7955859ac6106dcd31154442e4f2c0655b06da6ea09ab9902769cb6b778d2a9c",
+              "exe_sha256": "6f71dc5f939c38265ff1a0ba389c21eb0b947202c22d3ec669ca799a9ff4e16a",
+              "manifest_sha256": "f97cec12e2adb0b293b00353f516c27853d89bee5d064d9d587ab4fbf8f140e0"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-go-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 411432,
-              "sha256": "ea66c8cd79202a2939944500917dc54434105a41fbbf8a3d9abe9ca4cbc700ae",
-              "exe_sha256": "1de6971ad069511a12e8d0bdbc51061abc703c3d99f8145e6b5d4573dc82ba02",
-              "manifest_sha256": "c863bb85020aa6f48c432c7d946119162ee9e75f7ee2a2baf13cfd95415e6b56"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-go-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 411413,
+              "sha256": "c4e1d772ff2279f50fae273d285e67c249fa169d13c3416a07d141a697b5a9f3",
+              "exe_sha256": "4952db8388fbe1924acbbc808f6eca5c3d73b18b074d629ad06443dbb40956b2",
+              "manifest_sha256": "f97cec12e2adb0b293b00353f516c27853d89bee5d064d9d587ab4fbf8f140e0"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-go-x86_64-apple-darwin.tar.gz",
-              "size": 398230,
-              "sha256": "a632a54dac575219072324a92874d77127994f226a1cb16d2dd6addcb5447e88",
-              "exe_sha256": "538b36f8ef4d7d43f9a3c05a6a64b69aa5321cfbe972cbb13f14e2d5148ac498",
-              "manifest_sha256": "c863bb85020aa6f48c432c7d946119162ee9e75f7ee2a2baf13cfd95415e6b56"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-go-x86_64-apple-darwin.tar.gz",
+              "size": 398223,
+              "sha256": "4a6559374e9a7648676a1158f0b3abe87ecf33ed3d9d97d4671fd7284362466d",
+              "exe_sha256": "15b82fb6d3fda276494d2d013c8ebcafe52f401531e56aba8f9f8b90e0b1dd1f",
+              "manifest_sha256": "f97cec12e2adb0b293b00353f516c27853d89bee5d064d9d587ab4fbf8f140e0"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-go-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 434774,
-              "sha256": "7733d81767866a57d3463b562ac808431eb94eaae37ecb157fb8ad01e117ed26",
-              "exe_sha256": "419fb904f0ed7a6788943122c29c0c9143c914f4a5d825cb87ca67ba3ec91a69",
-              "manifest_sha256": "c863bb85020aa6f48c432c7d946119162ee9e75f7ee2a2baf13cfd95415e6b56"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-go-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 434686,
+              "sha256": "cdba239d78c7c8f5eb5a43c5ba6fffac5d21e6649b87cd06a72b18ed6de0a278",
+              "exe_sha256": "7d6238f8a22265bad793f89bc57fe8b0312d4880e7339043e809e5ada704a61a",
+              "manifest_sha256": "f97cec12e2adb0b293b00353f516c27853d89bee5d064d9d587ab4fbf8f140e0"
             }
           }
         }
@@ -372,7 +372,7 @@
       "description": "Provides the node, npm, pnpm and yarn runtimes. It tells OxidePM what to run for an app, and OxidePM runs it; this adapter starts nothing, reads none of your files and has no network.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -382,32 +382,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-node-aarch64-apple-darwin.tar.gz",
-              "size": 372845,
-              "sha256": "2a1a0798a836019b75b02b310bab0fc5cf167ce9473f78f5eb58e8cafdb78d5d",
-              "exe_sha256": "2a566f69831d874f8cdc85816b5974788c90ea7f3b8bc04d0ca44891c7048c40",
-              "manifest_sha256": "a3a0b1fe58b7559bef1f91df69ea8452a322f33506c912a8d4625259e6e971aa"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-node-aarch64-apple-darwin.tar.gz",
+              "size": 372814,
+              "sha256": "e78eb92d3a666f1d61b8acc051567515dc0259a4ff80747c93015516dd646c8b",
+              "exe_sha256": "bcc0de9e39b6fe61f7397ab66ec5ced9de8346861a2bef71fc6fbe20471d4816",
+              "manifest_sha256": "5f792092b715feb6fb62dbaa8e61b85c826bb4b8a5619a138811bb5f3efbe7b5"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-node-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 412290,
-              "sha256": "05e0337fbfbe81ddd4ab10471de73d91a2ab0cabe0ffbaa5f3f82eb367cb6f64",
-              "exe_sha256": "b7c92bcde6f7170e22fc81eacc2f4a2a78dd42952fe67fc16435fba7c5bcda82",
-              "manifest_sha256": "a3a0b1fe58b7559bef1f91df69ea8452a322f33506c912a8d4625259e6e971aa"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-node-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 412277,
+              "sha256": "ead2282a14293802551bf26d11fffb1fad7ec21bef6e745e95dbe876dfb2dd3f",
+              "exe_sha256": "6e94a0c14770bf8d51da9ebbe470fe46e60b2661b329d1f55c4d39426a2b9f88",
+              "manifest_sha256": "5f792092b715feb6fb62dbaa8e61b85c826bb4b8a5619a138811bb5f3efbe7b5"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-node-x86_64-apple-darwin.tar.gz",
-              "size": 398832,
-              "sha256": "5a6d587e415314d3007fac6029547422b40f7d274437d6e07b74a3980cdabe8f",
-              "exe_sha256": "d3865be4873812513285dc801aef663638b56f01ebc9615bcc60b884b33082f2",
-              "manifest_sha256": "a3a0b1fe58b7559bef1f91df69ea8452a322f33506c912a8d4625259e6e971aa"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-node-x86_64-apple-darwin.tar.gz",
+              "size": 398834,
+              "sha256": "c3630f308c2f993adbf37651c091c09ad3a614d97d2e83676f63ac058ae67c1b",
+              "exe_sha256": "47eee7265887f7092ac3d73c9dd955498f383b08bd62fe42edd8d3b69aab0e1c",
+              "manifest_sha256": "5f792092b715feb6fb62dbaa8e61b85c826bb4b8a5619a138811bb5f3efbe7b5"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-node-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 435573,
-              "sha256": "13029410fa4c375d6c4b1ce0064c7298713f90ec81b13697514f74cdbb030aac",
-              "exe_sha256": "1e70a36c0ff322f42a69ae1eb39cfec1d45589b007e308e3837e14d691839464",
-              "manifest_sha256": "a3a0b1fe58b7559bef1f91df69ea8452a322f33506c912a8d4625259e6e971aa"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-node-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 435475,
+              "sha256": "b4d093bb73a44d0d6c319196ec87c850a443ae97fc524b64251d095a25841620",
+              "exe_sha256": "ead37011be37acf5f72d3736d510897d30f377cbbfe9014cf3b9e3bd348812dc",
+              "manifest_sha256": "5f792092b715feb6fb62dbaa8e61b85c826bb4b8a5619a138811bb5f3efbe7b5"
             }
           }
         }
@@ -423,7 +423,7 @@
       "description": "Provides the python runtime. It tells OxidePM which interpreter to run (the project's venv or .venv when there is one, else python3, else python) and with what, and OxidePM runs it; to find the virtualenv it has OxidePM run the system's python for a moment. This adapter starts nothing itself, reads none of your files and has no network.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -433,32 +433,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-python-aarch64-apple-darwin.tar.gz",
-              "size": 376673,
-              "sha256": "f58ac67c770fbf8146b972b65887d3c34f376a9394a833ea2a0a485640da803a",
-              "exe_sha256": "e4cc83b78c7fa1413ab7b1e92a606248f9692b263a1892d8004900d87b37512c",
-              "manifest_sha256": "178a89684a780040c65ef5ad0d7b7914b4cc0d98097bb11b9b784a9692ff0ba4"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-python-aarch64-apple-darwin.tar.gz",
+              "size": 376638,
+              "sha256": "45bccca15c67fc14d47531c45069e276d7793bc33c4ef1e0ef4aa3c23122a408",
+              "exe_sha256": "e7dbe8cbf2fdd6c99ac07daf3db6f287e771762c86526c4d5850732c465c9e95",
+              "manifest_sha256": "0d363f94745e4523ebded300fb47a30ce412d47be7e6b15e941539c50df48708"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-python-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 414999,
-              "sha256": "7309856286ad41bf5c65ab2912e884eb46ca55aad5694baba7beed76d0ff721c",
-              "exe_sha256": "f94834a7555a3caa2d7219af98998790be80e2777b9ce662e9ecc6536def4491",
-              "manifest_sha256": "178a89684a780040c65ef5ad0d7b7914b4cc0d98097bb11b9b784a9692ff0ba4"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-python-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 415019,
+              "sha256": "7b625ae7d7ecd0aa5fb5c42543d38560c2aa98badb029e131f813db608350aa5",
+              "exe_sha256": "bea385b5b13465de1f89c9e89b6e4abf6e6f85f119fdbd70a02901d72c7ca4e5",
+              "manifest_sha256": "0d363f94745e4523ebded300fb47a30ce412d47be7e6b15e941539c50df48708"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-python-x86_64-apple-darwin.tar.gz",
-              "size": 402617,
-              "sha256": "e82bacc2aa5692758d36b6d867636713cf5d179cfe66f381a406bd9de6af85c2",
-              "exe_sha256": "7262fa93076a014deeb4cbd1b441e4e9e29b194984f15fb490376cd9005d9857",
-              "manifest_sha256": "178a89684a780040c65ef5ad0d7b7914b4cc0d98097bb11b9b784a9692ff0ba4"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-python-x86_64-apple-darwin.tar.gz",
+              "size": 402548,
+              "sha256": "e501a8d113d7078ada3b4ecf2d3a95145a46270ffe067bb934606324bf36bea3",
+              "exe_sha256": "ea31f0e66cf1cfb5dff9e251008633ec4d49c8ad4b4ea9721a869c9993b1082d",
+              "manifest_sha256": "0d363f94745e4523ebded300fb47a30ce412d47be7e6b15e941539c50df48708"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-python-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 438913,
-              "sha256": "2566f06c85fece08d4aae1e941024294e3af6c62777c1ee0298a0e93b52dc06a",
-              "exe_sha256": "ca90dde24e15b2643f6de551f3895f891f52d71672bba8a9452ba3c1a5a888e6",
-              "manifest_sha256": "178a89684a780040c65ef5ad0d7b7914b4cc0d98097bb11b9b784a9692ff0ba4"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-python-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 438867,
+              "sha256": "f68d6b047feeceb55c821eac2606e0d8d708efa2a5e493d6b5cae049c7dafdb5",
+              "exe_sha256": "4f11244dbcb60a96fd3535666a17076de6397572375224dabd7de18e20cde502",
+              "manifest_sha256": "0d363f94745e4523ebded300fb47a30ce412d47be7e6b15e941539c50df48708"
             }
           }
         }
@@ -474,7 +474,7 @@
       "description": "Provides the rust runtime (one .rs file, compiled with rustc) and the cargo runtime (a Cargo project, built in release mode; cargo metadata tells which binary and where). It tells OxidePM which programs to run and OxidePM runs them, with your app's environment and a time limit; this adapter starts nothing itself, reads none of your files and has no network. The programs it asks for are cargo and rustc, and the binary they build.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -484,32 +484,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-rust-aarch64-apple-darwin.tar.gz",
-              "size": 384587,
-              "sha256": "9c577a23cad998c003b9e53978b7b7d011c7bdc089d399b2d3f730a4da9c02c1",
-              "exe_sha256": "fd3e208f6341ba8c6535b85585cc548f3c7776635ec37f041030953d778bc3c2",
-              "manifest_sha256": "49a3376e350f13d81995a04a75a7ed01814158c1c21b39c9f9eb275a67e133fc"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-rust-aarch64-apple-darwin.tar.gz",
+              "size": 384792,
+              "sha256": "8c23e54b4402cdcd2a4fe8f5c397a20628f7d582f8b97ad9347eb73fe1acbe60",
+              "exe_sha256": "0ff98389e6a4644433622a7d4705c4563a373239a8601eb0dcb0aae24ba07dba",
+              "manifest_sha256": "dad920e6a746e912e21796e4cee5323128f5fe64fae6672bc8e0538d47bc950d"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-rust-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 423653,
-              "sha256": "be73b7d92e3900a333f5defc51740cf78edb3825daef670cae850356490ac1c1",
-              "exe_sha256": "d648626fdc18031ececf6fb77f412bb1a38e181df4c60e6f788302055cbb6005",
-              "manifest_sha256": "49a3376e350f13d81995a04a75a7ed01814158c1c21b39c9f9eb275a67e133fc"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-rust-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 423685,
+              "sha256": "88e8dbfe5fed81b025a110ca3ff6fdf2fbb4896dbc6cd71f0265c1b972c73b4b",
+              "exe_sha256": "0766a6a476bfd70c7e9f8ba4f249fd6de12f8a083b29aa856f524769e1f14447",
+              "manifest_sha256": "dad920e6a746e912e21796e4cee5323128f5fe64fae6672bc8e0538d47bc950d"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-rust-x86_64-apple-darwin.tar.gz",
-              "size": 410866,
-              "sha256": "d1831328d38fcbe6c6348e8f1b26435366a85907da45ad2ba5bf1e465dfa3c71",
-              "exe_sha256": "00f01e98b6f94e10325a8f507cfec55695d7bb9b9f0ff7c6d07624c661d1f81e",
-              "manifest_sha256": "49a3376e350f13d81995a04a75a7ed01814158c1c21b39c9f9eb275a67e133fc"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-rust-x86_64-apple-darwin.tar.gz",
+              "size": 410873,
+              "sha256": "9110d6133b8e6628a34c6f89f4cf6272cc3a1292bc4cdb616f63fdaed75e918a",
+              "exe_sha256": "ad2ef629d832ae8da9667145e2bc1c7c6cc1b4f386c193404a81afd0248f8c3a",
+              "manifest_sha256": "dad920e6a746e912e21796e4cee5323128f5fe64fae6672bc8e0538d47bc950d"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-runtime-rust-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 448216,
-              "sha256": "eb4504fb2cc4c86c7d3eb23ed392759c43e419fa00c506b24ca353179ec3c862",
-              "exe_sha256": "211808565a7325af0402082bd667c644bc98926214ba391fb8e4fd47ad73642e",
-              "manifest_sha256": "49a3376e350f13d81995a04a75a7ed01814158c1c21b39c9f9eb275a67e133fc"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-runtime-rust-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 448121,
+              "sha256": "77b5aaf608c4d45afb30873ac726e747d74d1d4ebe10ac87aa3ede18bd5f9014",
+              "exe_sha256": "ee10566aa63d26197779788d7285febf2c9b60a7f9ef7df52037542425edc87d",
+              "manifest_sha256": "dad920e6a746e912e21796e4cee5323128f5fe64fae6672bc8e0538d47bc950d"
             }
           }
         }
@@ -525,7 +525,7 @@
       "description": "oxidepm monit opens a full-screen dashboard on your terminal: the apps with their state, CPU and memory, the details of the selected app, and its recent log lines. Stopping and restarting an app asks for y or n first. It can stop and restart apps (the lifecycle level), nothing else, and it runs only while the dashboard is open.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -535,32 +535,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-tui-aarch64-apple-darwin.tar.gz",
-              "size": 633985,
-              "sha256": "db29f4e976dba8205462efb17ce5632de160a89c8f98b667f9412510203cf7ae",
-              "exe_sha256": "61f716c8d2bd456c46f5a50f505d57cfd415a18ee1f0b2a39328644cbd874f68",
-              "manifest_sha256": "9513a72e0c88edecee804045371d09054f22aba73351635ccc095c5dda973518"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-tui-aarch64-apple-darwin.tar.gz",
+              "size": 634092,
+              "sha256": "75ce96879332100655101af438e3337ae5d9e2d5ba6e43d0ca6604cf79b4d7e4",
+              "exe_sha256": "12c0998ad4c232c08da7a0d40d92534ed257d8c57fbeed6a12d6af48bdf700f8",
+              "manifest_sha256": "dd82b171a502314a1ecb15ac78ba8bc8428909f56707ea10039c89d44fae3cdb"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-tui-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 678135,
-              "sha256": "3d91b48f8ed3f87e6c2012aa52aa4b13134f28c5388718e239c9c48b48dc7076",
-              "exe_sha256": "a97142250a619c1f7f9490fb76aef0f7943fc5ae18d7c86281beba06262baba5",
-              "manifest_sha256": "9513a72e0c88edecee804045371d09054f22aba73351635ccc095c5dda973518"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-tui-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 678085,
+              "sha256": "25ca58933b2bd6ec48c483acec1e00b4a6190f4f0eb4ba332fc02c8afa4bb4bd",
+              "exe_sha256": "573497feeec8842727fb1c5553b6e92c7786557daf44fffc45aed3e19d9cd562",
+              "manifest_sha256": "dd82b171a502314a1ecb15ac78ba8bc8428909f56707ea10039c89d44fae3cdb"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-tui-x86_64-apple-darwin.tar.gz",
-              "size": 676539,
-              "sha256": "95603ffe0fed817034ce27ba461c0d8cb91065c3568ccabae9493663e601d03e",
-              "exe_sha256": "6c041a38613195c27a1f5c6f34a381316b1bf494af7387b6c4ccec7ca7338ba4",
-              "manifest_sha256": "9513a72e0c88edecee804045371d09054f22aba73351635ccc095c5dda973518"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-tui-x86_64-apple-darwin.tar.gz",
+              "size": 674337,
+              "sha256": "a762889e668011aeb066ca706a9493941beff2880b3f4a8aed419da7bb673e64",
+              "exe_sha256": "f4fda3f4143f07df4f5114bc5243f0870bc0b765967fa6ad18304bb88f353c42",
+              "manifest_sha256": "dd82b171a502314a1ecb15ac78ba8bc8428909f56707ea10039c89d44fae3cdb"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-tui-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 722039,
-              "sha256": "84307062ca3f423614b31bd2af19b8776da6c13471a1f9eff50d2358576ba57a",
-              "exe_sha256": "460af97570b6b19a95689a25ee88cd4955a647ca96b5ff4695785c86c1d5e299",
-              "manifest_sha256": "9513a72e0c88edecee804045371d09054f22aba73351635ccc095c5dda973518"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-tui-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 722492,
+              "sha256": "1cc8ecef0860f8907670751a04196bbba13454dfd2a77b8e8fd3430f44c60ba9",
+              "exe_sha256": "20b16444b7476f8761d278f3bb23ff2dbf9a6949abe2153b7c9e056d1730bae8",
+              "manifest_sha256": "dd82b171a502314a1ecb15ac78ba8bc8428909f56707ea10039c89d44fae3cdb"
             }
           }
         }
@@ -576,7 +576,7 @@
       "description": "Serves a REST API and a WebSocket on 127.0.0.1:9615 for showing, restarting, stopping and reloading the apps that list ui-web under adapters. Every request, loopback included, needs an access key that is generated into its config.toml the first time it starts; the Host and Origin headers are checked; the WebSocket carries the daemon's lifecycle events. By default it cannot create or delete apps or flush logs. There is no TLS: put a proxy in front for anything but a trusted network.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -586,32 +586,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-web-aarch64-apple-darwin.tar.gz",
-              "size": 898248,
-              "sha256": "bc7bc683f0518ba99c638148d4be70f0b6deb605b17cdd9d9beefc8d7a5b5007",
-              "exe_sha256": "7424b42e20df4bbcb81fe31db81bc7a0cf26591ad4b34473f63ba28234363200",
-              "manifest_sha256": "abe4bcd45e69a21213f9c9d7b53129bed95a69cd48fd397864ec2e4c2f6464a1"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-web-aarch64-apple-darwin.tar.gz",
+              "size": 898179,
+              "sha256": "3968b99d9807db1a82bcd19fd87de377a2f7979fe7c9312a608dd4e78bb4c676",
+              "exe_sha256": "ffb64b7c7c2ef4feaede99a4ea7adc26e05c78f728cc4c27a5b1aaa476a9b147",
+              "manifest_sha256": "a01c812e998ae9089557d6e99de0c6134cfa04fda401e80ba7bfa53265a49c6e"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-web-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 951193,
-              "sha256": "0fb6219e0d2f240a3bf21ebf7c20235e2c463954514b99311a8c781226022afd",
-              "exe_sha256": "51426bb211991c404cb3221821a4962d35d6e16b8f116747bd7973ea25120068",
-              "manifest_sha256": "abe4bcd45e69a21213f9c9d7b53129bed95a69cd48fd397864ec2e4c2f6464a1"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-web-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 950590,
+              "sha256": "128220fb5ce4580f0375a9541899764dca571a98fc95dd6149c95c3f46265cc0",
+              "exe_sha256": "7ecf0e3bbae490c45ea071d097bacc9a8886fa7f786d5995341c0fe77dbf8799",
+              "manifest_sha256": "a01c812e998ae9089557d6e99de0c6134cfa04fda401e80ba7bfa53265a49c6e"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-web-x86_64-apple-darwin.tar.gz",
-              "size": 957708,
-              "sha256": "95696bbb436a8b0ed07661f30b32bf97b745a74eea0adb99f5f30d417d2b717c",
-              "exe_sha256": "4ac0bbb44f65a622f70325da9728e17cb3b7cad601377f077d382ec753976c9b",
-              "manifest_sha256": "abe4bcd45e69a21213f9c9d7b53129bed95a69cd48fd397864ec2e4c2f6464a1"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-web-x86_64-apple-darwin.tar.gz",
+              "size": 957679,
+              "sha256": "1788cfa0da5c4c491ed697718d9f67e0131231e89abcb49bc3e176dd384f0c1d",
+              "exe_sha256": "3402d010e2e9857f3e2436b7c2d347de0884ffb7defd72d7d5bce1d615e42321",
+              "manifest_sha256": "a01c812e998ae9089557d6e99de0c6134cfa04fda401e80ba7bfa53265a49c6e"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-ui-web-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 1014069,
-              "sha256": "78a97d336f61c919bda324077e555fc1fa013a6a9c61c4d156739737c3289e59",
-              "exe_sha256": "62479be008b3bb642ed6998c2a525415c8397e5df0a120b1258e685ea4eac355",
-              "manifest_sha256": "abe4bcd45e69a21213f9c9d7b53129bed95a69cd48fd397864ec2e4c2f6464a1"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-ui-web-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 1013467,
+              "sha256": "9d271b5576c971e9b3cfdc0c3e6be488d1bc4336c63555861c281c2a07848edd",
+              "exe_sha256": "fa370a98dd8e55f3c29824d8cb66cd161a527d4f042336b09164d403f3ff1e1d",
+              "manifest_sha256": "a01c812e998ae9089557d6e99de0c6134cfa04fda401e80ba7bfa53265a49c6e"
             }
           }
         }
@@ -627,7 +627,7 @@
       "description": "Watches the directories an app lists under adapters.watch (paths, ignore, debounce_ms) and restarts that app, and only that app, after a trailing debounce window. It has no network, spawns no programs and writes nothing.",
       "releases": [
         {
-          "version": "0.4.0-rc.8",
+          "version": "0.4.0",
           "released": "2026-11-26",
           "min_daemon": "0.1.0",
           "protocol": [
@@ -637,32 +637,32 @@
           "yank_reason": null,
           "artifacts": {
             "aarch64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-watch-aarch64-apple-darwin.tar.gz",
-              "size": 458459,
-              "sha256": "1b48ec29a60509170079f603881c6144bc593c25f2568d920ca6176adce5c1b2",
-              "exe_sha256": "3dfca0e6e295e11127ca3aba25597f4330c28f44be897752f371a6a6d447f665",
-              "manifest_sha256": "60a710c7fa189b0d963ba3efc4e5f0376496bf8eff36dfa67592a8fcbd70be07"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-watch-aarch64-apple-darwin.tar.gz",
+              "size": 458600,
+              "sha256": "0a88029a3f639272d0174aee4d350d5b47b90c3452d2b85bcad304d046e6a3f3",
+              "exe_sha256": "0af00a3fdc86629f5add9e24e3827b4a5160c374b494333ce6a37f35c269d77e",
+              "manifest_sha256": "6ce8b92af96fe0f06bf32a104e5ddd4df1a7c79760cc661ba3eb98d8be2e3434"
             },
             "aarch64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-watch-aarch64-unknown-linux-gnu.tar.gz",
-              "size": 531309,
-              "sha256": "7705f3f29ccbc5914588ce645d16ae3bebad33168b74156a7b0a3e4cae246550",
-              "exe_sha256": "f10b5ace6b8184002c54af67234a2f18621c45d1267efe35df8d5b317bee158d",
-              "manifest_sha256": "60a710c7fa189b0d963ba3efc4e5f0376496bf8eff36dfa67592a8fcbd70be07"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-watch-aarch64-unknown-linux-gnu.tar.gz",
+              "size": 531699,
+              "sha256": "3b607d47d287b41ba7311edc801fd6c3e5b4f8cd8b7f3dcb3296868fdaeb7eaa",
+              "exe_sha256": "624a056dc12b4b0cb2bfab242386ab232a918976c884bd78ed10856466a3a9ab",
+              "manifest_sha256": "6ce8b92af96fe0f06bf32a104e5ddd4df1a7c79760cc661ba3eb98d8be2e3434"
             },
             "x86_64-apple-darwin": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-watch-x86_64-apple-darwin.tar.gz",
-              "size": 491459,
-              "sha256": "44cc1a73879f90c38fc1be0ed15d916bd7822de75338d3af0965a8757b2526bf",
-              "exe_sha256": "561671ad94279247f0509865d486691ae9ff99f7973499374983c9db05e16dfe",
-              "manifest_sha256": "60a710c7fa189b0d963ba3efc4e5f0376496bf8eff36dfa67592a8fcbd70be07"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-watch-x86_64-apple-darwin.tar.gz",
+              "size": 491411,
+              "sha256": "ac751930d37eab5f5c61fd17f3ff29bd92b64d8b051b29579413d397fbf12e62",
+              "exe_sha256": "d8c0665b9d1ae4fe113f5e52187794d800b141a888a1834f14b619a5aa6aadd0",
+              "manifest_sha256": "6ce8b92af96fe0f06bf32a104e5ddd4df1a7c79760cc661ba3eb98d8be2e3434"
             },
             "x86_64-unknown-linux-gnu": {
-              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0-rc.8/oxidepm-adapter-watch-x86_64-unknown-linux-gnu.tar.gz",
-              "size": 565192,
-              "sha256": "956477e53806368e2c9255cbd873e60ffe160d90276c853cf46d4a518b2c7734",
-              "exe_sha256": "06de6c225f4a7adbcbb291d4d8cb37d7b2f204aa648737a499a16e49fc6fca78",
-              "manifest_sha256": "60a710c7fa189b0d963ba3efc4e5f0376496bf8eff36dfa67592a8fcbd70be07"
+              "url": "https://github.com/oxidekit/oxidepm/releases/download/v0.4.0/oxidepm-adapter-watch-x86_64-unknown-linux-gnu.tar.gz",
+              "size": 565326,
+              "sha256": "bd98b2e85e29528fde6e1b26e541b1c74197e58e0dd23b7751eb623bb61a0154",
+              "exe_sha256": "134b3ed3a3f39847d5e86f368d8e51d9f8c8be18d0e2b67824a69fcb7187f0df",
+              "manifest_sha256": "6ce8b92af96fe0f06bf32a104e5ddd4df1a7c79760cc661ba3eb98d8be2e3434"
             }
           }
         }
