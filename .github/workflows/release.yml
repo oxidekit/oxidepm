@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_BUILD_JOBS: 8
 
@@ -127,12 +131,20 @@ jobs:
           dpkg-deb --root-owner-group --build "$pkg"
           test "$(dpkg-deb -f "$pkg.deb" Version)" = "$version"
 
+      - name: Stage packages and adapter archives
+        working-directory: oxidepm
+        run: |
+          mkdir release-input
+          mv "oxidepm-$TARGET.tar.gz" "oxidepm-adapters-$TARGET.tar.gz" release-input/
+          if [ -n "$DEB_ARCH" ]; then
+            mv ./*.deb release-input/
+          fi
+          cp -R share/oxidepm/adapters release-input/adapters
+
       - uses: actions/upload-artifact@v4
         with:
           name: oxidepm-${{ matrix.target }}
-          path: |
-            oxidepm/*.tar.gz
-            oxidepm/*.deb
+          path: oxidepm/release-input/
           if-no-files-found: error
 
   release:
@@ -145,17 +157,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
-          merge-multiple: true
+          path: bundles
+          pattern: oxidepm-*
       - name: Install minisign
         run: |
           sudo apt-get update
           sudo apt-get install -y minisign
-      - name: Write checksums and Homebrew formula
+      - name: Prepare release assets
+        shell: bash
         run: |
-          (cd artifacts && sha256sum -- *.tar.gz *.deb > checksums.txt)
+          cargo build -p oxidepm-adapter-proto --example catalogue
+          adapter_names=$(bash scripts/build-adapter-bundle.sh --list)
+          mapfile -t names <<< "$adapter_names"
+          release_date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%d HEAD)
+          target/debug/examples/catalogue prepare "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$release_date" \
+            bundles artifacts "${names[@]}"
+          (cd artifacts && LC_ALL=C sha256sum -- *.tar.gz *.deb adapter-catalogue-input.json > checksums.txt)
           ruby dist/homebrew/generate.rb "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" artifacts/checksums.txt > artifacts/oxidepm.rb
           ruby -c artifacts/oxidepm.rb
       - name: Sign release checksums
@@ -172,22 +192,6 @@ jobs:
           printf '%s\n' "$OXIDEPM_MINISIGN_KEY" > "$key_file"
           unset OXIDEPM_MINISIGN_KEY
 
-          set -- artifacts/*.tar.gz artifacts/*.deb
-          if [ "$#" -ne 10 ]; then
-            echo 'Expected ten release packages' >&2
-            exit 1
-          fi
-          version=${GITHUB_REF_NAME#v}
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
-            for package in "oxidepm-$target.tar.gz" "oxidepm-adapters-$target.tar.gz"; do
-              test -s "artifacts/$package" || { echo "Missing release package $package" >&2; exit 1; }
-            done
-          done
-          for arch in amd64 arm64; do
-            package="oxidepm_${version//-/.}_${arch}.deb"
-            test -s "artifacts/$package" || { echo "Missing release package $package" >&2; exit 1; }
-          done
-
           comment="oxidepm release checksums tag=$GITHUB_REF_NAME"
           minisign -S -s "$key_file" -m artifacts/checksums.txt -x artifacts/checksums.txt.minisig -t "$comment" </dev/null
           verified_comment=$(minisign -V -H -Q -P 'RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC' \
@@ -196,17 +200,19 @@ jobs:
             echo 'Release signature has an unexpected trusted comment' >&2
             exit 1
           fi
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/*.tar.gz
-            artifacts/*.deb
-            artifacts/checksums.txt
-            artifacts/checksums.txt.minisig
-            artifacts/oxidepm.rb
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          # The installer and `oxidepm update` follow the latest release, so a
-          # release candidate is published as the latest release.
-          prerelease: false
-          make_latest: true
+      - name: Upload and verify a draft before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/publish-adapter-catalogue.sh release "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" artifacts
+
+  catalogue:
+    name: Publish adapter catalogue
+    needs: release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/adapter-catalogue.yml
+    with:
+      tag: ${{ github.ref_name }}
+      bootstrap: ${{ vars.OXIDEPM_CATALOGUE_BOOTSTRAP_TAG == github.ref_name }}
+    secrets:
+      OXIDEPM_MINISIGN_KEY: ${{ secrets.OXIDEPM_MINISIGN_KEY }}
