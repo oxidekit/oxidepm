@@ -1,7 +1,7 @@
 //! Pure validation of app specs, health checks and sizes.
 //!
 //! Nothing here touches the filesystem, the clock or the daemon: the same
-//! rules run at config load, and (from a later step) at the daemon's single
+//! rules run at config load and at the daemon's single
 //! entry point for new apps.
 
 use std::collections::HashSet;

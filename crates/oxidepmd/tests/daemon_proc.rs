@@ -1,5 +1,5 @@
-//! Smoke test for the real-binary harness (`common::daemon`). Later steps build their daemon
-//! tests (signals, single instance, shutdown) on it.
+//! Integration tests for the daemon binary, including signals, single-instance enforcement and
+//! shutdown.
 
 mod common;
 

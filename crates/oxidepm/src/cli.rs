@@ -220,7 +220,7 @@ pub enum Commands {
 
     /// Update oxidepm to the latest release (or a specific version)
     Update {
-        /// Target version (e.g., "0.2.3"). Defaults to latest.
+        /// Target version (e.g., "0.4.0"). Defaults to latest.
         #[arg(long)]
         version: Option<String>,
         /// Install a version older than the one running

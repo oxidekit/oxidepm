@@ -431,7 +431,7 @@ pub trait Inbound: Send + Sync {
     }
 }
 
-/// The answer before the host API exists: every method is unknown.
+/// Test stub that reports every inbound method as unknown.
 pub struct NoHostApi;
 
 #[async_trait]

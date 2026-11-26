@@ -743,8 +743,7 @@ async fn stats_count_the_tasks_an_app_owns() {
     assert!(fx.paths.logs_dir().exists());
 }
 
-/// Five restarts leave exactly one task of each kind: the health loop and the cron timer are
-/// replaced or kept, never added to (the legacy supervisor ended with a loop per restart).
+/// Five restarts leave one health loop and one cron timer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_five_times_keeps_one_task_of_each_kind() {
     let fx = fixture().await;

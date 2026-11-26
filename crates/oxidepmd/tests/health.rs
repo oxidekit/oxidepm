@@ -32,7 +32,7 @@ async fn script_probe_failure_keeps_child_alive_and_reports_unhealthy() {
         .await
         .expect("start");
 
-    // The legacy checker waits 5 s before its first probe.
+    // The first probe runs after the start period.
     let state = h
         .wait_until_for("health-bad", "unhealthy", Duration::from_secs(20), |s| {
             h.is_unhealthy(s)
@@ -66,7 +66,7 @@ async fn script_probe_timeout_kills_probe_group() {
     .await
     .expect("start");
 
-    // the legacy checker waits 5 s before its first probe
+    // The first probe runs after the start period.
     let mut first = None;
     h.eventually("the probe to start", Duration::from_secs(20), || {
         first = Harness::procs_with_cmdline(&needle).first().copied();
@@ -113,7 +113,7 @@ fn script_probe_runs_in_app_dir_without_daemon_environment() {
     let started = daemon.rpc(json!({ "type": "start", "spec": value }));
     assert_eq!(started["type"], "started", "{started}");
 
-    // the legacy checker waits 5 s before its first probe
+    // The first probe runs after the start period.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let text = loop {
         if let Ok(text) = std::fs::read_to_string(&out) {

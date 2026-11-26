@@ -45,8 +45,7 @@ pub enum Cause {
     Limit,
     Cron,
     Health,
-    /// An adapter asked (`User` stays "a person asked"). Nothing sends it before the host
-    /// exists.
+    /// An adapter requested the command.
     #[allow(dead_code)]
     Adapter,
 }
@@ -59,7 +58,7 @@ tokio::task_local! {
     pub static CURRENT_ACTOR: Arc<str>;
 }
 
-/// Who asked and why. Carried by every command so audit and policy can attach later.
+/// Who asked and why. Carried by every command for audit and policy.
 #[derive(Debug, Clone)]
 pub struct CmdCtx {
     pub actor: Option<Arc<str>>,

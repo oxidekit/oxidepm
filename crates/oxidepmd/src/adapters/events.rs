@@ -101,7 +101,7 @@ pub struct AdapterEvent {
     /// From the hub's own counter.
     pub seq: u64,
     pub at: DateTime<Utc>,
-    /// `started`, `exited`, `killed`, `disabled`, `failed`; later also `imported` and `rolled_back`.
+    /// `started`, `exited`, `killed`, `disabled`, `failed`, `imported` or `rolled_back`.
     pub kind: String,
     /// The adapter it is about.
     pub adapter: String,

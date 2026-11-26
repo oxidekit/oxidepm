@@ -102,8 +102,7 @@ impl Harness {
         spec
     }
 
-    /// Like [`cmd`](Self::cmd), with a JSON object merged over the spec. Fields that do not exist
-    /// yet are rejected by serde only when a test sets them, so tests for later steps compile today.
+    /// Like [`cmd`](Self::cmd), with a JSON object recursively merged into the spec.
     pub fn cmd_with(&self, name: &str, sh: &str, overlay: serde_json::Value) -> AppSpec {
         let mut value = serde_json::to_value(self.cmd(name, sh)).expect("spec to json");
         merge(&mut value, overlay);

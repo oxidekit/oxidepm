@@ -1,5 +1,4 @@
-//! One parser for `.env` files, shared by the config loader (and, later, the
-//! CLI).
+//! Parser for `.env` files used by the config loader.
 //!
 //! Rules:
 //! - blank lines and lines starting with `#` are ignored;

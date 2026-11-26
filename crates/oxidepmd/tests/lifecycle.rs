@@ -1,5 +1,4 @@
 //! Characterisation of start / stop / restart / delete against real processes.
-//! Everything here passes on the legacy supervisor and must keep passing through the rebuild.
 
 mod common;
 
@@ -267,7 +266,7 @@ async fn stop_kills_live_child_of_unhealthy_app() {
     ))
     .await
     .expect("start");
-    // The legacy checker waits 5 s before its first probe.
+    // The first probe runs after the start period.
     let state = h
         .wait_until_for(
             "life-unhealthy-stop",

@@ -189,7 +189,7 @@ impl ActorId {
         Self { class, label, via }
     }
 
-    /// `class:label`, as written in logs, events and (later) the audit log.
+    /// `class:label`, as written in logs, events and the audit log.
     pub fn wire(&self) -> String {
         format!("{}:{}", self.class.as_str(), self.label)
     }

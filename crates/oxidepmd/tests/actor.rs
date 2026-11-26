@@ -21,8 +21,7 @@ fn slow_restart() -> serde_json::Value {
     json!({ "restart_policy": { "restart_delay_ms": 1500, "max_restarts": 5 } })
 }
 
-/// The crash is seen: the app waits for its restart (`backoff`; the legacy supervisor showed
-/// `errored`).
+/// Wait for the app to enter restart backoff after a crash.
 async fn wait_for_crash(h: &Harness, name: &str) {
     h.wait_until(name, "the crash to be seen", |s| {
         s.status == AppStatus::Backoff || (s.status == AppStatus::Errored && s.pid.is_none())
