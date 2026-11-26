@@ -1,6 +1,6 @@
 # Maintainer: Nayiem Willems <nayiem@mono-labs.org>
 pkgname=oxidepm
-_tag=v0.4.0-rc.8
+_tag=v0.4.0
 pkgver=${_tag#v}
 pkgver=${pkgver//-/}
 pkgrel=1
