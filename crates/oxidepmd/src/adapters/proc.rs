@@ -481,11 +481,6 @@ impl AdapterProc {
         self.child.wait().await.ok()
     }
 
-    /// Does anything of this adapter's process group still exist?
-    pub fn group_alive(&self) -> bool {
-        group_exists(self.child.pgid())
-    }
-
     /// The polite end, within `t.total()`: `shutdown`, then stdin closed, then SIGTERM to
     /// the group, then the kill walk. Whatever the adapter does, every process of its group is
     /// gone when this returns.
@@ -552,11 +547,6 @@ impl AdapterProc {
         }
         self.child.disarm();
         self.stderr_task.abort();
-    }
-
-    /// SIGKILL the group without waiting, for the second signal of a shutdown (`kill_all_now`).
-    pub fn kill_group_now(&self) {
-        kill_walk(self.child.pid() as i32, self.child.pgid());
     }
 }
 

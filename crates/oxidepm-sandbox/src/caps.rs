@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 
 /// The first Landlock ABI that can restrict connecting to pathname UNIX sockets.
 pub const LANDLOCK_ABI_UNIX_CONNECT: u32 = 9;
-/// The first Landlock ABI that can restrict binding TCP ports.
-pub const LANDLOCK_ABI_TCP_BIND: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SandboxCaps {

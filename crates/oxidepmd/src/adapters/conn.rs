@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use oxidepm_adapter_proto::codes::{self, rpc};
 use oxidepm_adapter_proto::messages::{method, CancelParams, InvokeOutputParams, OutputStream};
 use oxidepm_adapter_proto::{
-    to_params, AsyncFrameReader, ErrorObject, Frame, FrameError, Limits, Params, Read,
+    AsyncFrameReader, ErrorObject, Frame, FrameError, Limits, Params, Read,
 };
 use oxidepm_core::Error;
 use parking_lot::Mutex;
@@ -1228,11 +1228,6 @@ fn dispatch(shared: &Arc<Shared>, inbound: &Arc<dyn Inbound>, frame: Frame) {
             });
         }
     }
-}
-
-/// `params` for a request with no fields.
-pub fn empty_params() -> Params {
-    to_params(&serde_json::json!({})).unwrap_or_default()
 }
 
 #[cfg(test)]

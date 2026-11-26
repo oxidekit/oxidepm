@@ -948,11 +948,6 @@ impl RequestHandler {
         None
     }
 
-    /// The adapter host, for the connection task.
-    pub fn adapter_host(&self) -> Option<&Arc<AdapterHost>> {
-        self.adapters.as_ref()
-    }
-
     /// Checkpoint and close the database (graceful shutdown)
     pub async fn close_db(&self) {
         self.supervisor.close_db().await;

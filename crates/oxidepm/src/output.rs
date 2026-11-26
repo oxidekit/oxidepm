@@ -524,50 +524,6 @@ pub fn print_logs(lines: &[String]) {
     }
 }
 
-/// JSON wrapper for generic responses
-#[derive(Serialize)]
-pub struct ResponseJson<T: Serialize> {
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<T>,
-}
-
-/// Print a success message in JSON format if enabled
-#[allow(dead_code)]
-pub fn print_success_json<T: Serialize>(message: &str, data: Option<T>) {
-    if is_json_mode() {
-        let response = ResponseJson {
-            success: true,
-            message: Some(message.to_string()),
-            data,
-        };
-        if let Ok(json) = serde_json::to_string_pretty(&response) {
-            println!("{}", json);
-        }
-    } else {
-        print_success(message);
-    }
-}
-
-/// Print an error message in JSON format if enabled
-#[allow(dead_code)]
-pub fn print_error_json(message: &str) {
-    if is_json_mode() {
-        let response: ResponseJson<()> = ResponseJson {
-            success: false,
-            message: Some(message.to_string()),
-            data: None,
-        };
-        if let Ok(json) = serde_json::to_string_pretty(&response) {
-            eprintln!("{}", json);
-        }
-    } else {
-        print_error(message);
-    }
-}
-
 /// Show the plan of a rehearsal. With `--json` the output is the plan itself. A plan the policy
 /// refuses is shown and returned as an error (exit code 1), like the real request would be.
 pub fn print_plan(plan: &DryRunPlan) -> anyhow::Result<()> {

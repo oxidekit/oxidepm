@@ -399,11 +399,6 @@ impl AppSpec {
         serde_json::from_value(value)
     }
 
-    /// Deserialise an array of specs from JSON.
-    pub fn list_from_json_str(content: &str) -> serde_json::Result<Vec<Self>> {
-        serde_json::from_str(content)
-    }
-
     /// Create a new AppSpec. Panics if the name is not a valid app name.
     /// Use `try_new` for a fallible version.
     pub fn new(name: String, mode: Runtime, command: String, cwd: PathBuf) -> Self {
@@ -456,23 +451,8 @@ impl AppSpec {
         self
     }
 
-    pub fn with_instances(mut self, instances: u32) -> Self {
-        self.instances = instances;
-        self
-    }
-
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
-        self
-    }
-
-    pub fn with_port_range(mut self, start: u16, end: u16) -> Self {
-        self.port_range = Some((start, end));
-        self
-    }
-
-    pub fn with_health_check(mut self, health_check: HealthCheck) -> Self {
-        self.health_check = Some(health_check);
         self
     }
 
@@ -519,11 +499,6 @@ impl AppSpec {
 
     pub fn with_args(mut self, args: Vec<String>) -> Self {
         self.args = args;
-        self
-    }
-
-    pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
-        self.env = env;
         self
     }
 }
@@ -905,11 +880,6 @@ impl RunState {
 
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
-        self
-    }
-
-    pub fn with_instance(mut self, instance_id: u32) -> Self {
-        self.instance_id = Some(instance_id);
         self
     }
 }

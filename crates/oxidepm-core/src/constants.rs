@@ -71,25 +71,6 @@ pub const OXIDEPM_ACTOR_ENV: &str = "OXIDEPM_ACTOR";
 /// Default log directory name
 pub const LOGS_DIR: &str = "logs";
 
-/// Default config file names to search for (in priority order)
-pub const CONFIG_FILES: &[&str] = &[
-    // TOML formats
-    "oxidepm.config.toml",
-    "oxidepm.toml",
-    "ecosystem.config.toml",
-    // YAML formats
-    "oxidepm.config.yaml",
-    "oxidepm.config.yml",
-    "oxidepm.yaml",
-    "oxidepm.yml",
-    "ecosystem.config.yaml",
-    "ecosystem.config.yml",
-    // JSON formats
-    "oxidepm.config.json",
-    "oxidepm.json",
-    "ecosystem.config.json",
-];
-
 /// Default restart delay in milliseconds
 pub const DEFAULT_RESTART_DELAY_MS: u64 = 500;
 

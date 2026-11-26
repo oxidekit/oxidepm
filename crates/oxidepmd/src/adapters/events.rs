@@ -52,22 +52,6 @@ pub const FAMILY_LIFECYCLE: &str = "lifecycle";
 /// The family of the adapter system's own events.
 pub const FAMILY_ADAPTER: &str = "adapter";
 
-/// The keys of a lifecycle event's `data`, and nothing else. The kind of the event is the
-/// event's own `kind`, not repeated here.
-pub const LIFECYCLE_DATA_KEYS: &[&str] = &[
-    "cause",
-    "actor",
-    "pid",
-    "exit_code",
-    "exit_signal",
-    "restarts",
-    "memory_mb",
-    "limit_mb",
-    "reason",
-];
-/// The keys of an `adapter` event's `data`.
-pub const ADAPTER_DATA_KEYS: &[&str] = &["adapter", "version", "reason"];
-
 /// The longest `reason` an event carries, in characters.
 pub const REASON_MAX_CHARS: usize = 1024;
 
@@ -321,10 +305,6 @@ impl ServiceQueue {
     /// Everything dropped over the life of the queue.
     pub fn dropped_total(&self) -> u64 {
         self.state.lock().dropped_total
-    }
-
-    pub fn is_live(&self) -> bool {
-        self.state.lock().live
     }
 
     /// Begin queuing. [`ServiceQueue::attach`] does this; a test that drives a queue by hand may too.

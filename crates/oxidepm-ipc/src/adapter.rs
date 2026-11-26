@@ -141,11 +141,6 @@ impl AdapterRequest {
     pub fn is_slow(&self) -> bool {
         !self.is_read()
     }
-
-    /// Whether the answer arrives as a stream of lines (`more` on all but the last).
-    pub fn is_streamed(&self) -> bool {
-        matches!(self, AdapterRequest::Invoke(_))
-    }
 }
 
 /// One installed adapter, as `list` and `info` show it.
