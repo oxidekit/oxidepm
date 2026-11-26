@@ -26,7 +26,7 @@ OxidePM is a process manager written in Rust for any runtime. Adapters add langu
 - **Web API + Prometheus** — REST API and WebSocket from the `ui-web` adapter; the `/metrics` endpoint for Grafana comes from the `exporter-prometheus` adapter
 - **Multi-channel notifications** — Telegram, Discord, Slack, and signed HTTP webhooks, from the `notifier` adapter
 - **Self-update** — `oxidepm update` verifies and installs signed releases
-- **JSON output** — `--json` flag for machine-readable output on all commands
+- **JSON output** — `--json` flag for machine-readable output on most commands
 - **Git clone & start** — The `git-start` adapter clones and launches projects, with optional dependency installation
 
 ## Installation
@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/oxidekit/oxidepm/prod/scripts/insta
 With `minisign` present, a missing signature is allowed only for an explicitly requested
 release older than 0.4.0-rc.4, and only when GitHub returns HTTP 404 for the signature.
 Set `OXIDEPM_VERSION` to the version or tag, for example
-`OXIDEPM_VERSION=0.4.0-rc.3 sh install.sh`. The script still checks SHA-256.
+`OXIDEPM_VERSION=0.3.2 sh install.sh`. The script still checks SHA-256.
 
 ### APT (Debian/Ubuntu)
 
@@ -111,8 +111,8 @@ Pre-built binaries available on the [Releases page](https://github.com/oxidekit/
 0.4.0-rc.4 is the first signed release. Download the exact archive for your platform,
 `checksums.txt`, and `checksums.txt.minisig` from the same release tag. Verify the
 signature with a public key from the [release signing policy](SECURITY.md).
-For `v0.4.0-rc.4`, use the current key and require this command to succeed and print
-exactly `oxidepm release checksums tag=v0.4.0-rc.4`.
+For `v0.4.0`, use the current key and require this command to succeed and print
+exactly `oxidepm release checksums tag=v0.4.0`.
 
 ```sh
 PUBLIC_KEY='RWQMeVEZKn2/BHzgJLldWbECE2BqKV4a0rmNXEzn5N0lxrSi/dDuFjHC'
@@ -134,9 +134,8 @@ before extracting the archive.
 Place `oxidepm`, `oxidepmd` and `oxidepm-sandbox` in your prefix's `bin`, and copy
 `share/oxidepm/adapters` to the same path under the prefix. On Linux, import the runtimes as shown below.
 
-From 0.4.0-rc.1 through rc.3, run `oxidepm update --version 0.4.0-rc.4` to bootstrap.
-Those clients check SHA-256 during the upgrade. The new CLI verifies signatures on future
-updates. From 0.3.x, use the manual verification and installation steps above.
+Releases before 0.4.0-rc.4 are unsigned and their `oxidepm update` does not verify
+signatures, so upgrade from them with the manual install and verification steps above.
 
 After `oxidepm update`, restart the daemon and run `oxidepm adapter update --all`
 to update your installed bundled adapters from the new release.
@@ -283,15 +282,16 @@ oxidepm stop my-app
 | `web [status\|new-key]` | Provided by the `ui-web` adapter ([install the adapter](#optional-adapters)): say where the web API listens, print its access key once, or replace the key |
 | `notify status\|test\|events\|severity\|telegram\|remove` | Provided by the `notifier` adapter ([install the adapter](#optional-adapters)): show, test and configure the notification channels |
 | `ping` | Check daemon health |
-| `update [--version X] [--force]` | Install the latest release or an explicit version such as `0.4.0-rc.4`. The updater verifies the signature and release tag of `checksums.txt` and checks the SHA-256 for the exact `oxidepm-<target>.tar.gz` asset before installation. A signed downgrade requires both an explicit `--version` and `--force`. The updater stops a running daemon, keeps the old files as `.pre-update`, and restores them if the new `oxidepm --version` fails. |
+| `update [--version X] [--force]` | Install the latest release or an explicit version such as `0.4.0`. The updater verifies the signature and release tag of `checksums.txt` and checks the SHA-256 for the exact `oxidepm-<target>.tar.gz` asset before installation. A signed downgrade requires both an explicit `--version` and `--force`. The updater stops a running daemon, keeps the old files as `.pre-update`, and restores them if the new `oxidepm --version` fails. |
+| `adapter <import\|list\|search\|info\|enable\|disable\|remove\|update>` | Manage adapters, the separate programs that add features: `import` fetches and verifies one and shows what it needs, `enable` gives it the rights you accept and starts it, `disable` stops it and takes its rights away, `remove` deletes its installed files (its state directory stays unless `--purge`), `update` installs a newer release or goes back to the previous one, and `list`, `search` and `info` show what is installed or what the catalogue offers ([Optional adapters](#optional-adapters)) |
 | `init [dir]` | Generate a project config through the init adapter |
 | `deploy <host>` | Pull code and restart processes over SSH through the deploy adapter |
 | `diff <host>` | Show recent remote commits and working-tree changes through the deploy adapter |
 | `env list/set/unset` | `list` shows the keys of an app's environment; `set` and `unset` are refused (the daemon cannot change a saved environment: use `--env` or the config file) |
 | `top` | Real-time process resource monitor |
-| `backup [--output file]` | Export config + process list to tarball |
+| `backup [--output file]` | Back up the saved process list, state database and adapter registry to a tarball |
 | `restore <file>` | Restore from backup tarball (the daemon must not be running) |
-| `completions <shell>` | Generate shell completions (bash/zsh/fish) |
+| `completions <shell>` | Generate shell completions (bash/zsh/fish/elvish/powershell) |
 | `man` | Generate man page |
 | `kill` | Stop daemon and all processes |
 
@@ -630,8 +630,8 @@ oxidepm web              # where it listens, and its access key (shown once)
 | `/api/processes/:selector/restart` | POST | Yes | Restart process |
 | `/api/processes/:selector/logs?lines=N` | GET | Yes | Process logs; `@tag` returns the lines of every app with the tag |
 | `/api/ping` | GET | Yes | Ask the daemon whether it is alive |
-| `/api/save` | POST | Yes | Save process list |
-| `/api/resurrect` | POST | Yes | Start the saved apps that are not up |
+| `/api/save` | POST | Yes | Save process list (the daemon refuses it below the `admin` level) |
+| `/api/resurrect` | POST | Yes | Start the saved apps that are not up (the daemon refuses it below the `admin` level) |
 | `/ws` | WebSocket | Yes | The daemon's lifecycle events as they happen (`{"type":"event","kind":"stopped","app":{...},...}`) |
 
 Errors are `{"success":false,"error":"...","code":"E_..."}` with the HTTP status the code deserves (403 `E_POLICY_DENIED`, 404, 429, 503 when the daemon cannot be reached).
@@ -717,7 +717,7 @@ oxidepm completions fish > ~/.config/fish/completions/oxidepm.fish
 
 ## Backup & Restore
 
-Migrate your config to another machine:
+Migrate the saved process list, state database and adapter registry to another machine:
 
 ```bash
 # Export
@@ -770,6 +770,7 @@ oxidepm (CLI) ──IPC──> oxidepmd (daemon)
 - `oxidepm-logs` - Log rotation + streaming
 - `oxidepm-db` - SQLite persistence
 - `oxidepm-health` - Health check monitoring (HTTP, TCP, script)
+- `oxidepm-fetch` - Verified downloads, safe archive extraction and atomic install (used by `update` and `adapter import`)
 
 **IPC:** the CLI and the daemon talk over the Unix socket `daemon.sock` (mode 0600; the daemon drops connections from any other user; `OXIDEPM_SOCKET` names another socket for the CLI). A request is one line of JSON in an envelope that carries the protocol version (2) and a request id, and the answer is one line; a line may be up to 10 MiB and a connection that sends nothing for 5 minutes is closed. The daemon also binds `agent.sock`, whose every connection counts as an AI agent (see [AI-SAFETY](docs/AI-SAFETY.md)); there a line may be up to 1 MiB, 32 connections are served at a time and a connection that sends nothing for 60 seconds is closed. A config file is sent as one `StartBatch` request that answers per app, so the CLI and the daemon must come from the same release for `oxidepm start <config file>`. The daemon takes an exclusive lock on `oxidepmd.lock`, so there is one daemon per home.
 
@@ -785,8 +786,12 @@ All data stored in `~/.oxidepm/` (the `OXIDEPM_HOME` environment variable names 
 ├── daemon.toml     # optional daemon settings (shutdown_budget_secs, launch_concurrency, agent_socket, reuse_plan)
 ├── state.db        # SQLite database (full app specs and the two policy markers, schema version 2; an old oxidepm.db is not migrated)
 ├── daemon.log      # Fatal daemon startup errors
+├── daemon.log.<date>  # The daemon's log: one file a day, the last 7 are kept
 ├── saved.json      # Saved process list (version 1; written atomically, mode 0600; a file from an older release is refused: run `oxidepm save` again)
 ├── pids.json       # Live app processes; if the daemon dies by SIGKILL, the next daemon kills what is still listed here before it starts anything
+├── adapters.db     # The installed adapters, their grants and the launch plans the daemon keeps for them (created by the first adapter import or enable)
+├── adapter-pids.json  # Live adapter processes; handled like pids.json by the next daemon
+├── audit/          # The audit log (`audit.jsonl`, `audit-security.jsonl`), read with `oxidepm audit`
 ├── adapters/state/git-start/clones/<hash>  # Git checkouts
 └── logs/           # Process log files
     ├── app-out.log
@@ -821,7 +826,7 @@ All data stored in `~/.oxidepm/` (the `OXIDEPM_HOME` environment variable names 
 | Project init | ✅ | ❌ | The init adapter scans and generates a config |
 | SSH deploy | ✅ | ✅ | The deploy adapter adds `deploy` and `diff` |
 | Real-time top | ✅ | ❌ | `oxidepm top` — htop for processes |
-| Env management | ✅ | ✅ | `oxidepm env list/set/unset` |
+| Env management | Partial | ✅ | `oxidepm env list` (values redacted); `set` and `unset` are refused, use `--env` or the config file |
 | Project setup | ✅ | ❌ | `check --fix` can install Node dependencies and create `.env` |
 | Event hooks | ✅ | ✅ | Run scripts on start/stop/crash |
 | **Monitoring** |

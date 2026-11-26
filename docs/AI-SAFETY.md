@@ -23,7 +23,7 @@ oxidepm logs <name>             # Process log output
 oxidepm env list <name>         # Environment keys of an app (values are redacted)
 oxidepm describe <name>         # Show the command that would run, without starting it
 oxidepm ping                    # Daemon health check
-oxidepm monit | top             # Interactive monitors (monit is the ui-tui adapter)
+oxidepm top                     # Interactive resource monitor (read-only)
 oxidepm --version               # Version info
 ```
 
@@ -42,6 +42,7 @@ oxidepm --version               # Version info
 | `oxidepm init [dir]` | Caution | The init adapter writes a new project config. Preview with `--dry-run` |
 | `oxidepm git-start <url>` | Caution | The git-start adapter prepares a checkout. Starting the app and explicit dependency installs can run project code |
 | `oxidepm deploy <host>` and `oxidepm diff <host>` | Caution | Both verbs come from the deploy adapter. Deploy pulls code and restarts remote processes. Diff inspects the remote checkout |
+| `oxidepm monit` | Caution | A session verb of the `ui-tui` adapter: the terminal dashboard can stop and restart apps, and asks for `y` or `n` before it does. An `ai` actor cannot open it |
 | `oxidepm update` | Medium | Replaces the installed oxidepm binaries and stops a running daemon |
 
 Selectors can be a name, an id, `@tag`, or `all`. Treat `all` as a higher-risk variant of every command that accepts it.
@@ -53,7 +54,7 @@ Selectors can be a name, an id, `@tag`, or `all`. Treat `all` as a higher-risk v
 | `oxidepm kill` | Stops the daemon and every managed process |
 | `oxidepm delete <selector>` | Stops the process and removes it from management (and from the database) |
 | `oxidepm flush <selector>` | Truncates the active log files (stdout and stderr) of the process — the log contents are lost; rotated files are not touched |
-| `oxidepm restore <file>` | Restores config and saved state from a backup tarball, overwriting current settings (the daemon must not be running) |
+| `oxidepm restore <file>` | Restores the saved process list, state database and adapter registry from a backup tarball, overwriting the files that are there now (the daemon must not be running) |
 | `oxidepm policy set <selector> --protected=<bool> --ai-control=<bool>` | Changes who may stop, restart or reload an app. People only: an AI cannot protect, unprotect or open an app |
 | `oxidepm show <name> --reveal` | Prints environment values and hook scripts that are otherwise `<redacted>` or `<set>`; the daemon logs each reveal. Do not let an AI run it, its output ends up in the conversation |
 
@@ -175,7 +176,7 @@ Every request has a tier. A person (`human`, any label) may make every request. 
 |---|---|---|
 | safe | `status`, `show`, `describe`, `logs`, `ping`, `hello` | yes, on every app, protected ones too |
 | caution | `stop`, `restart`, `reload` | only on an app marked `ai_control` and not `protected` |
-| dangerous | `start` (and a config file: a spec is arbitrary code), `delete`, `flush`, `kill`, `save`, `resurrect`, `show --reveal`, `describe --reveal` | never |
+| dangerous | `start` (and a config file: a spec is arbitrary code), `delete`, `flush`, `kill`, `save`, `resurrect`, `show --reveal` | never |
 
 Two markers belong to an app and are off by default: `ai_control` (`oxidepm start --ai-control`, or `ai_control = true` in the config file) lets AI actors stop, restart and reload it; `protected` (`--protected`, `protected = true`) makes it read-only for every non-human actor, whatever `ai_control` says. An `ai` actor must name its apps (a name or an id, at most 10): `all` and `@tag` selectors are refused for stop, restart and reload. The check is all or nothing: if one app of the request (an instance of a cluster counts) is not open to the actor, nothing runs and the error names the apps that are not. Whichever apps passed the check are the ones acted on; an app that gains a tag or is created while the request is being checked is not touched.
 
