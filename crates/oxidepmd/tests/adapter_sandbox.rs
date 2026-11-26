@@ -1064,6 +1064,34 @@ fn is_refused(report: &SelfTestReport, name: &str) -> bool {
 }
 
 #[tokio::test]
+async fn selftest_names_a_socket_path_that_is_too_long() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("é".repeat(60));
+    std::fs::create_dir(&base).unwrap();
+    let profile = profile_in(dir.path(), &json!({}));
+    let env = SelftestEnv {
+        daemon_socket: dir.path().join("home/daemon.sock"),
+        home_file: dir.path().join("home/adapters.db"),
+        scratch_base: Some(base.clone()),
+    };
+    let error = selftest(&launcher_bin(), &profile, &env, false)
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("set TMPDIR to a shorter directory"),
+        "{error}"
+    );
+    let path = error.split('\'').nth(1).expect("the socket path is quoted");
+    assert!(std::path::Path::new(path).starts_with(&base), "{error}");
+    assert!(path.ends_with("/probe.sock"), "{error}");
+    assert!(
+        error.contains(&format!("{} bytes (limit 107 bytes)", path.len())),
+        "{error}"
+    );
+    assert!(base.read_dir().unwrap().next().is_none());
+}
+
+#[tokio::test]
 async fn selftest_report_matches_what_the_fixture_observes() {
     need!(caps => caps.landlock_abi.is_some() && caps.seccomp, "needs Landlock and seccomp");
     let dir = tempfile::tempdir().unwrap();
@@ -1354,6 +1382,38 @@ fn lone_daemon_binary(dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_oxidepmd"), &bin).unwrap();
     bin
+}
+
+#[tokio::test]
+async fn adapter_enable_runs_the_selftest_with_a_long_tmpdir() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let home = dir.path().join("home");
+    let tmpdir = dir
+        .path()
+        .join("t".repeat(81 - dir.path().as_os_str().len()));
+    std::fs::create_dir(&tmpdir).unwrap();
+    install(
+        &home,
+        InstallSpec {
+            enabled: false,
+            perms: Some(json!({
+                "env_pass": [],
+                "fs": { "read": ["$STATE"], "write": ["$STATE"] },
+                "spawn": { "mode": "none" },
+            })),
+            ..InstallSpec::tool("longtmp", json!([]))
+        },
+    )
+    .await;
+    let daemon = DaemonProc::spawn_with_env(&home, &[("TMPDIR", tmpdir.to_str().unwrap())]);
+    daemon.wait_for_boot();
+    let reply = daemon.rpc(json!({
+        "type": "adapter", "op": "enable", "name": "longtmp", "yes": true,
+        "allow_unenforced": true,
+    }));
+    assert_eq!(reply["kind"], "enabled", "{reply}");
+    assert!(tmpdir.read_dir().unwrap().next().is_none());
+    let _ = daemon.rpc(json!({ "type": "kill" }));
 }
 
 #[tokio::test]

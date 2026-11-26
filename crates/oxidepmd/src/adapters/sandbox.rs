@@ -6,6 +6,7 @@
 //! temporary directory and on an abstract socket, so "reachable" is observed and not assumed).
 //! `enable` stores the result as the adapter's `enforced_json`.
 
+use std::mem::{offset_of, size_of};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -13,10 +14,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use nix::libc::sockaddr_un;
 use oxidepm_sandbox::{Profile, SelfTestReport, SelftestPlan};
 
 /// How long the helper may take: seven file and socket attempts and one exec.
 const SELFTEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The pathname occupies the trailing `sun_path` array, with one byte for its NUL.
+const MAX_SOCKET_PATH_BYTES: usize =
+    size_of::<sockaddr_un>() - offset_of!(sockaddr_un, sun_path) - 1;
 
 /// What the daemon knows that the helper needs.
 pub struct SelftestEnv {
@@ -24,8 +29,8 @@ pub struct SelftestEnv {
     pub daemon_socket: PathBuf,
     /// A file inside the daemon home (`adapters.db`); the helper tries to read it.
     pub home_file: PathBuf,
-    /// Where the private directory of the test is made; `None` is the system's temporary
-    /// directory.
+    /// Where the private directory of the test is made; `None` uses the system's temporary
+    /// directory, falling back to `/tmp` if the socket path is too long.
     pub scratch_base: Option<PathBuf>,
 }
 
@@ -56,19 +61,34 @@ fn true_program() -> Option<PathBuf> {
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(base: Option<&Path>) -> std::io::Result<Self> {
+    fn new(base: Option<&Path>) -> Result<(Self, PathBuf), String> {
         static N: AtomicU32 = AtomicU32::new(0);
         let name = format!(
             "oxidepm-selftest-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         );
-        let path = base
+        let mut path = base
             .map(Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir)
-            .join(name);
-        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
-        Ok(Scratch(path))
+            .join(&name);
+        let mut socket = path.join("probe.sock");
+        if base.is_none() && socket.as_os_str().len() > MAX_SOCKET_PATH_BYTES {
+            path = Path::new("/tmp").join(name);
+            socket = path.join("probe.sock");
+        }
+        let length = socket.as_os_str().len();
+        if length > MAX_SOCKET_PATH_BYTES {
+            return Err(format!(
+                "the self-test socket path '{}' is {length} bytes (limit {MAX_SOCKET_PATH_BYTES} bytes); set TMPDIR to a shorter directory",
+                socket.display()
+            ));
+        }
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|e| format!("cannot make a directory for the self-test: {e}"))?;
+        Ok((Scratch(path), socket))
     }
 }
 
@@ -98,8 +118,7 @@ pub async fn selftest(
     env: &SelftestEnv,
     allow_unenforced: bool,
 ) -> Result<SelfTestReport, String> {
-    let scratch = Scratch::new(env.scratch_base.as_deref())
-        .map_err(|e| format!("cannot make a directory for the self-test: {e}"))?;
+    let (scratch, socket_path) = Scratch::new(env.scratch_base.as_deref())?;
     let outside_dir = scratch.0.join("outside");
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -112,7 +131,6 @@ pub async fn selftest(
     // the services the helper tries to reach
     let stop = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::new();
-    let socket_path = scratch.0.join("probe.sock");
     let pathname = UnixListener::bind(&socket_path)
         .map_err(|e| format!("cannot listen for the self-test: {e}"))?;
     threads.push(listen(pathname, Arc::clone(&stop)));
