@@ -728,6 +728,8 @@ scp my-server-backup.tar.gz user@newserver:~
 ssh user@newserver "oxidepm restore my-server-backup.tar.gz && oxidepm resurrect"
 ```
 
+A backup holds the adapter registry but not the adapter programs. After a restore every adapter is disabled and has no rights until you enable it again.
+
 ## Remote Diff
 
 Use the enabled deploy adapter to show recent commits, status and a diff summary over SSH.

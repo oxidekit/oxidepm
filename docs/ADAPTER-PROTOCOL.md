@@ -71,7 +71,7 @@ The `provider.*` and `gate.*` method names are reserved.
 
 ## Session verbs
 
-A verb whose manifest entry says `"mode": "session"` needs the terminal (a monitor) or the pipes of the program that started `oxidepm` (an MCP server over stdio). Only a `tool` adapter can provide one. The adapter's stdin and stdout are not the protocol channel for such a verb; everything else is unchanged.
+A verb whose manifest entry says `"mode": "session"` needs the terminal (a monitor) or the pipes of the program that started `oxidepm` (an MCP server over stdio). Only a `tool` adapter can run one; the daemon refuses to open a session verb of a `service` adapter. The adapter's stdin and stdout are not the protocol channel for such a verb; everything else is unchanged.
 
 1. `oxidepm <verb>` asks the daemon for a session. The daemon applies the policy and answers with a socket and a single-use token. The CLI connects, sends its own standard input and output as open descriptors with its first line, and waits.
 2. The daemon starts the adapter under the same launcher and profile as any other call, with the executable it checked against the digest recorded at import. The adapter's **stdin and stdout are the descriptors the CLI handed over** (a terminal, or pipes); stderr is still its log and never reaches the terminal.
@@ -79,7 +79,7 @@ A verb whose manifest entry says `"mode": "session"` needs the terminal (a monit
 4. From the second line on it is the protocol described above, over that connection instead of stdin and stdout: the daemon sends `initialize`, then `initialized`, then `command.invoke` with `tty` set when the CLI's stdin is a terminal. The adapter's `host.request` calls are made as `adapter:<name>` and recorded in the audit log with the channel `adapter_session`.
 5. The answer to `command.invoke` ends the session; its `exit_code` is the exit code of `oxidepm <verb>`. The session also ends when the CLI goes away (the adapter's process group is killed), when the adapter is disabled or the daemon stops, and after 12 hours at most. At most 4 sessions exist at once, pending ones included.
 
-The adapter runs in the daemon's session, not the terminal's, so it has no controlling terminal: it cannot open `/dev/tty`, and a Ctrl-C typed at a terminal that is not in raw mode reaches the CLI, which ends the session. A terminal in raw mode delivers Ctrl-C as a key. When the window changes size the CLI tells the daemon, which sends `SIGWINCH` to the adapter's process group; the size is read with `TIOCGWINSZ` on descriptor 1. The CLI puts back the terminal settings it found when the session ends, whatever the adapter left.
+The adapter runs in the daemon's session, not the terminal's, so it cannot count on a controlling terminal or on `/dev/tty`, and a Ctrl-C typed at a terminal that is not in raw mode reaches the CLI, which ends the session. A terminal in raw mode delivers Ctrl-C as a key. When the window changes size the CLI tells the daemon, which sends `SIGWINCH` to the adapter's process group; the size is read with `TIOCGWINSZ` on descriptor 1. The CLI puts back the terminal settings it found when the session ends, whatever the adapter left.
 
 An `ai:*` claim may open a session only for a verb of an adapter whose manifest says `ai_driven`, and only while that adapter holds no more than the `read` level; what such a session writes is limited to the adapter's state directory. A person may open any session verb.
 
