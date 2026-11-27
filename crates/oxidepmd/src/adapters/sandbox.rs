@@ -10,7 +10,7 @@ use std::mem::{offset_of, size_of};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,20 +62,15 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(base: Option<&Path>) -> Result<(Self, PathBuf), String> {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let name = format!(
-            "oxidepm-selftest-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        );
-        let mut path = base
+        let name = "oxidepm-selftest-XXXXXX";
+        let mut template = base
             .map(Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir)
-            .join(&name);
-        let mut socket = path.join("probe.sock");
+            .join(name);
+        let mut socket = template.join("probe.sock");
         if base.is_none() && socket.as_os_str().len() > MAX_SOCKET_PATH_BYTES {
-            path = Path::new("/tmp").join(name);
-            socket = path.join("probe.sock");
+            template = Path::new("/tmp").join(name);
+            socket = template.join("probe.sock");
         }
         let length = socket.as_os_str().len();
         if length > MAX_SOCKET_PATH_BYTES {
@@ -84,10 +79,9 @@ impl Scratch {
                 socket.display()
             ));
         }
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
+        let path = nix::unistd::mkdtemp(&template)
             .map_err(|e| format!("cannot make a directory for the self-test: {e}"))?;
+        let socket = path.join("probe.sock");
         Ok((Scratch(path), socket))
     }
 }
@@ -181,4 +175,29 @@ pub async fn selftest(
     let text = result?;
     serde_json::from_str(&text)
         .map_err(|e| format!("the sandbox self-test printed something that is not a report: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn scratch_directories_have_a_random_suffix_and_private_mode() {
+        let base = tempfile::tempdir().unwrap();
+        let (first, socket) = Scratch::new(Some(base.path())).unwrap();
+        let (second, _) = Scratch::new(Some(base.path())).unwrap();
+        let name = first.0.file_name().unwrap().to_str().unwrap();
+        let suffix = name.strip_prefix("oxidepm-selftest-").unwrap();
+        assert_eq!(suffix.len(), 6);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert_ne!(first.0, second.0);
+        assert_eq!(socket.parent(), Some(first.0.as_path()));
+        assert_eq!(
+            std::fs::metadata(&first.0).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(first);
+        assert!(!socket.parent().unwrap().exists());
+    }
 }
