@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -687,6 +688,39 @@ fn plan_with_relative_program_or_nul_or_huge_args_is_invalid() {
         let reply = rig.start(&format!("fx-bad-{n}"), json!({}));
         assert_eq!(code_of(&reply), "E_ADAPTER_INVALID", "{what}: {reply}");
         assert!(rig.app(&format!("fx-bad-{n}")).is_none(), "{what}: no row");
+    }
+}
+
+#[test]
+fn a_built_executable_requires_a_successful_build_step() {
+    let mut failed_build = step("build", json!(["false"]), 30);
+    failed_build["optional"] = json!(true);
+    for steps in [json!([]), json!([failed_build])] {
+        let rig = runtime_rig(
+            |work| {
+                let artifact = work.join("app");
+                std::fs::write(&artifact, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                script(
+                    steps,
+                    json!({ "program": artifact, "cwd": work, "binary_path": artifact }),
+                )
+            },
+            &["false"],
+            &[],
+            &[],
+        );
+        let reply = rig.start("built-app", json!({}));
+        assert_eq!(code_of(&reply), "E_ADAPTER_INVALID", "{reply}");
+        assert!(
+            reply["message"]
+                .as_str()
+                .unwrap()
+                .contains("a built executable requires a successful build step"),
+            "{reply}"
+        );
+        assert!(rig.app("built-app").is_none());
     }
 }
 

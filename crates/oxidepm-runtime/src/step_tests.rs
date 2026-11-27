@@ -454,6 +454,30 @@ fn an_absolute_program_can_name_the_resolved_manifest_program() {
 }
 
 #[test]
+fn an_absolute_program_must_match_the_declared_program_on_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let other = dir.path().join("tool");
+    for path in [bin.join("tool"), other.clone()] {
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let app = spec(dir.path());
+    let rules = rules(&["tool"], &[], &[]);
+    let env = vec![("PATH".into(), bin.display().to_string())];
+    let program = other.to_str().unwrap();
+
+    let steps = validate_steps_with(&[step("build", &[program])], &app, &rules, &env);
+    let plan = validate_plan_with(&plan(program, dir.path()), &app, &rules, &env);
+    assert!(
+        matches!(steps, Err(Error::AdapterInvalid(_)))
+            && matches!(plan, Err(Error::AdapterInvalid(_))),
+        "expected both validations to refuse the program\nsteps: {steps:?}\nplan: {plan:?}"
+    );
+}
+
+#[test]
 fn an_absolute_plan_keeps_its_declared_invocation_name() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
