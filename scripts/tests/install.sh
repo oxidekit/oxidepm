@@ -105,6 +105,12 @@ for mode in user root sudo; do
     prefix="$work/$mode/bin"
     mkdir -p "$prefix"
     if [ "$mode" = sudo ]; then chmod 500 "$prefix"; fi
+    parent_mode=755
+    if [ "$mode" = root ]; then
+        parent_mode=750
+        mkdir -p "$work/$mode/share/oxidepm"
+        chmod "$parent_mode" "$work/$mode/share" "$work/$mode/share/oxidepm"
+    fi
     : > "$work/tar-args"
     : > "$work/install-args"
     if ! (
@@ -124,7 +130,11 @@ for mode in user root sudo; do
         test "$(stat -c %a "$prefix/$binary")" = 755
     done
     for dir in share share/oxidepm "$bundle" "$bundle/nested"; do
-        test "$(stat -c '%a %u %g' "$work/$mode/$dir")" = "755 $(id -u) $(id -g)" || {
+        case "$dir" in
+            share|share/oxidepm) dir_mode=$parent_mode ;;
+            *) dir_mode=755 ;;
+        esac
+        test "$(stat -c '%a %u %g' "$work/$mode/$dir")" = "$dir_mode $(id -u) $(id -g)" || {
             printf 'Unexpected permissions or ownership on %s in %s install\n' "$dir" "$mode" >&2
             exit 1
         }

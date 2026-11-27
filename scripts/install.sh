@@ -223,13 +223,15 @@ install_adapters() {
     if [ ! -f "$BUNDLE_SRC/index.json" ]; then
         return 0
     fi
-    BUNDLE_DIR="$(dirname "$INSTALL_DIR")/share/oxidepm/adapters"
+    share_dir="$(dirname "$INSTALL_DIR")/share"
+    BUNDLE_DIR="$share_dir/oxidepm/adapters"
     info "Installing the adapters of this release to $BUNDLE_DIR"
     if [ "$1" = sudo ]; then
         set -- sudo
     else
         set --
     fi
+    "$@" mkdir -p -m 0755 -- "$share_dir" "$share_dir/oxidepm"
     "$@" rm -rf -- "$BUNDLE_DIR"
     install_bundle_tree "$BUNDLE_SRC" "$BUNDLE_DIR" "$@"
 }
