@@ -69,11 +69,16 @@ pub fn walk(pid: u32, adapters: &[AdapterProc], read: ReadProc<'_>) -> Walk {
     Walk::Unresolved
 }
 
-/// `(ppid, start ticks)` from the text of `/proc/<pid>/stat`. The command name (field 2) may hold
-/// spaces and parentheses, so the fields are counted from the last `)`.
-pub fn parse_stat(stat: &str) -> Option<(u32, u64)> {
-    let rest = &stat[stat.rfind(')')? + 1..];
-    let mut fields = rest.split_whitespace();
+pub(crate) fn stat_fields(stat: &[u8]) -> Option<std::str::SplitWhitespace<'_>> {
+    // The command name (field 2) may hold parentheses, spaces and non-UTF-8 bytes.
+    // Only decode the fields after its final ')'.
+    let rest = &stat[stat.iter().rposition(|&byte| byte == b')')? + 1..];
+    Some(std::str::from_utf8(rest).ok()?.split_whitespace())
+}
+
+/// `(ppid, start ticks)` from the bytes of `/proc/<pid>/stat`.
+pub fn parse_stat(stat: &[u8]) -> Option<(u32, u64)> {
+    let mut fields = stat_fields(stat)?;
     let _state = fields.next()?; // field 3
     let ppid = fields.next()?.parse().ok()?; // field 4
     let start_ticks = fields.nth(17)?.parse().ok()?; // field 22
@@ -95,8 +100,26 @@ impl ProcReader {
     /// The parent and start time of `pid`, or `None` when it is gone or unreadable.
     pub fn read(&self, pid: u32) -> Option<(u32, u64)> {
         self.reads.fetch_add(1, Ordering::Relaxed);
-        parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+        parse_stat(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn with_non_utf8_child<T>(inspect: impl FnOnce(u32) -> T) -> T {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let command = dir.path().join(OsStr::from_bytes(b"my ) \xff cat"));
+    symlink("/bin/cat", &command).unwrap();
+    let mut child = Command::new(command).stdin(Stdio::piped()).spawn().unwrap();
+    let stat = std::fs::read(format!("/proc/{}/stat", child.id()));
+    let result = inspect(child.id());
+    assert!(child.wait().unwrap().success());
+    assert!(std::str::from_utf8(&stat.unwrap()).is_err());
+    result
 }
 
 #[cfg(test)]
@@ -184,10 +207,10 @@ mod tests {
 
     #[test]
     fn stat_parsing_survives_a_command_name_with_spaces_and_parentheses() {
-        let stat = "1234 (my (odd) app) S 77 777 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 10000 100 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
+        let stat = b"1234 (my (odd) app) S 77 777 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 10000 100 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
         assert_eq!(parse_stat(stat), Some((77, 987654)));
-        assert_eq!(parse_stat("garbage"), None);
-        assert_eq!(parse_stat("1 (x) S 1"), None);
+        assert_eq!(parse_stat(b"garbage"), None);
+        assert_eq!(parse_stat(b"1 (x) S 1"), None);
     }
 
     #[test]
@@ -196,6 +219,15 @@ mod tests {
         let me = std::process::id();
         let (ppid, ticks) = reader.read(me).expect("our own stat");
         assert!(ppid > 0 && ticks > 0);
+        assert_eq!(reader.reads(), 1);
+    }
+
+    #[test]
+    fn reads_a_process_with_a_non_utf8_name() {
+        let reader = ProcReader::default();
+        let (parent, ticks) = with_non_utf8_child(|pid| reader.read(pid)).unwrap();
+        assert_eq!(parent, std::process::id());
+        assert!(ticks > 0);
         assert_eq!(reader.reads(), 1);
     }
 }

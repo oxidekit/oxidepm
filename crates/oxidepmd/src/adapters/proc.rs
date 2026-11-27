@@ -665,14 +665,9 @@ fn process_parents() -> Vec<(i32, i32, u64)> {
     dir.filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()))
         .filter_map(|pid| {
-            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-            // the command name may hold spaces and parentheses: count from the last ')'
-            let rest = &stat[stat.rfind(')')? + 1..];
-            let mut fields = rest.split_whitespace();
-            let _state = fields.next()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let ticks = fields.nth(17)?.parse().ok()?; // field 22
-            Some((pid, ppid, ticks))
+            let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+            let (ppid, ticks) = super::peer::parse_stat(&stat)?;
+            Some((pid, i32::try_from(ppid).ok()?, ticks))
         })
         .collect()
 }
@@ -903,6 +898,19 @@ fn write_log_line(dir: &File, name: &std::ffi::OsStr, line: &str) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walks_a_process_with_a_non_utf8_name() {
+        let (pid, ticks, found) = super::super::peer::with_non_utf8_child(|pid| {
+            (
+                pid as i32,
+                start_ticks(pid),
+                descendants(std::process::id() as i32),
+            )
+        });
+        assert!(ticks > 0);
+        assert!(found.contains(&(pid, ticks)));
+    }
 
     #[tokio::test]
     async fn observing_an_exit_keeps_the_leader_until_cleanup() {

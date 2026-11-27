@@ -23,6 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+pub(super) use crate::adapters::peer::stat_fields;
+
 /// How long a swept group gets between SIGTERM and SIGKILL.
 const SWEEP_GRACE: Duration = Duration::from_secs(5);
 
@@ -152,8 +154,8 @@ struct ProcInfo {
     start_ticks: u64,
 }
 
-fn parse_stat(pid: u32, stat: &str) -> Option<ProcInfo> {
-    let mut fields = stat_fields(stat.as_bytes())?;
+fn parse_stat(pid: u32, stat: &[u8]) -> Option<ProcInfo> {
+    let mut fields = stat_fields(stat)?;
     let state = fields.next()?; // field 3
     let pgrp = fields.nth(1)?.parse().ok()?; // field 5
     let start_ticks = fields.nth(16)?.parse().ok()?; // field 22
@@ -166,10 +168,7 @@ fn parse_stat(pid: u32, stat: &str) -> Option<ProcInfo> {
 }
 
 fn read_proc(pid: u32) -> Option<ProcInfo> {
-    parse_stat(
-        pid,
-        &std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?,
-    )
+    parse_stat(pid, &std::fs::read(format!("/proc/{pid}/stat")).ok()?)
 }
 
 /// Every process there is. A process that vanishes while the directory is read is skipped.
@@ -336,29 +335,31 @@ pub(super) fn parse_start_ticks(stat: &[u8]) -> Option<u64> {
     stat_fields(stat)?.nth(19)?.parse().ok() // field 22
 }
 
-pub(super) fn stat_fields(stat: &[u8]) -> Option<std::str::SplitWhitespace<'_>> {
-    // The command name (field 2) may hold parentheses, spaces and non-UTF-8 bytes.
-    // Only decode the fields after its final ')'.
-    let rest = &stat[stat.iter().rposition(|&byte| byte == b')')? + 1..];
-    Some(std::str::from_utf8(rest).ok()?.split_whitespace())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn reads_a_process_with_a_non_utf8_name() {
+        let (pid, info) = crate::adapters::peer::with_non_utf8_child(|pid| (pid, read_proc(pid)));
+        let info = info.unwrap();
+        assert_eq!(info.pid, pid);
+        assert!(info.start_ticks > 0);
+        assert!(!info.zombie);
+    }
+
+    #[test]
     fn stat_parsing_survives_a_command_name_with_spaces_and_parentheses() {
         let stat = "1234 (my (odd) app) S 1 777 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 10000 100 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
-        let info = parse_stat(1234, stat).unwrap();
+        let info = parse_stat(1234, stat.as_bytes()).unwrap();
         assert_eq!(
             (info.pgrp, info.start_ticks, info.zombie),
             (777, 987654, false)
         );
-        assert!(parse_stat(1, "garbage").is_none());
-        assert!(parse_stat(1, "1 (x) S 1").is_none());
+        assert!(parse_stat(1, b"garbage").is_none());
+        assert!(parse_stat(1, b"1 (x) S 1").is_none());
         let zombie = stat.replace(") S ", ") Z ");
-        assert!(parse_stat(1234, &zombie).unwrap().zombie);
+        assert!(parse_stat(1234, zombie.as_bytes()).unwrap().zombie);
     }
 
     /// 32 threads add and remove records at once; the file and the map agree, nothing is lost.
