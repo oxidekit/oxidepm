@@ -298,13 +298,13 @@ fn daemon_is_built() -> bool {
         .is_some_and(|dir| dir.join("oxidepmd").is_file())
 }
 
-/// `sudo`, `systemctl`, `tee` and `launchctl` that only note that they were called.
+/// `sudo`, `systemctl` and `tee` that only note that they were called.
 fn fake_service_tools(home: &TestHome) -> (std::path::PathBuf, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let bin = home.path().join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
     let calls = home.path().join("tool-calls.log");
-    for tool in ["sudo", "systemctl", "tee", "launchctl"] {
+    for tool in ["sudo", "systemctl", "tee"] {
         let script = bin.join(tool);
         std::fs::write(
             &script,
@@ -386,23 +386,6 @@ fn startup_dry_run_prints_unit_and_writes_nothing() {
         .as_deref()
         .unwrap()
         .contains("ExecStart="));
-
-    // the macOS plist the same way, and no Library directory is made
-    let out = home
-        .cmd()
-        .env("PATH", &path)
-        .env("USER", "tester")
-        .args(["startup", "launchd", "--dry-run"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stdout(&out).contains("com.oxidepm.daemon"),
-        "{}",
-        stdout(&out)
-    );
-    assert!(!home.path().join("Library").exists());
-    assert!(!calls.exists());
 }
 
 // ---- backup and restore --------------------------------------------------------------------------------

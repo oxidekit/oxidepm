@@ -191,9 +191,9 @@ pub enum Commands {
     /// Stop daemon and all processes
     Kill,
 
-    /// Generate startup script
+    /// Configure oxidepmd to start at boot with systemd
     Startup {
-        /// Target system
+        /// Service manager
         #[arg(value_enum)]
         target: Option<StartupTarget>,
     },
@@ -607,7 +607,6 @@ pub struct LogsArgs {
 #[derive(Clone, Copy, ValueEnum)]
 pub enum StartupTarget {
     Systemd,
-    Launchd,
 }
 
 #[derive(Args)]

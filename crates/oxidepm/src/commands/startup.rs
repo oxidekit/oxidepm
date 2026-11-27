@@ -14,29 +14,13 @@ use oxidepm_ipc::{DryRunPlan, PlannedItem};
 const UNIT_PATH: &str = "/etc/systemd/system/oxidepmd.service";
 
 pub fn execute(target: Option<StartupTarget>, dry_run: bool) -> Result<()> {
-    let target = target.unwrap_or({
-        #[cfg(target_os = "macos")]
-        {
-            StartupTarget::Launchd
-        }
-        #[cfg(target_os = "linux")]
-        {
-            StartupTarget::Systemd
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            StartupTarget::Systemd
-        }
-    });
-
-    match target {
+    match target.unwrap_or(StartupTarget::Systemd) {
         StartupTarget::Systemd => install_systemd(dry_run),
-        StartupTarget::Launchd => install_launchd(dry_run),
     }
 }
 
 /// `--dry-run`: say what would be installed and where, print the file, and run and write nothing
-/// (no `sudo`, no `systemctl`, no `launchctl`, no directory). `existing` is what is there now.
+/// (no `sudo`, no `systemctl`, no directory). `existing` is what is there now.
 fn show_rehearsal(path: &Path, content: &str, existing: Option<&str>) -> Result<()> {
     let (action, what) = match existing {
         None => ("write", "a new file"),
@@ -193,42 +177,6 @@ WantedBy=multi-user.target
         exec = systemd_quote(&daemon.to_string_lossy()),
         stop_timeout = stop_timeout_secs(shutdown_budget_secs),
         env = systemd_quote(&format!("HOME={}", home.display())),
-    )
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn render_launchd_plist(daemon: &Path, home: &Path) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.oxidepm.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{binary}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>WorkingDirectory</key>
-    <string>{home}</string>
-    <key>StandardErrorPath</key>
-    <string>{home}/.oxidepm/daemon.err.log</string>
-    <key>StandardOutPath</key>
-    <string>{home}/.oxidepm/daemon.out.log</string>
-</dict>
-</plist>
-"#,
-        binary = xml_escape(&daemon.to_string_lossy()),
-        home = xml_escape(&home.to_string_lossy()),
     )
 }
 
@@ -390,53 +338,6 @@ fn install_systemd(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn install_launchd(dry_run: bool) -> Result<()> {
-    let daemon = resolve_daemon_binary()?;
-    let home = dirs::home_dir().context("Cannot determine the home directory")?;
-    let plist_dir = home.join("Library/LaunchAgents");
-    let plist_path = plist_dir.join("com.oxidepm.daemon.plist");
-    let plist = render_launchd_plist(&daemon, &home);
-
-    let existing = fs::read_to_string(&plist_path).ok();
-    if dry_run {
-        return show_rehearsal(&plist_path, &plist, existing.as_deref());
-    }
-    if existing.as_deref() == Some(plist.as_str()) {
-        print_success("Already configured (launchd plist is up to date)");
-        return Ok(());
-    }
-
-    if existing.is_some() {
-        println!("Updating existing launchd service...");
-        // Unload the old definition; it may not be loaded, so ignore the result.
-        let _ = Command::new("launchctl")
-            .args(["unload", &plist_path.to_string_lossy()])
-            .status();
-    } else {
-        println!("Installing launchd service...");
-    }
-
-    fs::create_dir_all(&plist_dir)?;
-    fs::write(&plist_path, &plist)?;
-    print_success(&format!("Plist installed at {}", plist_path.display()));
-
-    let mut load = Command::new("launchctl");
-    load.args(["load", &plist_path.to_string_lossy()]);
-    if let Err(e) = run_checked(load, "launchctl load") {
-        print_error(&format!(
-            "Failed to load — run manually: launchctl load {}",
-            plist_path.display()
-        ));
-        return Err(e);
-    }
-    print_success("Loaded into launchd");
-
-    println!();
-    println!("OxidePM will auto-start on login.");
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,13 +453,6 @@ mod tests {
     #[test]
     fn systemd_quote_escapes_specials() {
         assert_eq!(systemd_quote(r#"a"b\c%d$e"#), r#""a\"b\\c%%d$$e""#);
-    }
-
-    #[test]
-    fn plist_uses_the_daemon_binary_only() {
-        let plist = render_launchd_plist(Path::new("/opt/a&b/oxidepmd"), Path::new("/Users/x"));
-        assert!(plist.contains("<string>/opt/a&amp;b/oxidepmd</string>"));
-        assert!(!plist.contains("<string>daemon</string>"));
     }
 
     #[test]
