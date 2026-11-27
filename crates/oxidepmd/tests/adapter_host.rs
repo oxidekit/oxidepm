@@ -600,6 +600,23 @@ async fn tool_exits_after_idle_without_counting_a_crash() {
 }
 
 #[tokio::test]
+async fn calls_do_not_start_a_retired_adapter() {
+    let rig = Rig::new("retired", Kind::Tool, json!([]), |_| {});
+    rig.entry.detach();
+    let result = rig
+        .entry
+        .call("ping", &json!({}), Duration::from_secs(5))
+        .await;
+    rig.entry.stop(true).await;
+
+    assert!(matches!(
+        result,
+        Err(oxidepm_core::Error::AdapterUnavailable(_))
+    ));
+    assert_eq!(rig.starts(), 0);
+}
+
+#[tokio::test]
 async fn kill_walk_reaches_a_setsid_grandchild() {
     let marker = unique_sleep();
     let rig = Rig::new(

@@ -348,6 +348,8 @@ pub struct EntryView {
 
 struct Inner {
     state: EntryState,
+    disable_requested: bool,
+    stops_in_progress: usize,
     note: Option<String>,
     conn: Option<Arc<super::conn::AdapterConn>>,
     process: Option<Arc<ProcessIdentity>>,
@@ -429,6 +431,8 @@ impl AdapterEntry {
         };
         let inner = Inner {
             state,
+            disable_requested: !enabled,
+            stops_in_progress: 0,
             note: None,
             conn: None,
             process: None,
@@ -475,8 +479,11 @@ impl AdapterEntry {
 
     /// Mark the entry as replaced or removed: the host stops recording its state in the row.
     pub fn detach(&self) {
+        let inner = self.inner.lock();
         self.detached
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel_oneshots();
+        self.state_tx.send_replace(inner.state);
     }
 
     pub fn is_detached(&self) -> bool {
@@ -613,7 +620,7 @@ impl AdapterEntry {
     /// enable; a tool is started by its first call.
     pub fn start(self: &Arc<Self>) {
         let mut inner = self.inner.lock();
-        if inner.state == EntryState::Stopped {
+        if inner.state == EntryState::Stopped && self.check_start_allowed(&inner).is_ok() {
             self.begin(&mut inner);
         }
     }
@@ -622,7 +629,11 @@ impl AdapterEntry {
     /// history (an operator `enable`).
     pub fn enable(self: &Arc<Self>) {
         let mut inner = self.inner.lock();
-        if matches!(inner.state, EntryState::Disabled | EntryState::Failed(_)) {
+        if !self.is_detached()
+            && inner.stops_in_progress == 0
+            && matches!(inner.state, EntryState::Disabled | EntryState::Failed(_))
+        {
+            inner.disable_requested = false;
             inner.tracker.reset();
             inner.retry_at = None;
             inner.retry_used = false;
@@ -657,9 +668,11 @@ impl AdapterEntry {
     /// Ask the adapter to stop and wait for it. This does not count as a crash. The
     /// adapter ends `Stopped`, or `Disabled` when `disable` is set.
     pub async fn stop(&self, disable: bool) {
-        self.cancel_oneshots();
         let (stop_tx, task) = {
             let mut inner = self.inner.lock();
+            inner.disable_requested |= disable;
+            self.cancel_oneshots();
+            self.state_tx.send_replace(inner.state);
             match inner.state {
                 EntryState::Disabled => return,
                 EntryState::Stopped | EntryState::Failed(_) => {
@@ -670,8 +683,10 @@ impl AdapterEntry {
                 }
                 _ => {}
             }
+            inner.stops_in_progress += 1;
             (inner.stop_tx.clone(), inner.task.take())
         };
+        let _stopping = StopGuard(self);
         if let Some(tx) = stop_tx {
             tx.send_if_modified(|s| {
                 if *s == Stop::No {
@@ -810,20 +825,29 @@ impl AdapterEntry {
 
     /// Start the process, shake hands, serve until it ends, and say how it ended.
     async fn one_life(self: &Arc<Self>, stop_rx: &mut watch::Receiver<Stop>) -> Life {
-        if *stop_rx.borrow() != Stop::No {
-            let mut inner = self.inner.lock();
-            self.set_state(&mut inner, EntryState::Stopped);
-            return Life::Planned;
-        }
-        let mut proc = match AdapterProc::start(
+        let launch = AdapterProc::start(
             &self.spec.launch,
             &self.pids,
             self.spec.slot,
             self.cfg.conn,
             Arc::clone(&self.inbound),
-        )
-        .await
-        {
+        );
+        let allowed = self.check_start_allowed(&self.inner.lock()).is_ok();
+        let started = if allowed {
+            tokio::select! {
+                biased;
+                _ = wait_stop(stop_rx, false) => None,
+                result = launch => Some(result),
+            }
+        } else {
+            None
+        };
+        let Some(started) = started else {
+            let mut inner = self.inner.lock();
+            self.set_state(&mut inner, EntryState::Stopped);
+            return Life::Planned;
+        };
+        let mut proc = match started {
             Ok(proc) => proc,
             Err(ProcError::Tampered(why)) => {
                 self.fail(FailReason::Tampered, why);
@@ -1226,7 +1250,8 @@ impl AdapterEntry {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.inner.lock().state != EntryState::Disabled
+        let inner = self.inner.lock();
+        !self.is_detached() && !inner.disable_requested && inner.state != EntryState::Disabled
     }
 
     /// The rules for the runtime `name`, when this adapter provides it.
@@ -1258,25 +1283,17 @@ impl AdapterEntry {
     pub fn available(&self) -> Result<(), Error> {
         let now = Instant::now();
         let inner = self.inner.lock();
-        match inner.state {
-            EntryState::Disabled => {
+        self.check_start_allowed(&inner)?;
+        if matches!(inner.state, EntryState::Failed(_)) {
+            let retry_due =
+                self.spec.kind == Kind::Tool && inner.retry_at.is_some_and(|at| now >= at);
+            if !retry_due {
                 return Err(Error::AdapterUnavailable(format!(
-                    "adapter '{}' is disabled",
-                    self.spec.name
-                )))
+                    "adapter '{}' has failed: {}",
+                    self.spec.name,
+                    inner.note.clone().unwrap_or_default()
+                )));
             }
-            EntryState::Failed(_) => {
-                let retry_due =
-                    self.spec.kind == Kind::Tool && inner.retry_at.is_some_and(|at| now >= at);
-                if !retry_due {
-                    return Err(Error::AdapterUnavailable(format!(
-                        "adapter '{}' has failed: {}",
-                        self.spec.name,
-                        inner.note.clone().unwrap_or_default()
-                    )));
-                }
-            }
-            _ => {}
         }
         if inner.breaker.is_open(now) {
             return Err(Error::AdapterUnavailable(format!(
@@ -1384,14 +1401,27 @@ impl AdapterEntry {
         launch
     }
 
-    /// Is the adapter in a state where a process may be started for a call?
-    fn ensure_callable(&self) -> Result<(), Error> {
+    fn check_start_allowed(&self, inner: &Inner) -> Result<(), Error> {
+        let reason = if self.is_detached() {
+            "has been removed or replaced"
+        } else if inner.disable_requested || inner.state == EntryState::Disabled {
+            "is disabled"
+        } else if inner.stops_in_progress != 0 {
+            "is stopping"
+        } else {
+            return Ok(());
+        };
+        Err(Error::AdapterUnavailable(format!(
+            "adapter '{}' {reason}",
+            self.spec.name
+        )))
+    }
+
+    /// Register a call while the entry still accepts new work.
+    fn begin_oneshot(&self) -> Result<CancellationToken, Error> {
         let inner = self.inner.lock();
+        self.check_start_allowed(&inner)?;
         match inner.state {
-            EntryState::Disabled => Err(Error::AdapterUnavailable(format!(
-                "adapter '{}' is disabled",
-                self.spec.name
-            ))),
             EntryState::Failed(reason) => {
                 let note = inner.note.clone().unwrap_or_default();
                 Err(match reason {
@@ -1408,7 +1438,7 @@ impl AdapterEntry {
                     )),
                 })
             }
-            _ => Ok(()),
+            _ => Ok(self.oneshots.lock().child_token()),
         }
     }
 
@@ -1454,20 +1484,24 @@ impl AdapterEntry {
         out: mpsc::Sender<Output>,
         cancel: CancellationToken,
     ) -> Result<InvokeResult, Error> {
-        self.ensure_callable()?;
         // the host's order to end every call (a stop, a disable, the shutdown) joins the caller's
-        let ended = self.oneshots.lock().child_token();
+        let ended = self.begin_oneshot()?;
         let launch = self.call_launch(&call);
-        let mut proc = match AdapterProc::start_named(
+        let start = AdapterProc::start_named(
             &launch,
             &self.pids,
             call.slot,
             self.cfg.conn,
             Arc::clone(&self.inbound),
             "stderr-invoke.log",
-        )
-        .await
-        {
+        );
+        let started = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Cancelled("the call was cancelled".to_string())),
+            _ = ended.cancelled() => return Err(Error::Cancelled("the adapter was stopped".to_string())),
+            result = start => result,
+        };
+        let mut proc = match started {
             Ok(proc) => proc,
             Err(e) => return Err(self.start_error(e)),
         };
@@ -1513,8 +1547,7 @@ impl AdapterEntry {
         mut session: SessionCall,
         cancel: CancellationToken,
     ) -> Result<InvokeResult, Error> {
-        self.ensure_callable()?;
-        let ended = self.oneshots.lock().child_token();
+        let ended = self.begin_oneshot()?;
         let launch = self.call_launch_with(&session.call, &[session.socket.clone()]);
         let (host_end, bridge_end) = tokio::net::UnixStream::pair().map_err(Error::IoError)?;
         let inbound = self
@@ -1535,7 +1568,7 @@ impl AdapterEntry {
             ],
             channel: host_end,
         };
-        let mut proc = match AdapterProc::start_session(
+        let start = AdapterProc::start_session(
             &launch,
             &self.pids,
             session.call.slot,
@@ -1543,9 +1576,14 @@ impl AdapterEntry {
             inbound,
             "stderr-session.log",
             launch_session,
-        )
-        .await
-        {
+        );
+        let started = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Cancelled("the session was ended before it started".to_string())),
+            _ = ended.cancelled() => return Err(Error::Cancelled("the adapter was stopped".to_string())),
+            result = start => result,
+        };
+        let mut proc = match started {
             Ok(proc) => proc,
             Err(e) => return Err(self.start_error(e)),
         };
@@ -1761,6 +1799,7 @@ impl AdapterEntry {
         loop {
             {
                 let mut inner = self.inner.lock();
+                self.check_start_allowed(&inner)?;
                 match inner.state {
                     EntryState::Ready => {
                         if let Some(conn) = inner.conn.clone() {
@@ -1768,12 +1807,7 @@ impl AdapterEntry {
                             return Ok(conn);
                         }
                     }
-                    EntryState::Disabled => {
-                        return Err(Error::AdapterUnavailable(format!(
-                            "adapter '{}' is disabled",
-                            self.spec.name
-                        )));
-                    }
+                    EntryState::Disabled => unreachable!("checked before acquiring"),
                     EntryState::Failed(reason) => {
                         let due = inner.retry_at.is_some_and(|at| Instant::now() >= at);
                         if self.spec.kind == Kind::Tool && due {
@@ -1824,6 +1858,15 @@ impl AdapterEntry {
             )
             .await;
         }
+    }
+}
+
+struct StopGuard<'a>(&'a AdapterEntry);
+
+impl Drop for StopGuard<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.0.inner.lock();
+        inner.stops_in_progress -= 1;
     }
 }
 
