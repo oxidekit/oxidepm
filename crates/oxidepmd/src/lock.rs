@@ -89,16 +89,19 @@ impl DaemonLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::symlink;
 
     #[test]
-    fn lock_descriptor_does_not_follow_links() {
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
-
+    fn a_lock_symlink_is_refused_without_changing_its_target() {
         let dir = tempfile::tempdir().unwrap();
-        let lock = DaemonLock::acquire(&dir.path().join("oxidepmd.lock")).unwrap();
-        let flags = fcntl(lock._flock.as_raw_fd(), FcntlArg::F_GETFL).unwrap();
-        assert!(OFlag::from_bits_retain(flags).contains(OFlag::O_NOFOLLOW));
+        let path = dir.path().join("oxidepmd.lock");
+        let target = dir.path().join("sentinel");
+        std::fs::write(&target, "keep").unwrap();
+        symlink(&target, &path).unwrap();
+
+        let result = DaemonLock::acquire(&path);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        assert!(result.is_err());
     }
 
     #[test]

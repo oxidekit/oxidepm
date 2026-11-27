@@ -664,11 +664,50 @@ async fn write_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::fcntl::{Flock, FlockArg};
     use tempfile::tempdir;
 
-    #[test]
-    fn socket_directory_lock_is_exclusive_and_nonblocking() {
-        assert_eq!(SOCKET_DIR_LOCK_FLAGS, libc::LOCK_EX | libc::LOCK_NB);
+    fn hold_socket_directory_lock(dir: &Path) -> Flock<File> {
+        Flock::lock(File::open(dir).unwrap(), FlockArg::LockExclusive).unwrap()
+    }
+
+    #[tokio::test]
+    async fn bind_times_out_when_the_socket_directory_is_locked() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s");
+        let lock = hold_socket_directory_lock(dir.path());
+
+        let runtime = tokio::runtime::Handle::current();
+        let mut bind =
+            tokio::task::spawn_blocking(move || runtime.block_on(IpcServer::bind(&path)));
+        let bound = SOCKET_DIR_LOCK_TIMEOUT + Duration::from_secs(2);
+        let outcome = tokio::time::timeout(bound, &mut bind).await;
+        drop(lock);
+        if outcome.is_err() {
+            // Release the lock and join even if bind waits for a blocking flock.
+            drop(bind.await.unwrap());
+        }
+        let result = outcome.expect("bind exceeded the time limit").unwrap();
+        assert!(matches!(result, Err(Error::IoError(e)) if e.kind() == io::ErrorKind::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_server_returns_while_the_socket_directory_is_locked() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s");
+        let server = IpcServer::bind(&path).await.unwrap();
+        let lock = hold_socket_directory_lock(dir.path());
+
+        let mut cleanup = tokio::task::spawn_blocking(move || drop(server));
+        let outcome = tokio::time::timeout(SOCKET_DIR_LOCK_TIMEOUT, &mut cleanup).await;
+        drop(lock);
+        if outcome.is_err() {
+            cleanup.await.unwrap();
+        }
+        outcome
+            .expect("socket cleanup exceeded the time limit")
+            .unwrap();
+        assert!(path.exists());
     }
 
     #[tokio::test]

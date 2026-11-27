@@ -249,14 +249,45 @@ fn remove_any_at(parent: &File, name: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod housekeeping_tests {
     use super::*;
-    use nix::fcntl::{fcntl, FcntlArg};
+    use std::fs;
+    use std::os::unix::fs::symlink;
 
     #[test]
-    fn cleanup_directory_descriptor_does_not_follow_links() {
+    fn boot_cleanup_leaves_link_targets_untouched() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = open_cleanup_dir(None, temp.path()).unwrap();
-        let flags = fcntl(dir.as_raw_fd(), FcntlArg::F_GETFL).unwrap();
-        assert!(OFlag::from_bits_retain(flags).contains(OFlag::O_NOFOLLOW));
+        let paths = Paths::new(temp.path().join("home"));
+        paths.ensure_dirs().unwrap();
+        fs::create_dir(paths.adapters_dir()).unwrap();
+
+        let sentinels = [
+            paths.adapter_staging(),
+            paths.adapter_installed_root(),
+            paths.adapter_trash(),
+        ]
+        .map(|link| {
+            let target = temp.path().join(link.file_name().unwrap());
+            fs::create_dir(&target).unwrap();
+            let sentinel = target.join("sentinel");
+            fs::write(&sentinel, "keep").unwrap();
+            File::open(&sentinel)
+                .unwrap()
+                .set_modified(SystemTime::now() - STAGING_MAX_AGE - Duration::from_secs(1))
+                .unwrap();
+            symlink(&target, link).unwrap();
+            sentinel
+        });
+
+        clean_staging(&paths);
+        sweep_installed(&paths, &[]);
+
+        for sentinel in sentinels {
+            assert_eq!(
+                fs::read_to_string(&sentinel).as_deref().ok(),
+                Some("keep"),
+                "{}",
+                sentinel.display()
+            );
+        }
     }
 }
 
