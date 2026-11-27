@@ -245,6 +245,10 @@ impl RequestHandler {
                     return Ok((auth, None));
                 };
                 record.decision = Some("allow".to_string());
+                if let Request::Start { spec } = request {
+                    record.program = Some(scrub_text(&spec.command, spec));
+                    record.args_sha256 = Some(audit::args_digest(&spec.args));
+                }
                 if !targets.is_empty() {
                     record.targets = Some(targets);
                 }
@@ -1403,8 +1407,8 @@ pub fn denied_plan(request: &Request, error: &Error) -> Response {
     }
 }
 
-/// The common part of a decision line. The program of a `start` is written with its argument
-/// count and a digest of the arguments, never the arguments.
+/// The common part of a decision line. Only an authorized `start` adds its program and
+/// argument digest.
 fn decision_record(
     req: String,
     ctx: &ReqCtx,
@@ -1433,9 +1437,7 @@ fn decision_record(
         | Request::SetPolicy { selector, .. } => record.selector = Some(selector.to_string()),
         Request::Start { spec } => {
             record.selector = Some(spec.name.clone());
-            record.program = Some(scrub_text(&spec.command, spec));
             record.argc = Some(spec.args.len() as u64);
-            record.args_sha256 = Some(audit::args_digest(&spec.args));
         }
         Request::StartBatch { specs } => {
             record.targets = Some(

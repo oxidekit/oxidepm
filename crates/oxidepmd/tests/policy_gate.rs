@@ -123,6 +123,31 @@ async fn the_gate_refuses_an_ai_actor_before_it_acts() {
 }
 
 #[tokio::test]
+async fn refused_start_does_not_record_launch_details() {
+    let h = Harness::new().await;
+    let handler = RequestHandler::new(Arc::clone(&h.sup));
+    let mut spec = h.cmd("sample", "true");
+    spec.command = "/path/to/example-program".into();
+    spec.env
+        .insert("EXAMPLE_VALUE".into(), "example-program".into());
+    let request = Request::Start { spec };
+    let err = handler
+        .guarded(&ctx(Some("ai:test"), &request), request)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "E_POLICY_DENIED");
+    assert!(h.status().await.is_empty());
+    handler.close_audit().await;
+
+    let log = std::fs::read_to_string(h.paths.audit_dir().join("audit-security.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(&log).unwrap();
+    assert_eq!(record["decision"], "deny");
+    assert_eq!(record["selector"], "sample");
+    assert!(record.get("program").is_none(), "{record}");
+    assert!(record.get("args_sha256").is_none(), "{record}");
+}
+
+#[tokio::test]
 async fn broken_stored_apps_preserve_protection() {
     let h = Harness::new().await;
     let db = Database::new(&h.paths.db()).await.unwrap();
