@@ -610,7 +610,7 @@ oxidepm web              # where it listens, and its access key (shown once)
 |----------|--------|------|-------------|
 | `/api/health` | GET | No | `{"ok":true}` |
 | `/api/processes` | GET | Yes | All processes status (asked of the daemon once a second at most) |
-| `/api/processes` | POST | Yes | Start an app (`name`, `command`, absolute `cwd`, `runtime` (default `cmd`), `args`, `env`, `instances`, `port`); needs the adapter to have the `admin` level, otherwise 403 |
+| `/api/processes` | POST | Yes | Start an app (`name`, `command`, absolute `cwd`, `runtime` (default `cmd`), `args`, `env`, `instances`, `port`). Requires `admin` (403 without it). Enabling `admin` requires an interactive terminal because it gives the adapter full control of your user account through apps that run as children of the daemon with your rights. |
 | `/api/processes/:selector` | GET | Yes | Single process details |
 | `/api/processes/:selector` | DELETE | Yes | Delete process (the daemon refuses it below the `admin` level) |
 | `/api/processes/:selector/stop` | POST | Yes | Stop process |

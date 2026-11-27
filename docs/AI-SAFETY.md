@@ -225,6 +225,8 @@ A plan is built from the registry's snapshots, the stored specs and the files. I
 
 The REST API and the WebSocket are the `ui-web` adapter (`oxidepm adapter import ui-web`). It listens on `127.0.0.1:9615` and needs its access key on every request, loopback included; it checks the `Host` and `Origin` headers; and it acts for the apps that list `ui-web` under `adapters` only, at the `lifecycle` level. Its `POST /api/processes` (which starts an arbitrary command) is refused unless the adapter was given the `admin` level, so an AI should not be given that level for it or the key. Everything it does is in the audit log as the actor `adapter:ui-web`. `/api/health` is the one route without a key and says only `{"ok":true}`. The `exporter-prometheus` adapter serves `/metrics` with read access only.
 
+An `admin` grant gives the adapter full control of your user account. Apps it starts run as children of `oxidepmd` with your user rights, outside the adapter's sandbox. When one of those apps connects to `daemon.sock` without an actor claim, the daemon treats it as `human:cli`. Enabling `admin` requires an interactive terminal even with `--accept` or `--yes`.
+
 ---
 
 ## Notification Events

@@ -107,6 +107,8 @@ An adapter reaches the daemon through `host.request` and nothing else. `params.r
 
 A process in an adapter's process tree that opens the daemon's main socket itself (for example the CLI, started by the adapter) is handled as that adapter, under its grant, whatever it claims. The daemon looks at the peer once, when the connection is accepted, and only while an adapter process is alive. A peer that cannot be looked at then (it is gone, or its process chain is too long) is treated as an AI, not as a person. An adapter that moves its helper out of its process tree is not found by this; the sandbox and the grant are the protection against that.
 
+An app started on behalf of an `admin` adapter runs as a child of `oxidepmd`, outside the adapter's process tree and sandbox, with the user's rights. It can connect to `daemon.sock` without an actor claim and act as `human:cli`. An `admin` grant is therefore equivalent to full control of the user account, and enabling it requires an interactive terminal.
+
 ## Events
 
 Events go to a running `service` that listed the family in its manifest and was granted it. There are two families.
