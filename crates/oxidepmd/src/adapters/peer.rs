@@ -110,12 +110,23 @@ pub(crate) fn with_non_utf8_child<T>(inspect: impl FnOnce(u32) -> T) -> T {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     let dir = tempfile::tempdir().unwrap();
     let command = dir.path().join(OsStr::from_bytes(b"my ) \xff cat"));
     symlink("/bin/cat", &command).unwrap();
     let mut child = Command::new(command).stdin(Stdio::piped()).spawn().unwrap();
-    let stat = std::fs::read(format!("/proc/{}/stat", child.id()));
+    let stat_path = format!("/proc/{}/stat", child.id());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stat = std::fs::read(&stat_path);
+    while stat
+        .as_ref()
+        .is_ok_and(|bytes| std::str::from_utf8(bytes).is_ok())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+        stat = std::fs::read(&stat_path);
+    }
     let result = inspect(child.id());
     assert!(child.wait().unwrap().success());
     assert!(std::str::from_utf8(&stat.unwrap()).is_err());

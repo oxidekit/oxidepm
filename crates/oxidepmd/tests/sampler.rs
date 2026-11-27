@@ -2,35 +2,37 @@
 
 mod common;
 
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use common::daemon::DaemonProc;
 use oxidepm_core::{AppSpec, Runtime};
 use serde_json::json;
 use tempfile::TempDir;
 
-/// The descriptors of `pid`: how many there are and how many point into `/proc`.
-fn fd_counts(pid: u32) -> (usize, usize) {
-    let mut total = 0;
-    let mut proc_fds = 0;
-    for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))
+/// The descriptors of `pid` that point into `/proc`.
+fn proc_fds(pid: u32) -> Vec<PathBuf> {
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
         .expect("fd dir")
         .flatten()
-    {
-        total += 1;
-        if let Ok(target) = std::fs::read_link(entry.path()) {
-            if target.starts_with("/proc") {
-                proc_fds += 1;
-            }
-        }
-    }
-    (total, proc_fds)
+        .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+        .filter(|target| target.starts_with("/proc"))
+        .collect()
 }
 
-/// The sampler reads only the pids of the apps it tracks and keeps no `/proc/<pid>/stat` open
-/// (sysinfo caches them, up to half of RLIMIT_NOFILE, when it scans every process): after a
-/// few ticks the daemon holds a handful of descriptors into `/proc` at most, and the total does
-/// not grow from one tick to the next.
+/// Poll until `pid` holds no `/proc` descriptors or `timeout` elapses.
+fn wait_for_no_proc_fds(pid: u32, timeout: Duration) -> Vec<PathBuf> {
+    let deadline = Instant::now() + timeout;
+    let mut open = proc_fds(pid);
+    while !open.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        open = proc_fds(pid);
+    }
+    open
+}
+
+/// The sampler reads only the pids of the apps it tracks and keeps no `/proc` descriptors open
+/// after a sampling pass completes.
 #[test]
 fn sampler_does_not_hold_proc_fds() {
     let tmp = TempDir::new().expect("temp dir");
@@ -51,21 +53,17 @@ fn sampler_does_not_hold_proc_fds() {
     assert_eq!(started["type"], "started", "{started}");
 
     std::thread::sleep(Duration::from_millis(500));
-    let (total_early, proc_early) = fd_counts(daemon.pid());
+    let proc_early = wait_for_no_proc_fds(daemon.pid(), Duration::from_secs(1));
     std::thread::sleep(Duration::from_millis(1500));
-    let (total_late, proc_late) = fd_counts(daemon.pid());
+    let proc_late = wait_for_no_proc_fds(daemon.pid(), Duration::from_secs(1));
     let _ = daemon.rpc(json!({ "type": "kill" }));
 
     assert!(
-        proc_early <= 4,
-        "{proc_early} descriptors into /proc after tick 3"
+        proc_early.is_empty(),
+        "descriptors into /proc stayed open after early ticks: {proc_early:?}"
     );
     assert!(
-        proc_late <= 4,
-        "{proc_late} descriptors into /proc after tick 10 and more"
-    );
-    assert!(
-        total_late <= total_early,
-        "the descriptor count grew from {total_early} to {total_late}"
+        proc_late.is_empty(),
+        "descriptors into /proc stayed open after later ticks: {proc_late:?}"
     );
 }
