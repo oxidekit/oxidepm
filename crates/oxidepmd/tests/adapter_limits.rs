@@ -19,6 +19,50 @@ use serde_json::{json, Value};
 
 const SECS_10: Duration = Duration::from_secs(10);
 
+#[tokio::test]
+async fn state_quota_counts_every_nested_file_before_launch() {
+    use common::fixture::Rig;
+    use oxidepm_adapter_proto::Kind;
+    use oxidepmd::adapters::entry::EntryState;
+
+    let rig = Rig::new("quota", Kind::Tool, json!([]), |cfg| {
+        cfg.state_quota_bytes = 160_000;
+    });
+    let nested = rig.dir.path().join("state/quota/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    for i in 0..10_001 {
+        std::fs::write(nested.join(i.to_string()), [0; 16]).unwrap();
+    }
+
+    let result = rig.entry.call("ping", &json!({}), SECS_10).await;
+    let state = rig.entry.state();
+    rig.entry.stop(true).await;
+
+    assert!(result.is_err());
+    assert_eq!(state, EntryState::Disabled);
+    assert_eq!(rig.starts(), 0);
+}
+
+#[tokio::test]
+async fn state_quota_checks_the_adapters_first_writes() {
+    use common::fixture::{wait_state, Rig};
+    use oxidepm_adapter_proto::Kind;
+    use oxidepmd::adapters::entry::EntryState;
+
+    let rig = Rig::new(
+        "first-write",
+        Kind::Service,
+        json!([{ "on": "initialize", "do": ["reply", { "fill_state_dir": { "mb": 4 } }] }]),
+        |cfg| cfg.state_quota_bytes = 2 * 1024 * 1024,
+    );
+    rig.entry.start();
+    let disabled = wait_state(&rig.entry, 8, |s| *s == EntryState::Disabled).await;
+    rig.entry.stop(true).await;
+
+    assert!(disabled, "{:?}", rig.entry.view());
+    assert_eq!(rig.entry.view().crashes, 0);
+}
+
 // The largest single allocation made on the armed thread: the proof that a 100 MiB line is never
 // held. Only the thread that armed it is counted, so tests running beside it cannot disturb it
 // (the test below runs its whole connection on that one thread).

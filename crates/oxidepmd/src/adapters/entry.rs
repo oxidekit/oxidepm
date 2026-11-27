@@ -246,7 +246,7 @@ impl EntryConfig {
             failed_tool_retry: Duration::from_secs(300),
             ready_wait: Duration::from_secs(10),
             monitor_interval: Duration::from_secs(2),
-            quota_interval: Duration::from_secs(60),
+            quota_interval: Duration::from_secs(2),
             state_quota_bytes: STATE_QUOTA_BYTES,
             max_threads: MAX_THREADS,
             invoke_slots: INVOKE_SLOTS,
@@ -547,6 +547,9 @@ impl AdapterEntry {
     }
 
     fn set_state(&self, inner: &mut Inner, state: EntryState) {
+        if inner.disable_requested && inner.state == EntryState::Disabled {
+            return;
+        }
         inner.state = state;
         self.state_tx.send_replace(state);
     }
@@ -837,7 +840,10 @@ impl AdapterEntry {
             tokio::select! {
                 biased;
                 _ = wait_stop(stop_rx, false) => None,
-                result = launch => Some(result),
+                result = async {
+                    self.check_state_quota().await.ok()?;
+                    Some(launch.await)
+                } => result,
             }
         } else {
             None
@@ -880,9 +886,17 @@ impl AdapterEntry {
 
         // the handshake
         let conn = Arc::clone(&proc.conn);
+        let quota = self.quota_cycle();
+        tokio::pin!(quota);
         let outcome = tokio::select! {
             r = self.handshake(&conn, self.spec.grant) => Some(r),
             _ = wait_stop(stop_rx, false) => None,
+            why = &mut quota => {
+                proc.kill().await;
+                self.inner.lock().process = None;
+                self.disable_for_quota(why);
+                return Life::Planned;
+            }
         };
         let Some(outcome) = outcome else {
             // it has not said it is ready: there is nothing for it to flush
@@ -961,7 +975,8 @@ impl AdapterEntry {
             reason = conn.closed() => Ended::ConnClosed(reason),
             _ = self.ping_cycle(&conn), if self.spec.kind == Kind::Service => Ended::PingMissed,
             _ = self.idle_cycle(), if self.spec.kind == Kind::Tool => Ended::Idle,
-            over = self.monitor_cycle(watch_pid, watch_pgid) => over,
+            why = self.monitor_cycle(watch_pid, watch_pgid) => Ended::OverLimit(why),
+            why = &mut quota => Ended::OverQuota(why),
         };
         match ended {
             Ended::Stop | Ended::Idle => {
@@ -1019,19 +1034,9 @@ impl AdapterEntry {
                 }
             }
             Ended::OverQuota(why) => {
-                // disabled with a warning, the data is kept
-                warn!("adapter '{}' is disabled: {}", self.spec.name, why);
-                self.happened("disabled");
-                {
-                    let mut inner = self.inner.lock();
-                    self.set_state(&mut inner, EntryState::Stopping);
-                    inner.conn = None;
-                }
-                self.end_politely(&mut proc, stop_rx).await;
-                let mut inner = self.inner.lock();
-                inner.process = None;
-                inner.note = Some(why);
-                self.set_state(&mut inner, EntryState::Disabled);
+                proc.kill().await;
+                self.inner.lock().process = None;
+                self.disable_for_quota(why);
                 Life::Planned
             }
             Ended::PingMissed => {
@@ -1177,47 +1182,82 @@ impl AdapterEntry {
         }
     }
 
-    /// Measure the adapter's tree every `monitor_interval` and its state directory every
-    /// `quota_interval`; returns when a resource limit is exceeded. Never returns otherwise. The
-    /// measuring reads `/proc` and the directory, so it runs on a blocking thread.
-    async fn monitor_cycle(&self, pid: u32, pgid: i32) -> Ended {
+    /// Measure the adapter's tree every `monitor_interval` on a blocking thread.
+    async fn monitor_cycle(&self, pid: u32, pgid: i32) -> String {
         let memory_limit = u64::from(self.spec.launch.memory_mb) * 1024 * 1024;
         let max_threads = u64::from(self.cfg.max_threads);
-        let state_dir = self.spec.launch.state_dir.clone();
-        let mut last_quota = Instant::now();
         loop {
             tokio::time::sleep(self.cfg.monitor_interval).await;
             let usage = tokio::task::spawn_blocking(move || group_usage(pid, pgid))
                 .await
                 .unwrap_or_default();
             if memory_limit > 0 && usage.rss_bytes > memory_limit {
-                return Ended::OverLimit(format!(
+                return format!(
                     "its processes use {} MiB of memory; the limit is {} MiB",
                     usage.rss_bytes / (1024 * 1024),
                     self.spec.launch.memory_mb
-                ));
+                );
             }
             if usage.threads > max_threads {
-                return Ended::OverLimit(format!(
+                return format!(
                     "its processes run {} threads; the limit is {}",
                     usage.threads, self.cfg.max_threads
-                ));
-            }
-            if last_quota.elapsed() >= self.cfg.quota_interval {
-                last_quota = Instant::now();
-                let dir = state_dir.clone();
-                let bytes = tokio::task::spawn_blocking(move || dir_usage(&dir, DIR_WALK_MAX))
-                    .await
-                    .unwrap_or(0);
-                if bytes > self.cfg.state_quota_bytes {
-                    return Ended::OverQuota(format!(
-                        "its state directory holds {} MiB; the limit is {} MiB. The data is kept; enable the adapter again after clearing it",
-                        bytes / (1024 * 1024),
-                        self.cfg.state_quota_bytes / (1024 * 1024)
-                    ));
-                }
+                );
             }
         }
+    }
+
+    async fn state_over_quota(&self) -> Option<String> {
+        let dir = self.spec.launch.state_dir.clone();
+        let bytes = tokio::task::spawn_blocking(move || dir_usage(&dir, usize::MAX))
+            .await
+            .unwrap_or_default();
+        (bytes > self.cfg.state_quota_bytes).then(|| {
+            format!(
+                "its state directory holds {bytes} bytes; the limit is {} bytes. The data is kept; enable the adapter again after clearing it",
+                self.cfg.state_quota_bytes
+            )
+        })
+    }
+
+    /// Check immediately after spawn and at each quota interval for the lifetime of the process.
+    async fn quota_cycle(&self) -> String {
+        loop {
+            if let Some(why) = self.state_over_quota().await {
+                return why;
+            }
+            tokio::time::sleep(self.cfg.quota_interval).await;
+        }
+    }
+
+    async fn check_state_quota(&self) -> Result<(), Error> {
+        match self.state_over_quota().await {
+            Some(why) => Err(self.disable_for_quota(why)),
+            None => Ok(()),
+        }
+    }
+
+    fn disable_for_quota(&self, why: String) -> Error {
+        let disabled = {
+            let mut inner = self.inner.lock();
+            let disabled = inner.state != EntryState::Disabled;
+            if disabled {
+                inner.disable_requested = true;
+                inner.conn = None;
+                inner.note = Some(why.clone());
+                self.cancel_oneshots();
+                if let Some(stop) = &inner.stop_tx {
+                    stop.send_replace(Stop::Now);
+                }
+                self.set_state(&mut inner, EntryState::Disabled);
+            }
+            disabled
+        };
+        if disabled {
+            warn!("adapter '{}' is disabled: {}", self.spec.name, why);
+            self.happened("disabled");
+        }
+        Error::AdapterUnavailable(format!("adapter '{}' is disabled: {why}", self.spec.name))
     }
 
     /// Returns when a tool has had nothing to do for `tool_idle`; at that moment (under the lock)
@@ -1486,6 +1526,7 @@ impl AdapterEntry {
     ) -> Result<InvokeResult, Error> {
         // the host's order to end every call (a stop, a disable, the shutdown) joins the caller's
         let ended = self.begin_oneshot()?;
+        self.check_state_quota().await?;
         let launch = self.call_launch(&call);
         let mut grant = self.spec.grant;
         let mut cfg = self.cfg.conn;
@@ -1515,11 +1556,14 @@ impl AdapterEntry {
         };
         self.inner.lock().stderr_tail = Some(Arc::clone(&proc.stderr_tail));
         let conn = Arc::clone(&proc.conn);
+        let quota = self.quota_cycle();
+        tokio::pin!(quota);
 
         let shaken = tokio::select! {
             r = self.handshake(&conn, grant) => r,
             _ = cancel.cancelled() => { proc.kill().await; return Err(Error::Cancelled("the call was cancelled".to_string())) }
             _ = ended.cancelled() => { proc.kill().await; return Err(Error::Cancelled("the adapter was stopped".to_string())) }
+            why = &mut quota => { proc.kill().await; return Err(self.disable_for_quota(why)) }
         };
         if let Err(h) = shaken {
             proc.kill().await;
@@ -1531,10 +1575,10 @@ impl AdapterEntry {
         let result = tokio::select! {
             r = self.drive(&conn, &call, Some(&out), &cancel, Some(self.cfg.invoke_idle)) => r,
             _ = ended.cancelled() => Err(Error::Cancelled("the adapter was stopped".to_string())),
-            over = self.monitor_cycle(pid, pgid) => {
-                let why = match over { Ended::OverLimit(w) | Ended::OverQuota(w) => w, _ => "a limit was exceeded".to_string() };
+            why = self.monitor_cycle(pid, pgid) => {
                 Err(Error::AdapterCrashed(format!("adapter '{}' was killed: {why}", self.spec.name)))
             }
+            why = &mut quota => Err(self.disable_for_quota(why)),
         };
         match &result {
             // finished: the polite end, which a tool answers at once
@@ -1543,7 +1587,7 @@ impl AdapterEntry {
             }
             Err(_) => proc.kill().await,
         }
-        result
+        self.check_state_quota().await.and(result)
     }
 
     /// Run a session verb: start the executable on the terminal the CLI handed over, wait for it
@@ -1556,6 +1600,7 @@ impl AdapterEntry {
         cancel: CancellationToken,
     ) -> Result<InvokeResult, Error> {
         let ended = self.begin_oneshot()?;
+        self.check_state_quota().await?;
         let launch = self.call_launch_with(&session.call, &[session.socket.clone()]);
         let (host_end, bridge_end) = tokio::net::UnixStream::pair().map_err(Error::IoError)?;
         let inbound = self
@@ -1597,6 +1642,8 @@ impl AdapterEntry {
         };
         self.inner.lock().stderr_tail = Some(Arc::clone(&proc.stderr_tail));
         let conn = Arc::clone(&proc.conn);
+        let quota = self.quota_cycle();
+        tokio::pin!(quota);
 
         // the adapter connects to its socket and presents its token
         let connected = tokio::select! {
@@ -1608,6 +1655,7 @@ impl AdapterEntry {
             ))),
             _ = cancel.cancelled() => Err(Error::Cancelled("the session was ended before it started".to_string())),
             _ = ended.cancelled() => Err(Error::Cancelled("the adapter was stopped".to_string())),
+            why = &mut quota => Err(self.disable_for_quota(why)),
         };
         let bridge = match connected {
             Ok(stream) => {
@@ -1626,6 +1674,7 @@ impl AdapterEntry {
             r = self.handshake(&conn, self.spec.grant) => r,
             _ = cancel.cancelled() => { proc.kill().await; bridge.abort(); return Err(Error::Cancelled("the session was ended before it started".to_string())) }
             _ = ended.cancelled() => { proc.kill().await; bridge.abort(); return Err(Error::Cancelled("the adapter was stopped".to_string())) }
+            why = &mut quota => { proc.kill().await; bridge.abort(); return Err(self.disable_for_quota(why)) }
         };
         if let Err(h) = shaken {
             proc.kill().await;
@@ -1646,10 +1695,10 @@ impl AdapterEntry {
                     proc.window_changed();
                 }
                 _ = ended.cancelled() => break Err(Error::Cancelled("the adapter was stopped".to_string())),
-                over = &mut monitor => {
-                    let why = match over { Ended::OverLimit(w) | Ended::OverQuota(w) => w, _ => "a limit was exceeded".to_string() };
+                why = &mut monitor => {
                     break Err(Error::AdapterCrashed(format!("adapter '{}' was killed: {why}", self.spec.name)));
                 }
+                why = &mut quota => break Err(self.disable_for_quota(why)),
             }
         };
         match &result {
@@ -1659,7 +1708,7 @@ impl AdapterEntry {
             Err(_) => proc.kill().await,
         }
         bridge.abort();
-        result
+        self.check_state_quota().await.and(result)
     }
 
     /// Send `command.invoke` on `conn` and relay what comes back until the answer, the caller's
@@ -1922,9 +1971,6 @@ enum Ended {
     /// The state directory is over its quota: disabled.
     OverQuota(String),
 }
-
-/// At most this many entries of the state directory are visited when its size is measured.
-const DIR_WALK_MAX: usize = 10_000;
 
 fn cause_of(status: Option<std::process::ExitStatus>) -> ExitCause {
     use std::os::unix::process::ExitStatusExt;
