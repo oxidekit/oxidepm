@@ -23,6 +23,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
+use crate::supervisor::SavedResurrect;
+
 /// Who is on the other end of a connection, as far as the kernel says.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PeerCred {
@@ -352,6 +354,7 @@ pub struct TargetView {
 #[derive(Debug)]
 pub struct Authorized {
     ids: Vec<u32>,
+    pub(crate) saved_resurrect: Option<SavedResurrect>,
     reveal: bool,
     /// The asker is not a person (this is how the audit log and the limiter count it): what it
     /// reads is scrubbed and bounded.
@@ -421,6 +424,7 @@ pub fn authorize(
     let human = matches!(actor.class, ActorClass::Human | ActorClass::System);
     let allowed = |ids| Authorized {
         ids,
+        saved_resurrect: None,
         reveal: classified.reveal && human,
         limited_reader: (!human).then(|| crate::audit::actor_key(actor)),
     };

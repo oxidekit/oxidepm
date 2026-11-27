@@ -363,15 +363,26 @@ impl RequestHandler {
         }
         let ids = self.supervisor.resolve_selector(selector).await?;
         let targets = self.supervisor.target_views(&ids);
-        let auth =
+        let mut auth =
             policy::authorize(&ctx.actor, grant, classified, ids, &targets).map_err(denied)?;
-        let named = targets
+        let mut named = targets
             .iter()
             .map(|t| Target {
                 id: Some(t.id),
                 name: t.name.clone(),
             })
             .collect::<Vec<_>>();
+
+        if matches!(request, Request::Resurrect) {
+            let (saved, targets) = self.supervisor.read_saved_for_resurrect().map_err(denied)?;
+            policy::authorize(&ctx.actor, grant, classified, Vec::new(), &targets)
+                .map_err(denied)?;
+            auth.saved_resurrect = Some(saved);
+            named.extend(targets.into_iter().map(|t| Target {
+                id: None,
+                name: t.name,
+            }));
+        }
 
         // a looping agent cannot keep an app permanently down
         if !human && matches!(request, Request::Restart { .. } | Request::Reload { .. }) {
@@ -473,7 +484,7 @@ impl RequestHandler {
                 .await
             }
             Request::Save { force } => self.save(force).await,
-            Request::Resurrect => self.resurrect().await,
+            Request::Resurrect => self.resurrect(auth).await,
             Request::Reload { selector } => self.reload(&selector, ids).await,
             Request::Flush { selector } => self.flush(&selector, ids).await,
             Request::Describe { selector } => self.describe(selector, auth.reveal()).await,
@@ -1192,8 +1203,11 @@ impl RequestHandler {
     }
 
     /// Handle resurrect request
-    async fn resurrect(&self) -> Result<Response> {
-        let report = self.supervisor.resurrect_report().await?;
+    async fn resurrect(&self, mut auth: Authorized) -> Result<Response> {
+        let report = match auth.saved_resurrect.take() {
+            Some(saved) => self.supervisor.resurrect_checked(saved, auth.ids()).await?,
+            None => self.supervisor.resurrect_report().await?,
+        };
         Ok(Response::Resurrected {
             started: report.started,
             imported: report.imported,

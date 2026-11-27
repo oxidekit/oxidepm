@@ -136,6 +136,17 @@ pub struct ResurrectReport {
     pub saved_rejected: usize,
 }
 
+/// A saved list read for policy checks and carried through to execution.
+pub(crate) struct SavedResurrect(Vec<SavedEntry>);
+
+impl std::fmt::Debug for SavedResurrect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SavedResurrect")
+            .field("entry_count", &self.0.len())
+            .finish()
+    }
+}
+
 /// The kill cap for the next layer: the remaining budget shared out over the layers still to
 /// stop, never below [`MIN_KILL_CAP`]. A slow lower layer therefore cannot starve the layers
 /// after it, and once the budget is spent every remaining layer gets the floor.
@@ -1441,19 +1452,20 @@ impl Supervisor {
     /// Register an app from the saved file that the registry does not have: validated like any
     /// spec from outside, a row with `desired = running`, an idle actor (a cluster: its
     /// instances and the group over them). Nothing is launched; the resurrect that called this
-    /// starts it with the others. `Ok(false)`: the name is taken after all.
-    async fn import_spec(&self, spec: AppSpec) -> Result<bool> {
+    /// starts it with the others. Returns the new app's id, or `None` if the name is taken.
+    async fn import_spec(&self, spec: AppSpec) -> Result<Option<AppId>> {
         let mut spec = self.admit(spec)?;
         let name = spec.name.clone();
         let guard = match self.registry.reserve_name(&name) {
             Ok(guard) => guard,
-            Err(Error::AppAlreadyExists(_)) => return Ok(false),
+            Err(Error::AppAlreadyExists(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
         if spec.instances > 1 {
-            self.register_cluster(spec, None, guard, Desired::Running)
+            let app = self
+                .register_cluster(spec, None, guard, Desired::Running)
                 .await?;
-            return Ok(true);
+            return Ok(Some(app.handle.id));
         }
 
         let id = self.store().insert(&spec, None, Desired::Running).await?;
@@ -1472,7 +1484,7 @@ impl Supervisor {
             self.undo_import(id, &[]).await;
             return Err(e);
         }
-        Ok(true)
+        Ok(Some(id))
     }
 
     /// An import that failed half way: the parent row (its instance rows go with it) and the
@@ -1526,7 +1538,37 @@ impl Supervisor {
     /// An explicit resurrect: like [`resurrect_with`](Self::resurrect_with), but a saved file
     /// that cannot be used is the call's error (nothing is started then).
     pub async fn resurrect_report(&self) -> Result<ResurrectReport> {
-        self.resurrect_inner(&|_, _| {}, true).await
+        self.resurrect_inner(&|_, _| {}, true, None).await
+    }
+
+    pub(crate) fn read_saved_for_resurrect(&self) -> Result<(SavedResurrect, Vec<TargetView>)> {
+        let entries = persist::read_saved(&self.paths.saved())?;
+        let targets = entries
+            .iter()
+            .map(|entry| match entry {
+                SavedEntry::Spec(spec) => Ok(TargetView {
+                    id: 0,
+                    name: spec.name.clone(),
+                    protected: spec.protected,
+                    ai_control: spec.ai_control,
+                    adapters: spec.adapters.keys().cloned().collect(),
+                }),
+                SavedEntry::Bad { name, .. } => Err(Error::PolicyDenied(format!(
+                    "Cannot check policy for saved app '{}'. Ask a person to run resurrect",
+                    name.as_deref().unwrap_or("(unreadable entry)")
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((SavedResurrect(entries), targets))
+    }
+
+    pub(crate) async fn resurrect_checked(
+        &self,
+        saved: SavedResurrect,
+        ids: &[AppId],
+    ) -> Result<ResurrectReport> {
+        self.resurrect_inner(&|_, _| {}, true, Some((saved, ids)))
+            .await
     }
 
     /// The boot resurrect, reporting `(done, total)` as it goes. A saved file that cannot be
@@ -1535,7 +1577,7 @@ impl Supervisor {
         &self,
         progress: impl Fn(usize, usize) + Sync,
     ) -> Result<ResurrectReport> {
-        self.resurrect_inner(&progress, false).await
+        self.resurrect_inner(&progress, false, None).await
     }
 
     /// Import what the saved file has and the registry does not, then start every app that is
@@ -1552,12 +1594,20 @@ impl Supervisor {
         &self,
         progress: &(dyn Fn(usize, usize) + Sync),
         strict: bool,
+        checked: Option<(SavedResurrect, &[AppId])>,
     ) -> Result<ResurrectReport> {
         self.refuse_if_closed()?;
         let _only_one = self.resurrect_lock.lock().await;
         let mut report = ResurrectReport::default();
 
-        let entries = match persist::read_saved(&self.paths.saved()) {
+        let (entries, mut allowed_ids) = match checked {
+            Some((SavedResurrect(entries), ids)) => (
+                Ok(entries),
+                Some(ids.iter().copied().collect::<HashSet<_>>()),
+            ),
+            None => (persist::read_saved(&self.paths.saved()), None),
+        };
+        let entries = match entries {
             Ok(entries) => entries,
             Err(e) if strict => return Err(e),
             Err(e) => {
@@ -1591,8 +1641,13 @@ impl Supervisor {
                     }
                     let name = spec.name.clone();
                     match self.import_spec(*spec).await {
-                        Ok(true) => report.imported += 1,
-                        Ok(false) => {}
+                        Ok(Some(id)) => {
+                            report.imported += 1;
+                            if let Some(ids) = &mut allowed_ids {
+                                ids.insert(id);
+                            }
+                        }
+                        Ok(None) => {}
                         Err(Error::ShuttingDown) => return Err(Error::ShuttingDown),
                         Err(error) => {
                             warn!("Failed to import {} from the saved file: {}", name, error);
@@ -1610,6 +1665,7 @@ impl Supervisor {
             .registry
             .list()
             .into_iter()
+            .filter(|h| allowed_ids.as_ref().is_none_or(|ids| ids.contains(&h.id)))
             .filter(|h| {
                 let snap = h.snapshot();
                 snap.parent_id.is_none()

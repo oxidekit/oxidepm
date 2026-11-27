@@ -490,6 +490,86 @@ async fn global_requests_of_an_admin_adapter_stop_at_a_protected_app() {
     assert_eq!(code_of(&refused), "E_PROTECTED", "{refused}");
 }
 
+#[tokio::test]
+async fn admin_adapter_resurrect_refuses_protected_saved_apps() {
+    let rig = Rig::new("deployer", grant(HostLevel::Admin, HostScope::All)).await;
+    let specs = [
+        rig.sleeper("plain", json!({})),
+        rig.sleeper("vault", json!({ "protected": true })),
+    ];
+    let path = rig.h.paths.saved();
+    std::fs::write(&path, saved_json(&specs)).unwrap();
+
+    let request = json!({ "type": "resurrect" });
+    let refused = rig.ask(request.clone()).await;
+    assert_eq!(code_of(&refused), "E_PROTECTED", "{refused}");
+    assert!(refused["message"].as_str().unwrap().contains("vault"));
+
+    let plan = rig
+        .call(json!({ "request": request, "dry_run": true }))
+        .await;
+    assert_eq!(plan["type"], "dry_run", "{plan}");
+    assert_eq!(plan["plan"]["decision"]["code"], "E_PROTECTED", "{plan}");
+
+    let mut unreadable: Value = serde_json::from_str(&saved_json(&specs)).unwrap();
+    unreadable["apps"][1]["protected"] = json!("unknown");
+    std::fs::write(&path, unreadable.to_string()).unwrap();
+    let refused = rig.ask(json!({ "type": "resurrect" })).await;
+    assert_eq!(code_of(&refused), "E_POLICY_DENIED", "{refused}");
+
+    assert!(rig.h.status().await.is_empty());
+    let db = oxidepm_db::Database::new(&rig.h.paths.db()).await.unwrap();
+    assert!(db.apps().records().await.unwrap().is_empty());
+
+    let line = rig
+        .audit_line("audit-security.jsonl", |line| {
+            line["op"] == "resurrect" && line["decision"] == "deny"
+        })
+        .await;
+    assert_eq!(line["deny"]["code"], "E_PROTECTED", "{line}");
+}
+
+#[tokio::test]
+async fn admin_adapter_resurrect_uses_checked_saved_apps() {
+    let rig = Rig::new("deployer", grant(HostLevel::Admin, HostScope::All)).await;
+    let path = rig.h.paths.saved();
+    std::fs::write(&path, saved_json(&[rig.sleeper("checked", json!({}))])).unwrap();
+    let pause = rig.local.handler.pause_after_authorize();
+    let answer = async { rig.ask(json!({ "type": "resurrect" })).await };
+    let replace_saved = async {
+        tokio::time::timeout(WAIT_CAP, pause.reached.notified())
+            .await
+            .expect("resurrect reached the gate");
+        let later = rig.sleeper("later", json!({}));
+        std::fs::write(&path, saved_json(&[later])).unwrap();
+        let db = oxidepm_db::Database::new(&rig.h.paths.db()).await.unwrap();
+        db.apps()
+            .insert_with(
+                &rig.sleeper("late-registered", json!({})),
+                None,
+                oxidepm_core::Desired::Running,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rig.h.sup.load_registry().await.unwrap().loaded, 1);
+        pause.release.notify_one();
+    };
+    let (answer, ()) = tokio::join!(answer, replace_saved);
+    assert_eq!(answer["type"], "resurrected", "{answer}");
+    assert_eq!(answer["imported"], 1, "{answer}");
+    assert_eq!(answer["started"], 1, "{answer}");
+    let apps = rig.h.status().await;
+    assert_eq!(apps.len(), 2, "{apps:?}");
+    assert_eq!(
+        rig.h.state("checked").await.status,
+        oxidepm_core::AppStatus::Running
+    );
+    assert_eq!(
+        rig.h.state("late-registered").await.status,
+        oxidepm_core::AppStatus::Stopped
+    );
+}
+
 // ---- 27a: rates, in-flight, notes, params --------------------------------------------------------
 
 #[tokio::test]
