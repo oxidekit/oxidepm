@@ -50,7 +50,7 @@ jobs:
       - name: Build OxidePM
         working-directory: oxidepm
         run: |
-          cargo build --release --target "$TARGET" -p oxidepm -p oxidepmd -p oxidepm-sandbox
+          cargo build --locked --release --target "$TARGET" -p oxidepm -p oxidepmd -p oxidepm-sandbox
           test "$(target/"$TARGET"/release/oxidepm --version)" = "oxidepm ${GITHUB_REF_NAME#v}"
 
       - name: Build the adapter bundle
@@ -157,7 +157,7 @@ jobs:
       - name: Prepare release assets
         shell: bash
         run: |
-          cargo build -p oxidepm-adapter-proto --example catalogue
+          cargo build --locked -p oxidepm-adapter-proto --example catalogue
           adapter_names=$(bash scripts/build-adapter-bundle.sh --list)
           mapfile -t names <<< "$adapter_names"
           release_date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%d HEAD)

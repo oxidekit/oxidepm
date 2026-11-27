@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! OxidePM Logs - Log management, rotation, and streaming
 
 mod lines;

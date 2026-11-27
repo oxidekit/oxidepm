@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! OxidePM Core - Shared types, configuration, and error handling
 
 pub mod actor;

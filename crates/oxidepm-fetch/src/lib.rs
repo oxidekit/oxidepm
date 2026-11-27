@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! The verified-download primitive of OxidePM.
 //!
 //! Everything that fetches an executable or an archive from the network and installs it goes

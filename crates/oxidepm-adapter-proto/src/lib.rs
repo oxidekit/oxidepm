@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! The OxidePM adapter protocol.
 //!
 //! Adapters are separate executables that speak a versioned JSON protocol over stdin and stdout.

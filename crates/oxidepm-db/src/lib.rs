@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! OxidePM Database - SQLite persistence layer
 
 pub mod adapters;

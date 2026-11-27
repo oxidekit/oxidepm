@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! OxidePM Health Check System
 //!
 //! Provides HTTP endpoint, TCP connect and script-based health checks for processes.

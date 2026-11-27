@@ -22,7 +22,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: |
           exec 3<&- 6<&-
@@ -32,7 +32,7 @@ jobs:
           export TMPDIR="$OXIDEPM_HOME/tmp"
           mkdir -p "$TMPDIR"
           sh scripts/tests/install.sh
-          cargo test --workspace --no-fail-fast
+          cargo test --workspace --no-fail-fast --locked
 
   unused-deps:
     runs-on: ubuntu-latest
