@@ -341,6 +341,31 @@ async fn admin_grant_can_start_and_delete_but_never_kill_or_reveal() {
 }
 
 #[tokio::test]
+async fn admin_adapter_cannot_set_policy_markers_or_inherit_environment() {
+    let rig = Rig::new("deployer", grant(HostLevel::Admin, HostScope::All)).await;
+    let plain = rig.sleeper("managed", json!({}));
+    let started = rig.ask(json!({ "type": "start", "spec": plain })).await;
+    assert_eq!(started["type"], "started", "{started}");
+    let deleted = rig
+        .ask(json!({ "type": "delete", "selector": by_name("managed") }))
+        .await;
+    assert_eq!(deleted["type"], "deleted", "{deleted}");
+
+    let peer = rig.sleeper("peer", json!({}));
+    for field in ["protected", "ai_control", "env_inherit"] {
+        let marked = rig.sleeper("managed", json!({ (field): true }));
+        for request in [
+            json!({ "type": "start", "spec": marked }),
+            json!({ "type": "start_batch", "specs": [peer, marked] }),
+        ] {
+            let response = rig.ask(request).await;
+            assert_eq!(code_of(&response), "E_POLICY_DENIED", "{field}: {response}");
+            assert!(rig.h.status().await.is_empty(), "{field}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn opted_in_scope_cannot_touch_other_apps() {
     let rig = Rig::new("watch", grant(HostLevel::Lifecycle, HostScope::OptedIn)).await;
     rig.h

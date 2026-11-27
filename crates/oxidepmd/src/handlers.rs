@@ -415,16 +415,17 @@ impl RequestHandler {
     /// The gate for an adapter that starts apps (a `start` of a spec is dangerous: `admin`). An
     /// app that exists is held to its markers and, for the scope `opted-in`, to listing the
     /// adapter; a spec that names no app yet is held to the scope by what the spec lists.
+    /// Only a person may set policy markers or opt into inheriting the daemon environment.
     async fn gate_adapter_start(
         &self,
         ctx: &ReqCtx,
         request: &Request,
         classified: &policy::Classified,
     ) -> Result<(Authorized, Vec<Target>)> {
-        let specs: Vec<&AppSpec> = match request {
-            Request::Start { spec } => vec![spec],
-            Request::StartBatch { specs } => specs.iter().collect(),
-            _ => Vec::new(),
+        let specs = match request {
+            Request::Start { spec } => std::slice::from_ref(spec),
+            Request::StartBatch { specs } => specs.as_slice(),
+            _ => &[],
         };
         let mut ids = Vec::new();
         let mut new_apps = Vec::new();
@@ -447,6 +448,16 @@ impl RequestHandler {
         let targets = self.supervisor.target_views(&ids);
         let auth = policy::authorize(&ctx.actor, ctx.grant.as_ref(), classified, ids, &targets)?;
         policy::authorize_new_apps(&ctx.actor, ctx.grant.as_ref(), classified, &new_apps)?;
+        if let Some(spec) = specs
+            .iter()
+            .find(|spec| spec.protected || spec.ai_control || spec.env_inherit)
+        {
+            return Err(Error::PolicyDenied(format!(
+                "{} may not set protected, ai_control or env_inherit when starting '{}'",
+                ctx.actor.wire(),
+                spec.name
+            )));
+        }
         Ok((auth, Vec::new()))
     }
 
