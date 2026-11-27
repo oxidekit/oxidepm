@@ -127,7 +127,12 @@ pub fn bundled_index() -> Result<(ReleaseBundle, Index)> {
 }
 
 pub(super) fn read_bundled_index(dir: PathBuf) -> Result<(ReleaseBundle, Index)> {
-    let bundle = ReleaseBundle::read(dir).context("Could not read the release adapter bundle")?;
+    let bundle = ReleaseBundle::read(dir).map_err(|e| {
+        coded(
+            "E_ADAPTER_INVALID",
+            format!("Could not read the release adapter bundle: {e}"),
+        )
+    })?;
     let mut bytes = Vec::new();
     bundle
         .copy_verified("index.json", INDEX_MAX_BYTES as u64, &mut bytes)

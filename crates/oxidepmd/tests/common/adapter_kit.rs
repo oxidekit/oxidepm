@@ -375,7 +375,7 @@ impl Kit {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let bundle = dir.path().join("bundle");
+        let bundle = dir.path().join(oxidepm_core::release_bundle::DIRECTORY);
         std::fs::create_dir_all(&bundle).unwrap();
         // the sandbox launcher and the CLI are built before any test uses them
         let _ = cli_bin();
