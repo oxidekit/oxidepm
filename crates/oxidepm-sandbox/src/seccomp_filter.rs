@@ -1,14 +1,13 @@
 //! The seccomp filter of an adapter: a deny list that is always on, the socket
-//! domains of `network = none`, and the process-creating calls of `spawn = none`. Everything not
-//! named is allowed; a denied call fails with `EPERM`.
+//! domains of `network = none`, and the process-creating calls of `spawn = none`.
 
 use std::collections::BTreeMap;
 
 use oxidepm_adapter_proto::permissions::{NetworkMode, SpawnMode};
 use oxidepm_sandbox::Profile;
 use seccompiler::{
-    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
-    SeccompRule, TargetArch,
+    sock_filter, BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition,
+    SeccompFilter, SeccompRule, TargetArch,
 };
 
 /// Calls an adapter has no business making, on any profile (`ptrace` and kin, `io_uring`, the
@@ -111,7 +110,7 @@ fn rules(profile: &Profile) -> Result<BTreeMap<i64, Vec<SeccompRule>>, String> {
         for nr in fork_calls() {
             rules.insert(nr, Vec::new());
         }
-        // clone without CLONE_THREAD makes a process (clone3 cannot be told apart: its flags are in memory)
+        // Only clone calls that create a thread are allowed.
         let process = SeccompRule::new(vec![cond(
             0,
             SeccompCmpArgLen::Qword,
@@ -124,10 +123,24 @@ fn rules(profile: &Profile) -> Result<BTreeMap<i64, Vec<SeccompRule>>, String> {
     Ok(rules)
 }
 
-/// Install the filter. `Ok(true)` when it is in place, `Ok(false)` on an architecture this build
-/// has no filter for.
-pub fn apply(profile: &Profile) -> Result<bool, String> {
-    let Some(arch) = arch() else { return Ok(false) };
+fn deny_syscall_if(comparison: u32, value: u32, errno: i32) -> [sock_filter; 2] {
+    [
+        sock_filter {
+            code: (libc::BPF_JMP | comparison | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 1,
+            k: value,
+        },
+        sock_filter {
+            code: (libc::BPF_RET | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 0,
+            k: libc::SECCOMP_RET_ERRNO | errno as u32,
+        },
+    ]
+}
+
+fn compile(profile: &Profile, arch: TargetArch) -> Result<BpfProgram, String> {
     let filter = SeccompFilter::new(
         rules(profile)?,
         SeccompAction::Allow,
@@ -135,10 +148,133 @@ pub fn apply(profile: &Profile) -> Result<bool, String> {
         arch,
     )
     .map_err(|e| format!("seccomp: cannot build the filter: {e}"))?;
-    let program: BpfProgram = filter
+    let mut program: BpfProgram = filter
         .try_into()
         .map_err(|e| format!("seccomp: cannot compile the filter: {e}"))?;
+
+    if profile.spawn == SpawnMode::None {
+        // Seccomp cannot inspect clone3's flags. ENOSYS lets glibc use clone for threads.
+        let checks = deny_syscall_if(libc::BPF_JEQ, libc::SYS_clone3 as u32, libc::ENOSYS);
+        // Insert after the architecture check, where the compiler loads the syscall number.
+        let load_word = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+        let nr_offset = std::mem::offset_of!(libc::seccomp_data, nr) as u32;
+        let nr_load = program
+            .iter()
+            .position(|instruction| instruction.code == load_word && instruction.k == nr_offset)
+            .ok_or("seccomp: compiled filter does not load the syscall number")?;
+        program.splice(nr_load + 1..nr_load + 1, checks);
+    }
+    Ok(program)
+}
+
+/// Install the filter. `Ok(true)` when it is in place, `Ok(false)` on an architecture this build
+/// has no filter for.
+pub fn apply(profile: &Profile) -> Result<bool, String> {
+    let Some(arch) = arch() else { return Ok(false) };
+    let program = compile(profile, arch)?;
     seccompiler::apply_filter(&program)
         .map_err(|e| format!("seccomp: cannot install the filter: {e}"))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxidepm_sandbox::ProfileInput;
+    use std::path::Path;
+
+    fn profile() -> Profile {
+        Profile::from_permissions(
+            &serde_json::from_str(r#"{"host":{"level":"read","scope":"all"}}"#).unwrap(),
+            &ProfileInput {
+                state_dir: Path::new("/state"),
+                daemon_home: Path::new("/home"),
+                cwd: None,
+                search_path: &[],
+            },
+        )
+    }
+
+    // Evaluate the generated filter with synthetic seccomp data.
+    fn action(program: &BpfProgram, audit_arch: u32, syscall: i64, arg0: u64) -> u32 {
+        use libc::{
+            BPF_ABS, BPF_ALU, BPF_AND, BPF_JA, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W,
+        };
+
+        const LOAD_WORD: u32 = BPF_LD | BPF_W | BPF_ABS;
+        const AND: u32 = BPF_ALU | BPF_AND | BPF_K;
+        const JUMP: u32 = BPF_JMP | BPF_JA;
+        const EQUAL: u32 = BPF_JMP | BPF_JEQ | BPF_K;
+        const RETURN: u32 = BPF_RET | BPF_K;
+
+        let mut data = [0u32; 6];
+        data[0] = syscall as u32;
+        data[1] = audit_arch;
+        data[4] = arg0 as u32;
+        data[5] = (arg0 >> 32) as u32;
+        let mut accumulator = 0;
+        let mut pc = 0;
+        loop {
+            let instruction = &program[pc];
+            pc += 1;
+            match u32::from(instruction.code) {
+                LOAD_WORD => accumulator = data[instruction.k as usize / 4],
+                AND => accumulator &= instruction.k,
+                JUMP => pc += instruction.k as usize,
+                EQUAL => {
+                    pc += usize::from(if accumulator == instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    });
+                }
+                RETURN => return instruction.k,
+                _ => panic!("unsupported BPF instruction: {instruction:?}"),
+            }
+        }
+    }
+
+    fn native_arch() -> (TargetArch, u32) {
+        let arch = arch().unwrap();
+        // The native ELF machine ID plus the 64-bit and little-endian audit flags.
+        let machine = match arch {
+            TargetArch::x86_64 => libc::EM_X86_64,
+            TargetArch::aarch64 => libc::EM_AARCH64,
+            _ => unreachable!(),
+        };
+        (arch, 0xc000_0000 | u32::from(machine))
+    }
+
+    #[test]
+    fn spawn_none_keeps_the_glibc_thread_fallback() {
+        let (arch, audit_arch) = native_arch();
+        let mut profile = profile();
+        profile.spawn = SpawnMode::None;
+        let program = compile(&profile, arch).unwrap();
+        assert_eq!(
+            action(&program, audit_arch, libc::SYS_clone3, 0),
+            libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32
+        );
+        assert_eq!(
+            action(
+                &program,
+                audit_arch,
+                libc::SYS_clone,
+                libc::CLONE_THREAD as u64
+            ),
+            libc::SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            action(&program, audit_arch, libc::SYS_clone, 0),
+            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32
+        );
+        for spawn in [SpawnMode::Named, SpawnMode::Any] {
+            profile.spawn = spawn;
+            let program = compile(&profile, arch).unwrap();
+            assert_eq!(
+                action(&program, audit_arch, libc::SYS_clone3, 0),
+                libc::SECCOMP_RET_ALLOW
+            );
+        }
+    }
 }
