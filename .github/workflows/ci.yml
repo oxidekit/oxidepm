@@ -31,6 +31,7 @@ jobs:
           trap 'rm -rf -- "$OXIDEPM_HOME"' EXIT
           export TMPDIR="$OXIDEPM_HOME/tmp"
           mkdir -p "$TMPDIR"
+          sh scripts/tests/install.sh
           cargo test --workspace --no-fail-fast
 
   unused-deps:

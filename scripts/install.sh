@@ -19,29 +19,14 @@ success() { printf "${GREEN}[OK]${NC} %s\n" "$1"; }
 warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; exit 1; }
 
-# Detect OS and architecture
+# Detect architecture
 detect_platform() {
-    OS="$(uname -s)"
     ARCH="$(uname -m)"
 
-    case "$OS" in
-        Linux)
-            case "$ARCH" in
-                x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
-                aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
-                *)       error "Unsupported architecture: $ARCH" ;;
-            esac
-            ;;
-        Darwin)
-            case "$ARCH" in
-                x86_64)  TARGET="x86_64-apple-darwin" ;;
-                arm64)   TARGET="aarch64-apple-darwin" ;;
-                *)       error "Unsupported architecture: $ARCH" ;;
-            esac
-            ;;
-        *)
-            error "Unsupported OS: $OS"
-            ;;
+    case "$ARCH" in
+        x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+        aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+        *)       error "Unsupported architecture: $ARCH" ;;
     esac
 
     info "Detected platform: $TARGET"
@@ -267,6 +252,11 @@ verify() {
 }
 
 main() {
+    if [ "$(uname -s)" != Linux ]; then
+        printf '%s\n' 'OxidePM supports Linux only (x86_64 and aarch64).' >&2
+        exit 1
+    fi
+
     echo ""
     echo "  ╔═══════════════════════════════════╗"
     echo "  ║       OxidePM Installer           ║"
