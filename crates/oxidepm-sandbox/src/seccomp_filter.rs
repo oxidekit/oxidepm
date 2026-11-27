@@ -10,6 +10,8 @@ use seccompiler::{
     SeccompFilter, SeccompRule, TargetArch,
 };
 
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
 /// Calls an adapter has no business making, on any profile (`ptrace` and kin, `io_uring`, the
 /// mount family, kexec, bpf, perf, userfaultfd, keyrings, namespaces, chroot, reboot, modules).
 fn always_denied() -> Vec<i64> {
@@ -152,9 +154,24 @@ fn compile(profile: &Profile, arch: TargetArch) -> Result<BpfProgram, String> {
         .try_into()
         .map_err(|e| format!("seccomp: cannot compile the filter: {e}"))?;
 
+    let mut checks = Vec::new();
+    if arch == TargetArch::x86_64 {
+        // x32 shares the audit architecture of x86-64, but is outside the native ABI.
+        checks.extend(deny_syscall_if(
+            libc::BPF_JSET,
+            X32_SYSCALL_BIT,
+            libc::EPERM,
+        ));
+    }
     if profile.spawn == SpawnMode::None {
         // Seccomp cannot inspect clone3's flags. ENOSYS lets glibc use clone for threads.
-        let checks = deny_syscall_if(libc::BPF_JEQ, libc::SYS_clone3 as u32, libc::ENOSYS);
+        checks.extend(deny_syscall_if(
+            libc::BPF_JEQ,
+            libc::SYS_clone3 as u32,
+            libc::ENOSYS,
+        ));
+    }
+    if !checks.is_empty() {
         // Insert after the architecture check, where the compiler loads the syscall number.
         let load_word = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
         let nr_offset = std::mem::offset_of!(libc::seccomp_data, nr) as u32;
@@ -198,13 +215,15 @@ mod tests {
     // Evaluate the generated filter with synthetic seccomp data.
     fn action(program: &BpfProgram, audit_arch: u32, syscall: i64, arg0: u64) -> u32 {
         use libc::{
-            BPF_ABS, BPF_ALU, BPF_AND, BPF_JA, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W,
+            BPF_ABS, BPF_ALU, BPF_AND, BPF_JA, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET,
+            BPF_W,
         };
 
         const LOAD_WORD: u32 = BPF_LD | BPF_W | BPF_ABS;
         const AND: u32 = BPF_ALU | BPF_AND | BPF_K;
         const JUMP: u32 = BPF_JMP | BPF_JA;
         const EQUAL: u32 = BPF_JMP | BPF_JEQ | BPF_K;
+        const BIT_SET: u32 = BPF_JMP | BPF_JSET | BPF_K;
         const RETURN: u32 = BPF_RET | BPF_K;
 
         let mut data = [0u32; 6];
@@ -221,8 +240,13 @@ mod tests {
                 LOAD_WORD => accumulator = data[instruction.k as usize / 4],
                 AND => accumulator &= instruction.k,
                 JUMP => pc += instruction.k as usize,
-                EQUAL => {
-                    pc += usize::from(if accumulator == instruction.k {
+                EQUAL | BIT_SET => {
+                    let matches = if u32::from(instruction.code) == EQUAL {
+                        accumulator == instruction.k
+                    } else {
+                        accumulator & instruction.k != 0
+                    };
+                    pc += usize::from(if matches {
                         instruction.jt
                     } else {
                         instruction.jf
@@ -276,5 +300,31 @@ mod tests {
                 libc::SECCOMP_RET_ALLOW
             );
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_64_filter_accepts_only_the_native_syscall_abi() {
+        let (arch, audit_arch) = native_arch();
+        let mut profile = profile();
+        profile.spawn = SpawnMode::Any;
+        let program = compile(&profile, arch).unwrap();
+        assert_eq!(
+            action(&program, audit_arch, libc::SYS_getpid, 0),
+            libc::SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            action(
+                &program,
+                audit_arch,
+                libc::SYS_getpid | i64::from(X32_SYSCALL_BIT),
+                0
+            ),
+            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32
+        );
+        assert_eq!(
+            action(&program, 0, libc::SYS_getpid, 0),
+            libc::SECCOMP_RET_KILL_PROCESS
+        );
     }
 }
