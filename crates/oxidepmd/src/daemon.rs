@@ -2,19 +2,20 @@
 
 use chrono::{DateTime, Utc};
 use oxidepm_adapter_proto::messages::OutputStream;
-use oxidepm_core::actor::Via;
+use oxidepm_core::actor::{ActorClass, Via};
 use oxidepm_core::paths::HomeDir;
 use oxidepm_core::{DaemonConfig, Error, ErrorCode, Paths, Result};
 use oxidepm_db::Database;
 use oxidepm_ipc::protocol::{DaemonPhase, FEATURES, PROTOCOL_MIN, PROTOCOL_VERSION};
-use oxidepm_ipc::server::{Incoming, ReadError, ServerLimits};
+use oxidepm_ipc::server::{Incoming, IpcConnection, ReadError, ServerLimits};
 use oxidepm_ipc::{AdapterRequest, InvokeArgs, IpcServer, Request, Response, ResponseEnvelope};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::signal::unix::{signal, Signal, SignalKind};
-use tokio::sync::watch;
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tracing::{error, info, warn};
 
 use crate::adapters::events::AdapterEventSink;
@@ -23,7 +24,7 @@ use crate::adapters::hostapi::Dispatch;
 use crate::adapters::runtime::DaemonRuntimes;
 use crate::handlers::{self, RequestHandler};
 use crate::lock::DaemonLock;
-use crate::policy::{self, log_field, PeerCred, ReqCtx};
+use crate::policy::{self, log_field, PeerCred, PeerLabel, ReqCtx};
 use crate::supervisor::{EventSink, RuntimeSourceRef, Supervisor, SupervisorConfig, CURRENT_ACTOR};
 
 /// What `oxidepmd --check` verifies: the home directory can be prepared, the database opens
@@ -51,6 +52,65 @@ const KILL_REPLY_WAIT: Duration = Duration::from_secs(2);
 const DB_CLOSE_WAIT: Duration = Duration::from_secs(5);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const BOOT_DISCOVERY_WAIT: Duration = Duration::from_secs(2);
+
+const MAIN_PEER_LOOKUPS: usize = 32;
+const MAIN_NON_HUMAN_CONNECTIONS: usize = 64;
+const MAIN_CONNECTIONS_PER_PID: usize = 32;
+const MAIN_NON_HUMAN_CONNECTIONS_PER_PEER: usize = 8;
+
+#[derive(Hash, PartialEq, Eq)]
+enum SocketPeer {
+    Process(i32),
+    DeclaredAi(i32),
+    Adapter(String),
+    Unresolved,
+}
+
+struct MainSocketLimits {
+    cli: Arc<Semaphore>,
+    non_human: Arc<Semaphore>,
+    peers: Mutex<HashMap<SocketPeer, Weak<Semaphore>>>,
+}
+
+struct MainSocketSlot {
+    _group: OwnedSemaphorePermit,
+    _peer: OwnedSemaphorePermit,
+    restricted: bool,
+}
+
+impl MainSocketLimits {
+    fn new() -> Self {
+        let total = ServerLimits::MAIN.max_connections.expect("main socket cap");
+        Self {
+            cli: Arc::new(Semaphore::new(total - MAIN_NON_HUMAN_CONNECTIONS)),
+            non_human: Arc::new(Semaphore::new(MAIN_NON_HUMAN_CONNECTIONS)),
+            peers: Mutex::default(),
+        }
+    }
+
+    fn admit(&self, peer: SocketPeer) -> Option<MainSocketSlot> {
+        let restricted = !matches!(peer, SocketPeer::Process(_));
+        let (group, cap) = if restricted {
+            (&self.non_human, MAIN_NON_HUMAN_CONNECTIONS_PER_PEER)
+        } else {
+            (&self.cli, MAIN_CONNECTIONS_PER_PID)
+        };
+        let group = Arc::clone(group).try_acquire_owned().ok()?;
+        let mut peers = self.peers.lock();
+        peers.retain(|_, slots| slots.strong_count() != 0);
+        let entry = peers.entry(peer).or_default();
+        let slots = entry.upgrade().unwrap_or_else(|| {
+            let slots = Arc::new(Semaphore::new(cap));
+            *entry = Arc::downgrade(&slots);
+            slots
+        });
+        Some(MainSocketSlot {
+            _group: group,
+            _peer: slots.try_acquire_owned().ok()?,
+            restricted,
+        })
+    }
+}
 
 /// How the daemon's main loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,7 +504,14 @@ impl Daemon {
         // socket; `bind` still refuses one that answers.
         home.verify_path()?;
         let socket_path = paths.socket();
-        let server = IpcServer::bind(&socket_path).await?;
+        let server = IpcServer::bind_with(
+            &socket_path,
+            ServerLimits {
+                max_connections: None,
+                ..ServerLimits::MAIN
+            },
+        )
+        .await?;
         info!("IPC server listening on {}", socket_path.display());
 
         let mut handler = RequestHandler::new(Arc::clone(&supervisor));
@@ -550,14 +617,17 @@ impl Daemon {
         let mut done = self.core.shutdown.subscribe();
         let mut main_retry_at = tokio::time::Instant::now();
         let mut agent_retry_at = main_retry_at;
+        let lookups = Arc::new(Semaphore::new(MAIN_PEER_LOOKUPS));
+        let main_limits = Arc::new(MainSocketLimits::new());
 
         loop {
             tokio::select! {
-                result = accept_at(Some(&self.server), main_retry_at) => {
+                result = accept_main_at(&self.server, main_retry_at, &lookups) => {
                     match result {
-                        Ok(conn) => {
+                        Ok((conn, lookup)) => {
                             let core = Arc::clone(&self.core);
-                            tokio::spawn(serve_connection(core, conn, Via::Main));
+                            let limits = Arc::clone(&main_limits);
+                            tokio::spawn(serve_main_connection(core, conn, limits, lookup));
                         }
                         Err(e) => {
                             error!("Failed to accept connection: {}", e);
@@ -569,7 +639,7 @@ impl Daemon {
                     match result {
                         Ok(conn) => {
                             let core = Arc::clone(&self.core);
-                            tokio::spawn(serve_connection(core, conn, Via::Agent));
+                            tokio::spawn(serve_connection(core, conn, Via::Agent, None, None));
                         }
                         Err(e) => {
                             error!("Failed to accept an agent connection: {}", e);
@@ -615,7 +685,7 @@ impl Daemon {
 async fn accept_at(
     server: Option<&IpcServer>,
     retry_at: tokio::time::Instant,
-) -> Result<oxidepm_ipc::server::IpcConnection> {
+) -> Result<IpcConnection> {
     match server {
         Some(server) => {
             if retry_at > tokio::time::Instant::now() {
@@ -627,28 +697,91 @@ async fn accept_at(
     }
 }
 
+/// Keep the number of accepted sockets awaiting attribution bounded separately.
+async fn accept_main_at(
+    server: &IpcServer,
+    retry_at: tokio::time::Instant,
+    lookups: &Arc<Semaphore>,
+) -> Result<(IpcConnection, OwnedSemaphorePermit)> {
+    let lookup = Arc::clone(lookups)
+        .acquire_owned()
+        .await
+        .expect("lookup pool stays open");
+    Ok((accept_at(Some(server), retry_at).await?, lookup))
+}
+
+async fn serve_main_connection(
+    core: Arc<Core>,
+    mut conn: IpcConnection,
+    limits: Arc<MainSocketLimits>,
+    lookup: OwnedSemaphorePermit,
+) {
+    // Attribute the connection before it takes a serving slot or reads any requests.
+    let (label, key) = match conn.peer_pid().filter(|&pid| pid > 0) {
+        Some(pid) => {
+            let label = core.adapters.label_peer(Some(pid)).await;
+            let key = match &label {
+                Some(PeerLabel::Adapter { name, .. }) => SocketPeer::Adapter(name.clone()),
+                Some(PeerLabel::Unresolved) => SocketPeer::Unresolved,
+                None => SocketPeer::Process(pid),
+            };
+            (label, key)
+        }
+        None => (Some(PeerLabel::Unresolved), SocketPeer::Unresolved),
+    };
+    let slot = limits.admit(key);
+    drop(lookup);
+    let Some(slot) = slot else { return };
+    if slot.restricted {
+        conn.restrict_line_size(ServerLimits::AGENT.max_line);
+    }
+    serve_connection(core, conn, Via::Main, label.as_ref(), Some((&limits, slot))).await;
+}
+
 /// Serve one client connection until it ends. `via` is the socket it came in on.
-async fn serve_connection(core: Arc<Core>, mut conn: oxidepm_ipc::server::IpcConnection, via: Via) {
+async fn serve_connection(
+    core: Arc<Core>,
+    mut conn: IpcConnection,
+    via: Via,
+    label: Option<&PeerLabel>,
+    mut main: Option<(&MainSocketLimits, MainSocketSlot)>,
+) {
     let peer = PeerCred {
         pid: conn.peer_pid(),
         uid: conn.peer_uid(),
     };
-    // Who the peer is, decided once, now: a process that connects, writes and exits must not slip
-    // past the check after its /proc entry is gone. The agent socket is `ai` by its own rule;
-    // nothing is read while no adapter runs.
-    let label = if via == Via::Main {
-        core.adapters.label_peer(peer.pid).await
-    } else {
-        None
-    };
-
     loop {
-        match conn.read_request().await {
+        let claim_limit = main
+            .as_ref()
+            .is_some_and(|(_, slot)| !slot.restricted)
+            .then_some(ServerLimits::AGENT.max_line);
+        match conn.read_request_with_claim_limit(claim_limit).await {
             Ok(Some(Incoming::Request(envelope))) => {
+                let ctx = ReqCtx::attributed(peer, via, &envelope, label);
+                if let Some((limits, slot)) = &mut main {
+                    if !slot.restricted && ctx.actor.class == ActorClass::Ai {
+                        // Claims can narrow the connection's budget. Use the kernel PID so
+                        // another claim on the same connection or from the same peer cannot
+                        // increase that budget.
+                        let key = SocketPeer::DeclaredAi(peer.pid.expect("provisional peer PID"));
+                        let Some(restricted) = limits.admit(key) else {
+                            let reply = ResponseEnvelope::new(
+                                ctx.request_id,
+                                Response::error(
+                                    ErrorCode::RateLimited,
+                                    "Too many connections for this peer",
+                                ),
+                            );
+                            let _ = conn.send_response(&reply).await;
+                            break;
+                        };
+                        *slot = restricted;
+                        conn.restrict_line_size(ServerLimits::AGENT.max_line);
+                    }
+                }
                 // opening a session needs to know who is asking and what the host knows of the verb
                 if let Request::Adapter(adapter_request) = &envelope.request {
                     if let AdapterRequest::SessionOpen(args) = &**adapter_request {
-                        let ctx = ReqCtx::attributed(peer, via, &envelope, label.as_ref());
                         policy::log_request(&ctx, &envelope.request);
                         let response = if core.is_shutting_down() {
                             Response::from_error(&Error::ShuttingDown)
@@ -681,7 +814,6 @@ async fn serve_connection(core: Arc<Core>, mut conn: oxidepm_ipc::server::IpcCon
                 // a relayed verb answers with a stream of lines, not with one response
                 if let Request::Adapter(adapter_request) = &envelope.request {
                     if let AdapterRequest::Invoke(args) = &**adapter_request {
-                        let ctx = ReqCtx::attributed(peer, via, &envelope, label.as_ref());
                         policy::log_request(&ctx, &envelope.request);
                         let args = args.clone();
                         if serve_invoke(&core, &ctx, &envelope.request, *args, &mut conn).await {
@@ -694,7 +826,6 @@ async fn serve_connection(core: Arc<Core>, mut conn: oxidepm_ipc::server::IpcCon
                 if is_kill {
                     core.kill_waiters.fetch_add(1, Ordering::SeqCst);
                 }
-                let ctx = ReqCtx::attributed(peer, via, &envelope, label.as_ref());
                 // The supervisor's facade builds its commands' actor from this scope.
                 let response = CURRENT_ACTOR
                     .scope(
@@ -856,7 +987,6 @@ async fn serve_invoke(
 mod tests {
     use super::*;
     use oxidepm_ipc::protocol::Envelope;
-    use oxidepm_ipc::server::IpcConnection;
     use std::os::unix::fs::MetadataExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -924,6 +1054,8 @@ mod tests {
             core,
             IpcConnection::new(server, None),
             Via::Main,
+            None,
+            None,
         ));
         let mut client = BufReader::new(client);
         let mut kill = Envelope::new("preview", Request::Kill);

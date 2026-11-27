@@ -1,5 +1,6 @@
 //! IPC Server - Unix socket server for daemon
 
+use oxidepm_core::actor::{ActorClass, ActorId, Via};
 use oxidepm_core::{Error, Result};
 use std::fs::{self, File};
 use std::io;
@@ -400,6 +401,10 @@ impl Incoming {
 /// build has never heard of), except that `hello`, `ping` and `kill` are accepted from an older
 /// client down to [`PROTOCOL_CROSS_VERSION_MIN`].
 pub fn classify_line(line: &str) -> Incoming {
+    classify_line_with_limit(line, None)
+}
+
+fn classify_line_with_limit(line: &str, claim_limit: Option<usize>) -> Incoming {
     let value: serde_json::Value = match serde_json::from_str(line.trim()) {
         Ok(value) => value,
         Err(e) => {
@@ -411,6 +416,17 @@ pub fn classify_line(line: &str) -> Incoming {
             )
         }
     };
+    if let Some(limit) = claim_limit {
+        let claim = value.get("actor").and_then(|actor| actor.as_str());
+        if ActorId::from_connection(Via::Main, claim).class == ActorClass::Ai {
+            return Incoming::reject(
+                "",
+                ErrorCode::RequestTooLarge,
+                ReadError::TooLarge { limit }.to_string(),
+                true,
+            );
+        }
+    }
     let request_id = value
         .get("request_id")
         .and_then(|v| v.as_str())
@@ -510,6 +526,11 @@ impl IpcConnection {
         self.limits.idle_timeout = timeout;
     }
 
+    /// Reduce the maximum line length when the daemon identifies a peer.
+    pub fn restrict_line_size(&mut self, max_line: usize) {
+        self.limits.max_line = self.limits.max_line.min(max_line);
+    }
+
     /// The uid of the process on the other end, when the kernel told us.
     pub fn peer_uid(&self) -> Option<u32> {
         self.peer.as_ref().map(|c| c.uid())
@@ -522,6 +543,16 @@ impl IpcConnection {
 
     /// Read the next line and classify it. `Ok(None)` is a closed connection.
     pub async fn read_request(&mut self) -> std::result::Result<Option<Incoming>, ReadError> {
+        self.read_request_with_claim_limit(None).await
+    }
+
+    /// Read an unattributed main-socket request, with a lower limit for a non-human claim.
+    /// The claim may appear anywhere in the line, so the listener limit bounds the read
+    /// and the claim limit is checked before deserializing the request itself.
+    pub async fn read_request_with_claim_limit(
+        &mut self,
+        claim_limit: Option<usize>,
+    ) -> std::result::Result<Option<Incoming>, ReadError> {
         let mut buf = Vec::new();
         let read = {
             let mut limited = (&mut self.reader).take(self.limits.max_line as u64 + 1);
@@ -536,12 +567,16 @@ impl IpcConnection {
             Ok(Err(e)) => Err(ReadError::Io(e.to_string())),
             Ok(Ok(0)) => Ok(None), // Connection closed
             Ok(Ok(_)) => {
-                if buf.last() != Some(&b'\n') && buf.len() > self.limits.max_line {
+                let len = buf.len() - usize::from(buf.last() == Some(&b'\n'));
+                if len > self.limits.max_line {
                     return Err(ReadError::TooLarge {
                         limit: self.limits.max_line,
                     });
                 }
-                let incoming = classify_line(&String::from_utf8_lossy(&buf));
+                let incoming = classify_line_with_limit(
+                    &String::from_utf8_lossy(&buf),
+                    claim_limit.filter(|&limit| len > limit),
+                );
                 if let Incoming::Request(envelope) = &incoming {
                     debug!("Received IPC request: {}", envelope.request.name());
                 }

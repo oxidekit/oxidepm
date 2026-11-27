@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,6 +14,51 @@ use common::fixture::{install, InstallSpec};
 use common::*;
 use oxidepm_core::{AppSpec, Error, ErrorCode, Runtime};
 use serde_json::json;
+
+#[test]
+fn main_socket_keeps_cli_capacity_when_a_peer_reaches_its_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonProc::spawn(&dir.path().join("home"));
+    let socket = daemon.socket();
+    let mut connections = Vec::new();
+    for n in 0..8 {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let request = json!({
+            "protocol": 2, "request_id": "ping", "actor": format!("ai:peer-{n}"),
+            "request": {"type": "ping"}
+        });
+        writeln!(stream, "{request}").unwrap();
+        let mut response = String::new();
+        BufReader::new(&stream).read_line(&mut response).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(reply["response"]["type"], "pong", "{reply}");
+        connections.push(stream);
+    }
+
+    let ping = json!({ "type": "ping" });
+    let reply = daemon.rpc_on(&socket, "ping", Some("ai:next"), ping.clone());
+    assert_eq!(reply["response"]["code"], "E_RATE_LIMITED", "{reply}");
+    assert_eq!(daemon.rpc(ping)["type"], "pong");
+    drop(connections);
+}
+
+#[test]
+fn main_socket_keeps_the_larger_cli_request_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonProc::spawn(&dir.path().join("home"));
+    let request = json!({ "type": "hello", "client": "a".repeat(1024 * 1024) });
+    let reply = daemon.rpc_on(
+        &daemon.socket(),
+        "hello",
+        Some("ai:client"),
+        request.clone(),
+    );
+    assert_eq!(reply["response"]["code"], "E_REQUEST_TOO_LARGE", "{reply}");
+    assert_eq!(daemon.rpc(request)["type"], "hello");
+}
 
 /// The error of a start that must have been refused as an invalid spec or name.
 fn assert_invalid(result: Result<u32, Error>, what: &str) {
