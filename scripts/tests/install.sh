@@ -81,7 +81,7 @@ MOCK
 cat > "$work/bin/sudo" <<'MOCK'
 #!/bin/sh
 set -eu
-printf 'sudo %s %s\n' "$1" "${2-}" >> "$TEST_INSTALL_WORK/install-args"
+printf 'sudo %s %s %s\n' "$1" "${2-}" "${3-}" >> "$TEST_INSTALL_WORK/install-args"
 chmod u+w "$INSTALL_DIR"
 exec "$@"
 MOCK
@@ -143,8 +143,9 @@ for mode in user root sudo; do
         test "$(grep -c '^-m 0755 -o root -g root -- ' "$work/install-args")" -eq 2
     fi
     if [ "$mode" = sudo ]; then
-        test "$(grep -c '^sudo install -m$' "$work/install-args")" -eq 2
-        test "$(grep -c '^sudo cp -R$' "$work/install-args")" -eq 1
+        test "$(grep -c '^sudo install -m 0755$' "$work/install-args")" -eq 2
+        test "$(grep -c '^sudo install -d -m$' "$work/install-args")" -eq 2
+        test "$(grep -c '^sudo install -m 0644$' "$work/install-args")" -eq 3
     fi
     printf 'ok - installs executable binaries and readable adapters as %s\n' "$mode"
 done

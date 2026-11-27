@@ -198,15 +198,18 @@ install() {
     install_adapters "$@"
 }
 
-set_bundle_modes() (
-    chmod 00755 -- "$1"
-    for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+install_bundle_tree() (
+    source_dir=$1
+    destination_dir=$2
+    shift 2
+    command "$@" install -d -m 0755 -- "$destination_dir"
+    for entry in "$source_dir"/* "$source_dir"/.[!.]* "$source_dir"/..?*; do
         if [ -L "$entry" ]; then
-            continue
+            "$@" cp -P -- "$entry" "$destination_dir/"
         elif [ -d "$entry" ]; then
-            set_bundle_modes "$entry"
+            install_bundle_tree "$entry" "$destination_dir/${entry##*/}" "$@"
         elif [ -f "$entry" ]; then
-            chmod 0644 -- "$entry"
+            command "$@" install -m 0644 -- "$entry" "$destination_dir/"
         fi
     done
 )
@@ -227,10 +230,8 @@ install_adapters() {
     else
         set --
     fi
-    set_bundle_modes "$BUNDLE_SRC"
     "$@" rm -rf -- "$BUNDLE_DIR"
-    command "$@" install -d -m 0755 -- "$BUNDLE_DIR"
-    "$@" cp -R --preserve=mode --no-preserve=ownership -- "$BUNDLE_SRC/." "$BUNDLE_DIR/"
+    install_bundle_tree "$BUNDLE_SRC" "$BUNDLE_DIR" "$@"
 }
 
 # The runtimes (node, npm, pnpm, yarn, python, go, rust, cargo) are adapters. One command imports
