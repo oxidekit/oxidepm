@@ -1291,6 +1291,42 @@ fn yes_is_honoured_only_for_the_pure_class() {
 }
 
 #[test]
+fn adapters_that_provide_programs_require_explicit_consent() {
+    let runtime = Pkg::tool("runtime-demo", "0.1.0")
+        .with(
+            "provides",
+            json!({"runtimes": ["demo"], "programs": ["demo"]}),
+        )
+        .package();
+    let programs = Pkg::tool("programs", "0.1.0")
+        .with("provides", json!({"programs": ["example"]}))
+        .package();
+    let kit = kit_with(&[&runtime, &programs]);
+    let daemon = kit.daemon();
+
+    for package in [&runtime, &programs] {
+        let name = &package.name;
+        import(&kit, name);
+        let fingerprint = package.fingerprint();
+        let reply =
+            daemon.rpc(json!({"type": "adapter", "op": "enable", "name": name, "yes": true}));
+        assert_eq!(reply["code"], "E_ADAPTER_INVALID", "{reply}");
+        assert!(
+            reply["message"].as_str().unwrap().contains(&fingerprint),
+            "{reply}"
+        );
+
+        let run = kit.run(&["adapter", "enable", name, "--yes"]);
+        assert_eq!(run.code, 2, "{}", run.all());
+        assert!(run.stderr.contains(&fingerprint), "{}", run.all());
+        assert_eq!(info_json(&kit, name)["enabled"], false);
+
+        let accepted = kit.run(&["adapter", "enable", name, "--accept", &fingerprint]);
+        assert_eq!(accepted.code, 0, "{}", accepted.all());
+    }
+}
+
+#[test]
 fn yes_is_not_honoured_with_env_pass_or_broad_fs_read() {
     let env = Pkg::tool("envy", "0.1.0")
         .perms(json!({"env_pass": ["SSH_AUTH_SOCK"]}))

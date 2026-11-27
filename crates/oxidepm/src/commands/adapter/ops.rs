@@ -255,7 +255,9 @@ pub async fn enable(a: &crate::cli::EnableArgs) -> Result<()> {
 
     // the consent: an explicit fingerprint, or `--yes` for the pure class, or a person at a terminal
     let mut accept = a.accept.clone();
-    if accept.is_none() && a.yes && !manifest.permissions.is_pure_class() {
+    let provides_programs =
+        !manifest.provides.runtimes.is_empty() || !manifest.provides.programs.is_empty();
+    if accept.is_none() && a.yes && (provides_programs || !manifest.permissions.is_pure_class()) {
         let preview = Preview {
             manifest: &manifest,
             source_line: format!(
@@ -276,10 +278,17 @@ pub async fn enable(a: &crate::cli::EnableArgs) -> Result<()> {
         if !is_json_mode() {
             println!("{}", preview::render(&preview));
         }
+        let reason = if provides_programs {
+            format!("{} provides runtimes or programs", info.name)
+        } else {
+            format!(
+                "{} asks for: {}",
+                info.name,
+                manifest.permissions.broad_items().join(", ")
+            )
+        };
         return Err(anyhow::Error::new(super::Refusal(format!(
-            "--yes is honoured only for an adapter that needs nothing broad. {} asks for: {}. Read what it needs, then run: oxidepm adapter enable {} --accept {fingerprint}",
-            info.name,
-            manifest.permissions.broad_items().join(", "),
+            "--yes is honoured only for an adapter with limited permissions and no provided runtimes or programs. {reason}. Review the adapter, then run: oxidepm adapter enable {} --accept {fingerprint}",
             info.name
         ))));
     }

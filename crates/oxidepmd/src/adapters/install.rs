@@ -1172,6 +1172,13 @@ impl AdapterHost {
                 }
             }
             (None, true) => {
+                if !manifest.provides.runtimes.is_empty() || !manifest.provides.programs.is_empty()
+                {
+                    return Err(Error::AdapterInvalid(format!(
+                        "{} provides runtimes or programs and requires explicit consent. Pass --accept {fingerprint}",
+                        row.name
+                    )));
+                }
                 if !manifest.permissions.is_pure_class()
                     || (manifest
                         .permissions
