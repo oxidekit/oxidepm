@@ -215,6 +215,22 @@ impl EnforcedRecord {
             Err(missing)
         }
     }
+
+    /// Check the required items, including whether the self-test reached a Unix service.
+    pub fn check_with_unix_reachability(&self, required: &[Enforce]) -> Result<(), Vec<Enforce>> {
+        if self.allow_unenforced
+            || self.unix_reachable.is_empty()
+            || !required.contains(&Enforce::Network)
+        {
+            return self.check(required);
+        }
+
+        Err(required
+            .iter()
+            .copied()
+            .filter(|item| *item == Enforce::Network || !self.enforced.contains(item))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +339,41 @@ mod tests {
         let accepted = EnforcedRecord::from_report(&report(&[]), caps, true, false);
         assert_eq!(accepted.check(&[Enforce::Network]), Ok(()));
         assert!(accepted.allow_unenforced);
+    }
+
+    #[test]
+    fn reachable_unix_services_count_against_required_network_enforcement() {
+        let mut record = EnforcedRecord::from_report(
+            &report(&[
+                (attempt::INET_SOCKET, NO),
+                (attempt::IO_URING, NO),
+                (attempt::WRITE_OUTSIDE, NO),
+                (attempt::PATHNAME_SOCKET, Outcome::Allowed),
+            ]),
+            SandboxCaps::default(),
+            false,
+            false,
+        );
+        let required = [Enforce::FsRead, Enforce::Network, Enforce::FsWrite];
+        assert_eq!(
+            record.check_with_unix_reachability(&required),
+            Err(vec![Enforce::FsRead, Enforce::Network])
+        );
+        assert_eq!(
+            record.check_with_unix_reachability(&[Enforce::FsWrite]),
+            Ok(())
+        );
+        assert_eq!(record.check(&[Enforce::Network]), Ok(()));
+
+        record.allow_unenforced = true;
+        assert_eq!(record.check_with_unix_reachability(&required), Ok(()));
+
+        record.allow_unenforced = false;
+        record.unix_reachable.clear();
+        assert_eq!(
+            record.check_with_unix_reachability(&[Enforce::Network]),
+            Ok(())
+        );
     }
 
     #[test]
