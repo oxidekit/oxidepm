@@ -1416,6 +1416,43 @@ async fn adapter_enable_runs_the_selftest_with_a_long_tmpdir() {
     let _ = daemon.rpc(json!({ "type": "kill" }));
 }
 
+#[test]
+fn enable_accounts_for_reachable_unix_services() {
+    use common::adapter_kit::{IndexOpts, Kit, Pkg};
+
+    for required in [json!(["network"]), json!([])] {
+        let package = Pkg::tool("net", "0.1.0")
+            .perms(json!({"requires_enforcement": required}))
+            .package();
+        let kit = Kit::new();
+        kit.publish(&[&package], &IndexOpts::default());
+        let state = oxidepm_core::Paths::new(kit.home.clone()).adapter_state("net");
+        let _daemon = kit.daemon_with(&[("TMPDIR", state.to_str().unwrap())]);
+        let imported = kit.run(&["adapter", "import", "net"]);
+        assert_eq!(imported.code, 0, "{}", imported.all());
+        let fingerprint = package.fingerprint();
+
+        let automatic = kit.run(&["adapter", "enable", "net", "--yes"]);
+        assert_eq!(automatic.code, 1, "{}", automatic.all());
+        assert!(
+            automatic.stderr.contains("pathname_socket"),
+            "{}",
+            automatic.all()
+        );
+        let explicit = ["adapter", "enable", "net", "--accept", fingerprint.as_str()];
+        let run = kit.run(&explicit);
+        if required == json!(["network"]) {
+            assert_eq!(run.code, 1, "{}", run.all());
+            assert!(run.stderr.contains("pathname_socket"), "{}", run.all());
+            let override_run =
+                kit.run(&["adapter", "enable", "net", "--yes", "--allow-unenforced"]);
+            assert_eq!(override_run.code, 0, "{}", override_run.all());
+        } else {
+            assert_eq!(run.code, 0, "{}", run.all());
+        }
+    }
+}
+
 #[tokio::test]
 async fn launcher_failure_marks_failed_sandbox_and_the_daemon_is_unaffected() {
     let tmp = tempfile::tempdir().unwrap();

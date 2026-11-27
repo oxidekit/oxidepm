@@ -1239,14 +1239,25 @@ impl AdapterHost {
         let record = self
             .measure_enforcement(&paths, &row, &grant, args.allow_unenforced)
             .await?;
-        if let Err(missing) = record.check(&grant.requires_enforcement) {
+        if let Err(missing) = record.check_with_unix_reachability(&grant.requires_enforcement) {
             let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
+            let unix_note = record
+                .unix_note()
+                .map_or(String::new(), |note| format!(". {note}"));
             return Err(Error::AdapterInvalid(format!(
-                "{} requires the sandbox to enforce {}, which this machine cannot ({}). If you accept that, pass --allow-unenforced",
+                "{} requires the sandbox to enforce {}, which this machine cannot ({}){unix_note}. If you accept that, pass --allow-unenforced",
                 row.name,
                 names.join(", "),
                 self.caps().summary()
             )));
+        }
+        if args.yes && args.accept.is_none() && !record.allow_unenforced {
+            if let Some(note) = record.unix_note() {
+                return Err(Error::AdapterInvalid(format!(
+                    "Enabling {} requires explicit consent. {note}. Pass --accept {fingerprint} or --allow-unenforced",
+                    row.name
+                )));
+            }
         }
 
         // record the grant, then prove the adapter starts and answers
@@ -1710,7 +1721,9 @@ impl AdapterHost {
                 let record = self
                     .measure_enforcement(paths, &probe_row, &grant, allow)
                     .await?;
-                if let Err(missing) = record.check(&grant.requires_enforcement) {
+                if let Err(missing) =
+                    record.check_with_unix_reachability(&grant.requires_enforcement)
+                {
                     let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
                     return Err(Error::AdapterInvalid(format!(
                         "{name} {} requires the sandbox to enforce {}, which this machine cannot; {name} stays on {}",
