@@ -180,7 +180,7 @@ oxidepm adapter search watch
 oxidepm adapter import watch --enable
 ```
 
-The catalogue is published with each release at
+The catalogue is published with each final release at
 `https://raw.githubusercontent.com/oxidekit/oxidepm/catalogue/index.json` and signed with the
 release key (see [SECURITY.md](SECURITY.md)). It carries a sequence number and an expiry date and is
 renewed before it expires. The CLI and daemon refuse a catalogue that is unsigned, expired, older than
