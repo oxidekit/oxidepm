@@ -382,7 +382,8 @@ assert_sequence 4
 jq -e --arg legacy "$legacy_target" '.adapters[] | select(.name=="check") | .releases[0] |
     .version=="2.0.0" and (.artifacts | has($legacy) | not)' "$work/live.json" >/dev/null
 jq -e --arg legacy "$legacy_target" '.adapters[] | select(.name=="deploy") | .releases[0] |
-    .yanked and .yank_reason=="Withdrawn" and (.artifacts[$legacy].url | contains("/v1.0.0/"))' "$work/live.json" >/dev/null
+    .yanked and .yank_reason=="Withdrawn" and (.artifacts | has($legacy)) and
+    all(.artifacts[].url; contains("/v1.0.0/"))' "$work/live.json" >/dev/null
 jq -e '.revoked | length == 1' "$work/live.json" >/dev/null
 new_head=$(head_commit)
 reject 'older release tag' publish advance "$repo" "$remote" v1.0.0
