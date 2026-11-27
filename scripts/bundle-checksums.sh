@@ -10,11 +10,7 @@ trap 'rm -f "$sums"' EXIT
 for file in index.json "$@"; do
     name=${file#./}
     test -f "$name" && test ! -L "$name" || { echo "Missing regular bundle file: $name" >&2; exit 1; }
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum -- "$name"
-    else
-        shasum -a 256 -- "$name"
-    fi
+    sha256sum -- "$name"
 done > "$sums"
 chmod 644 "$sums"
 mv "$sums" SHA256SUMS

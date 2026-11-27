@@ -14,7 +14,7 @@ mkdir -p "$HOME" "$OXIDEPM_HOME" "$work/bin" "$work/releases"
 export CATALOGUE_TOOL="$tool" TEST_RELEASES="$work/releases" TEST_STATE="$work"
 export PATH="$work/bin:$PATH"
 repo=example/oxidepm
-targets='x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin'
+targets='x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu'
 input=adapter-catalogue-input.json
 
 fail() {
@@ -174,29 +174,28 @@ sign_release() {
     dir=$work/releases/$1
     (cd "$dir" && sha256sum -- ./*.tar.gz ./*.deb "$input" | sed 's/  \.\//  /' > checksums.txt)
     minisign -S -s "$work/key.sec" -m "$dir/checksums.txt" -t "oxidepm release checksums tag=$1" </dev/null
-    printf 'formula\n' > "$dir/oxidepm.rb"
 }
 
 edit_bundle_index() {
-    dir=$work/bundles/oxidepm-x86_64-apple-darwin/adapters
+    dir=$work/bundles/oxidepm-x86_64-unknown-linux-gnu/adapters
     jq "$1" "$dir/index.json" > "$dir/next.json"
     mv "$dir/next.json" "$dir/index.json"
     sh "$root/scripts/bundle-checksums.sh" "$dir"
 }
 
 make_release v1.0.0 1.0.0
-mv "$work/bundles/oxidepm-aarch64-apple-darwin" "$work/missing-target"
+mv "$work/bundles/oxidepm-aarch64-unknown-linux-gnu" "$work/missing-target"
 reject 'missing target' prepare v1.0.0 "$work/releases/invalid-matrix"
-mv "$work/missing-target" "$work/bundles/oxidepm-aarch64-apple-darwin"
+mv "$work/missing-target" "$work/bundles/oxidepm-aarch64-unknown-linux-gnu"
 printf 'ok - requires every matrix target\n'
 
-missing=$work/bundles/oxidepm-x86_64-apple-darwin/adapters/check-1.0.0.tar.gz
+missing=$work/bundles/oxidepm-x86_64-unknown-linux-gnu/adapters/check-1.0.0.tar.gz
 mv "$missing" "$work/missing-archive"
 reject 'missing asset' prepare v1.0.0 "$work/releases/missing-asset"
 mv "$work/missing-archive" "$missing"
 printf 'ok - requires every bundled archive\n'
 
-collision_dir=$work/bundles/oxidepm-x86_64-apple-darwin/adapters
+collision_dir=$work/bundles/oxidepm-x86_64-unknown-linux-gnu/adapters
 cp "$collision_dir/index.json" "$work/original.json"
 edit_bundle_index '(.adapters[] | select(.name == "deploy") | .releases[0].artifacts[].url) |= sub("deploy-"; "check-")'
 reject 'unexpected bundle archive URL' prepare v1.0.0 "$work/releases/collision"
@@ -222,11 +221,14 @@ printf 'ok - rejects colliding basenames and inconsistent metadata or bytes\n'
 prepare v1.0.0 "$work/releases/v1.0.0"
 sign_release v1.0.0
 release=$work/releases/v1.0.0
-test "$(wc -l < "$release/checksums.txt")" -eq 63
+test "$(wc -l < "$release/checksums.txt")" -eq 33
 for target in $targets; do
     cmp "$work/bundles/oxidepm-$target/adapters/check-1.0.0.tar.gz" \
         "$release/oxidepm-adapter-check-$target.tar.gz"
 done
+jq 'del(.adapters[0].releases[0].artifacts["aarch64-unknown-linux-gnu"])' \
+    "$release/$input" > "$work/incomplete-input.json"
+reject 'missing target' "$tool" advance "$repo" v1.0.0 - "$work/incomplete-input.json" "$work/invalid.json"
 printf 'ok - keeps each target archive under its own release asset name\n'
 
 git init --bare --quiet "$work/remote.git"
@@ -288,7 +290,7 @@ test "$(head_commit)" = "$seed"
 printf 'ok - requires explicit bootstrap and validates public assets and release signatures\n'
 
 make_release v1.1.0 1.0.0
-changed=$work/bundles/oxidepm-x86_64-apple-darwin/adapters
+changed=$work/bundles/oxidepm-x86_64-unknown-linux-gnu/adapters
 printf 'updated bytes\n' > "$changed/check-1.0.0.tar.gz"
 sum=$(sha256sum "$changed/check-1.0.0.tar.gz")
 jq --arg sha "${sum%% *}" --argjson size "$(wc -c < "$changed/check-1.0.0.tar.gz")" \
@@ -321,9 +323,17 @@ sign_policy() {
         -t "index sequence=$sequence generated=$generated" </dev/null
 }
 
-jq --slurpfile older "$work/releases/v0.9.0/$input" '.sequence=2 | .generated="2025-01-01T00:00:00Z" | .expires="2025-04-01T00:00:00Z" |
+# Published catalogues can contain targets absent from new release inputs.
+legacy_target=x86_64-apple-darwin
+for adapter in check deploy; do
+    cp "$release/oxidepm-adapter-$adapter-x86_64-unknown-linux-gnu.tar.gz" \
+        "$release/oxidepm-adapter-$adapter-$legacy_target.tar.gz"
+done
+jq --arg legacy "$legacy_target" --slurpfile older "$work/releases/v0.9.0/$input" '.sequence=2 | .generated="2025-01-01T00:00:00Z" | .expires="2025-04-01T00:00:00Z" |
     (.adapters[] | select(.name == "deploy") | .releases[0]) |= (.yanked=true | .yank_reason="Withdrawn") |
     (.adapters[] | select(.name == "deploy") | .releases) += ($older[0].adapters[] | select(.name == "deploy") | .releases) |
+    (.adapters[] | select(.name == "check" or .name == "deploy") | .releases[0].artifacts) |=
+        (.[$legacy] = (."x86_64-unknown-linux-gnu" | .url |= sub("x86_64-unknown-linux-gnu"; $legacy))) |
     .revoked=[{exe_sha256:(.adapters[] | select(.name == "init") | .releases[0].artifacts["x86_64-unknown-linux-gnu"].exe_sha256), reason:"Revoked"}]' \
     "$work/live.json" > "$policy/index.json"
 sign_policy
@@ -369,9 +379,10 @@ prepare v2.0.0 "$work/releases/v2.0.0"
 sign_release v2.0.0
 publish advance "$repo" "$remote" v2.0.0
 assert_sequence 4
-jq -e '.adapters[] | select(.name=="check") | .releases[0].version=="2.0.0"' "$work/live.json" >/dev/null
-jq -e '.adapters[] | select(.name=="deploy") | .releases[0] |
-    .yanked and .yank_reason=="Withdrawn" and (.artifacts[].url | contains("/v1.0.0/"))' "$work/live.json" >/dev/null
+jq -e --arg legacy "$legacy_target" '.adapters[] | select(.name=="check") | .releases[0] |
+    .version=="2.0.0" and (.artifacts | has($legacy) | not)' "$work/live.json" >/dev/null
+jq -e --arg legacy "$legacy_target" '.adapters[] | select(.name=="deploy") | .releases[0] |
+    .yanked and .yank_reason=="Withdrawn" and (.artifacts[$legacy].url | contains("/v1.0.0/"))' "$work/live.json" >/dev/null
 jq -e '.revoked | length == 1' "$work/live.json" >/dev/null
 new_head=$(head_commit)
 reject 'older release tag' publish advance "$repo" "$remote" v1.0.0
@@ -391,6 +402,10 @@ cp "$work/live.json" "$work/mixed.json"
 git --git-dir="$remote" show "$seed:index.json.minisig" > "$work/mixed.minisig"
 reject 'signature does not match' "$tool" verify_pair "$work/mixed.json" "$work/mixed.minisig" "$CATALOGUE_PUBLIC_KEY" 3
 printf 'ok - rejects mixed catalogue generations\n'
+
+for adapter in check deploy; do
+    rm -- "$release/oxidepm-adapter-$adapter-$legacy_target.tar.gz"
+done
 
 touch "$work/fail-upload"
 reject 'Upload failed' publish release "$repo" v1.0.0 "$release"

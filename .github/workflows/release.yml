@@ -29,10 +29,6 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             deb_arch: arm64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-15
-            target: x86_64-apple-darwin
     env:
       TARGET: ${{ matrix.target }}
       DEB_ARCH: ${{ matrix.deb_arch }}
@@ -50,13 +46,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Enable Rosetta for Intel binaries
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: |
-          if ! arch -x86_64 /usr/bin/true; then
-            sudo softwareupdate --install-rosetta --agree-to-license
-          fi
 
       - name: Build OxidePM
         working-directory: oxidepm
@@ -79,7 +68,6 @@ jobs:
           tar -czf "oxidepm-adapters-$TARGET.tar.gz" -C share/oxidepm/adapters .
 
       - name: Build Debian package
-        if: matrix.deb_arch != ''
         working-directory: oxidepm
         run: |
           version=$(sh scripts/deb-version.sh "$GITHUB_REF_NAME")
@@ -136,9 +124,7 @@ jobs:
         run: |
           mkdir release-input
           mv "oxidepm-$TARGET.tar.gz" "oxidepm-adapters-$TARGET.tar.gz" release-input/
-          if [ -n "$DEB_ARCH" ]; then
-            mv ./*.deb release-input/
-          fi
+          mv ./*.deb release-input/
           cp -R share/oxidepm/adapters release-input/adapters
 
       - uses: actions/upload-artifact@v4
@@ -176,8 +162,6 @@ jobs:
           target/debug/examples/catalogue prepare "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$release_date" \
             bundles artifacts "${names[@]}"
           (cd artifacts && LC_ALL=C sha256sum -- *.tar.gz *.deb adapter-catalogue-input.json > checksums.txt)
-          ruby dist/homebrew/generate.rb "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" artifacts/checksums.txt > artifacts/oxidepm.rb
-          ruby -c artifacts/oxidepm.rb
       - name: Sign release checksums
         env:
           OXIDEPM_MINISIGN_KEY: ${{ secrets.OXIDEPM_MINISIGN_KEY }}

@@ -15,11 +15,7 @@ env:
 
 jobs:
   ci:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,13 +31,7 @@ jobs:
           trap 'rm -rf -- "$OXIDEPM_HOME"' EXIT
           export TMPDIR="$OXIDEPM_HOME/tmp"
           mkdir -p "$TMPDIR"
-          if [[ "$RUNNER_OS" == macOS ]]; then
-            cargo test --workspace --no-fail-fast \
-              --exclude oxidepmd --exclude oxidepm-runtime --exclude oxidepm-adapter-fixture
-            cargo test -p oxidepmd --test environment --no-fail-fast
-          else
-            cargo test --workspace --no-fail-fast
-          fi
+          cargo test --workspace --no-fail-fast
 
   unused-deps:
     runs-on: ubuntu-latest

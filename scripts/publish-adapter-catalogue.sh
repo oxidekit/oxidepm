@@ -26,7 +26,7 @@ publish_release() {
     fi
 
     set -- "$assets_dir/"*
-    for file in checksums.txt checksums.txt.minisig oxidepm.rb; do
+    for file in checksums.txt checksums.txt.minisig; do
         test -s "$assets_dir/$file" || fail "missing release asset $file"
     done
     "$tool" verify_checksums "$assets_dir/checksums.txt" "$assets_dir/checksums.txt.minisig" \
@@ -36,7 +36,7 @@ publish_release() {
         hash=$(sha256sum -- "$file")
         printf '%s %s %s\n' "${file##*/}" "$(wc -c < "$file")" "${hash%% *}"
     done > "$work/expected"
-    awk '$1 !~ /^(checksums[.]txt([.]minisig)?|oxidepm[.]rb)$/ { print $3 "  " $1 }' "$work/expected" |
+    awk '$1 !~ /^(checksums[.]txt([.]minisig)?)$/ { print $3 "  " $1 }' "$work/expected" |
         LC_ALL=C sort -k2 > "$work/local-checksums"
     cmp -s "$work/checksums" "$work/local-checksums" || fail "release files disagree with signed checksums"
 

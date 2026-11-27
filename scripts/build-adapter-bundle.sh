@@ -39,4 +39,4 @@ done
 cargo build --locked --release --target "$target" "${packages[@]}"
 "$bin/oxidepm-adapter-bundle" --out "$bundle" --target "$target" \
     --url-base "$url_base" --sequence "$sequence" "${inputs[@]}"
-(cd "$bundle" && shasum -a 256 -c SHA256SUMS)
+(cd "$bundle" && sha256sum -c SHA256SUMS)

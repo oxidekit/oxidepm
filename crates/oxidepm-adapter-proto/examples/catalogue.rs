@@ -15,12 +15,7 @@ use oxidepm_adapter_proto::{
 use semver::Version;
 use sha2::{Digest, Sha256};
 
-const TARGETS: [&str; 4] = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-];
+const TARGETS: [&str; 2] = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
 const INPUT: &str = "adapter-catalogue-input.json";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -215,15 +210,13 @@ fn prepare(
         ] {
             copy_asset(&packages.join(&name), out, &name)?;
         }
-        if target.ends_with("-linux-gnu") {
-            let arch = if target.starts_with("x86_64") {
-                "amd64"
-            } else {
-                "arm64"
-            };
-            let name = format!("oxidepm_{}_{arch}.deb", tag[1..].replace('-', "."));
-            copy_asset(&packages.join(&name), out, &name)?;
-        }
+        let arch = if target.starts_with("x86_64") {
+            "amd64"
+        } else {
+            "arm64"
+        };
+        let name = format!("oxidepm_{}_{arch}.deb", tag[1..].replace('-', "."));
+        copy_asset(&packages.join(&name), out, &name)?;
         let bundle = packages.join("adapters");
         let body = read_limited(bundle.join("index.json"), INDEX_MAX_BYTES)?;
         let checksum_bytes = read_limited(bundle.join("SHA256SUMS"), 64 * 1024)?;
@@ -340,14 +333,14 @@ fn pinned_tag<'a>(prefix: &str, artifact: &'a Artifact) -> Result<&'a str> {
 }
 
 fn same_artifacts(current: &Release, incoming: &Release) -> bool {
-    current.artifacts.len() == incoming.artifacts.len()
-        && current.artifacts.iter().all(|(target, previous)| {
-            incoming.artifacts.get(target).is_some_and(|artifact| {
-                let mut artifact = artifact.clone();
-                artifact.url.clone_from(&previous.url);
-                &artifact == previous
-            })
+    // The incoming release has exactly the required targets. Older records can have more.
+    incoming.artifacts.iter().all(|(target, artifact)| {
+        current.artifacts.get(target).is_some_and(|previous| {
+            let mut artifact = artifact.clone();
+            artifact.url.clone_from(&previous.url);
+            &artifact == previous
         })
+    })
 }
 
 fn advance(repo: &str, tag: &str, current: &str, input: &str, out: &str) -> Result<()> {
@@ -403,13 +396,6 @@ fn advance(repo: &str, tag: &str, current: &str, input: &str, out: &str) -> Resu
         let candidate_version = Version::parse(&candidate.version)?;
         let mut unchanged = false;
         for release in &old.releases {
-            if release
-                .artifacts
-                .keys()
-                .any(|target| !candidate.artifacts.contains_key(target))
-            {
-                return Err(format!("release dropped a target for {}", old.name).into());
-            }
             let ordering = candidate_version.cmp_precedence(&Version::parse(&release.version)?);
             if ordering.is_lt() {
                 return Err(
@@ -428,6 +414,7 @@ fn advance(repo: &str, tag: &str, current: &str, input: &str, out: &str) -> Resu
             }
         }
         if unchanged {
+            // Keep the published record, including artifacts for previously supported targets.
             new.clone_from(old);
         } else {
             changed = true;

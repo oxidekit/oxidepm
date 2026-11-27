@@ -896,7 +896,7 @@ fn every_install_path_carries_the_adapters_of_the_release() {
             "the release bundle includes {name}"
         );
     }
-    assert!(bundle.contains("shasum -a 256 -c SHA256SUMS"));
+    assert!(bundle.contains("sha256sum -c SHA256SUMS"));
     assert!(
         release.contains(r#"-C "$PWD" share"#),
         "the release archives hold share/"
@@ -909,11 +909,6 @@ fn every_install_path_carries_the_adapters_of_the_release() {
         release.contains("oxidepm-adapters-$TARGET.tar.gz"),
         "the bundle is a release file of its own too"
     );
-
-    let formula = repo_file("dist/homebrew/generate.rb");
-    assert!(formula.contains(r#"share.install "share/oxidepm""#));
-    assert!(formula.contains("share/\"oxidepm/adapters/SHA256SUMS\""));
-    assert!(formula.contains(IMPORT_RUNTIMES));
 
     let install = repo_file("scripts/install.sh");
     assert!(install.contains("share/oxidepm/adapters") && install.contains(IMPORT_RUNTIMES));
