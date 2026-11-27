@@ -202,8 +202,8 @@ impl Release {
         let bin = dir.path().join("fakebin");
         std::fs::create_dir(&bin).unwrap();
         for program in [
-            "awk", "cat", "chmod", "cp", "cut", "dirname", "grep", "gzip", "mkdir", "mktemp", "mv",
-            "rm", "sed", "tar", "uname",
+            "awk", "cat", "chmod", "cp", "cut", "dirname", "grep", "gzip", "id", "install", "mkdir",
+            "mktemp", "mv", "rm", "sed", "tar", "uname",
         ] {
             symlink(find_program(program).unwrap(), bin.join(program)).unwrap();
         }
