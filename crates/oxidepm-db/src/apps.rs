@@ -23,6 +23,7 @@ pub enum AppRecord {
         id: u32,
         name: String,
         mode: String,
+        protected: bool,
         parent_id: Option<u32>,
         desired: Desired,
         error: String,
@@ -274,6 +275,7 @@ fn read_row(row: &SqliteRow) -> Result<AppRecord> {
     let id = required_column::<u32>(row, "id").map_err(db_err)?;
     let name = required_column::<String>(row, "name").map_err(db_err)?;
     let mode = required_column::<String>(row, "mode");
+    let protected = required_column::<i64>(row, "protected").map(|value| value != 0);
     let parent_id = row
         .try_get::<Option<u32>, _>("parent_id")
         .map_err(|e| e.to_string());
@@ -284,7 +286,7 @@ fn read_row(row: &SqliteRow) -> Result<AppRecord> {
         parent_id.as_ref().map_err(Clone::clone)?;
         desired.as_ref().map_err(Clone::clone)?;
         let created_at = required_column::<String>(row, "created_at")?;
-        let protected = required_column::<i64>(row, "protected")? != 0;
+        let protected = *protected.as_ref().map_err(Clone::clone)?;
         let ai_control = required_column::<i64>(row, "ai_control")? != 0;
         parse_spec(
             id,
@@ -311,6 +313,7 @@ fn read_row(row: &SqliteRow) -> Result<AppRecord> {
             id,
             name,
             mode: mode.unwrap_or_default(),
+            protected: protected.unwrap_or(true),
             parent_id,
             desired,
             error,

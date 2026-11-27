@@ -410,6 +410,7 @@ impl Supervisor {
                     id,
                     name,
                     mode,
+                    protected,
                     parent_id,
                     desired,
                     error,
@@ -426,7 +427,7 @@ impl Supervisor {
                     let handle = spawn_process_actor(
                         &self.ctx,
                         ActorInit {
-                            spec: Arc::new(placeholder_spec(id, &name, &mode)),
+                            spec: Arc::new(placeholder_spec(id, &name, &mode, protected)),
                             desired,
                             parent_id,
                             created_pending: false,
@@ -1874,7 +1875,7 @@ impl Supervisor {
 }
 
 /// The spec of a placeholder for a stored row that does not parse: only what the columns say.
-fn placeholder_spec(id: u32, name: &str, mode: &str) -> AppSpec {
+fn placeholder_spec(id: u32, name: &str, mode: &str, protected: bool) -> AppSpec {
     let mode = mode.parse().unwrap_or(Runtime::CMD);
     let mut spec = AppSpec::try_new(
         name.to_string(),
@@ -1892,5 +1893,6 @@ fn placeholder_spec(id: u32, name: &str, mode: &str) -> AppSpec {
     })
     .expect("a generated name is valid");
     spec.id = id;
+    spec.protected = protected;
     spec
 }

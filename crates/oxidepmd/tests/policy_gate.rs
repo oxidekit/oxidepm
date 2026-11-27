@@ -5,11 +5,13 @@
 mod common;
 
 use common::*;
+use oxidepm_adapter_proto::{HostLevel, HostScope};
 use oxidepm_core::actor::Via;
-use oxidepm_core::{AppStatus, Selector};
+use oxidepm_core::{AppStatus, Desired, Selector};
+use oxidepm_db::Database;
 use oxidepm_ipc::{Envelope, Request, Response};
 use oxidepmd::handlers::RequestHandler;
-use oxidepmd::policy::{PeerCred, ReqCtx};
+use oxidepmd::policy::{AdapterGrant, PeerCred, ReqCtx};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -118,4 +120,56 @@ async fn the_gate_refuses_an_ai_actor_before_it_acts() {
         .unwrap_err();
     assert_eq!(err.code().as_str(), "E_POLICY_DENIED");
     assert_eq!(h.state("closed").await.status, AppStatus::Running);
+}
+
+#[tokio::test]
+async fn broken_stored_apps_preserve_protection() {
+    let h = Harness::new().await;
+    let db = Database::new(&h.paths.db()).await.unwrap();
+    for (name, protected) in [("protected", true), ("plain", false), ("unknown", false)] {
+        let spec = sleeper(&h, name, json!({ "protected": protected }));
+        db.apps()
+            .insert_with(&spec, None, Desired::Stopped)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE apps SET spec_json = 'invalid' WHERE name IN ('protected', 'plain')")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE apps SET protected = 'invalid' WHERE name = 'unknown'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(h.sup.load_registry().await.unwrap().broken, 3);
+
+    let handler = RequestHandler::new(Arc::clone(&h.sup));
+    let adapter = ReqCtx::for_adapter(
+        "deployer",
+        AdapterGrant {
+            level: HostLevel::Admin,
+            scope: HostScope::All,
+        },
+        Via::AdapterChannel,
+        "req-gate".into(),
+        false,
+        None,
+    );
+    for name in ["protected", "unknown", "plain"] {
+        let selector = Selector::ByName(name.into());
+        let app = h.sup.show(&selector).await.unwrap().unwrap();
+        assert_eq!(app.spec.protected, name != "plain", "{name}");
+        assert!(!app.spec.ai_control, "{name}");
+        let result = handler
+            .guarded(&adapter, Request::Delete { selector })
+            .await;
+        if name == "plain" {
+            assert!(
+                matches!(result, Ok(Response::Deleted { count: 1, .. })),
+                "{result:?}"
+            );
+        } else {
+            assert_eq!(result.unwrap_err().code().as_str(), "E_PROTECTED", "{name}");
+        }
+    }
 }
