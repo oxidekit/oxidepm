@@ -590,6 +590,28 @@ fn cli_reports_when_a_read_only_verb_ignores_dry_run() {
 }
 
 #[test]
+fn dry_run_initializes_with_a_read_grant() {
+    let rig = Rig::new(
+        json!([{ "on": "command.invoke", "do": ["reply"] }]),
+        vec![verb("preview", "caution", true, true)],
+        json!({ "host": { "level": "lifecycle", "scope": "all" } }),
+        &[],
+    );
+    for dry_run in [true, false] {
+        let lines = read_all(&rig.send("preview", &rig.project, dry_run));
+        assert_eq!(last(&lines)["type"], "invoke_done", "{lines:?}");
+    }
+    let levels: Vec<_> = rig
+        .report()
+        .into_iter()
+        .filter(|r| r["what"] == "frame" && r["frame"]["method"] == "initialize")
+        .skip(rig.baseline)
+        .map(|r| r["frame"]["params"]["grant"]["level"].clone())
+        .collect();
+    assert_eq!(levels, ["read", "lifecycle"]);
+}
+
+#[test]
 fn dry_run_invoke_runs_with_a_read_only_profile() {
     need_landlock!();
     let rig = Rig::simple(json!([]), vec![verb("writer", "caution", true, true)]);

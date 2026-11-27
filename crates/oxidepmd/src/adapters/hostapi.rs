@@ -30,11 +30,12 @@ use oxidepm_core::actor::Via;
 use oxidepm_core::{ErrorCode, Tier};
 use oxidepm_ipc::{Request, Response};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::conn::{Inbound, StrikeHandle};
 use crate::audit::{ActorView, Audit};
-use crate::policy::{AdapterGrant, ReqCtx};
+use crate::policy::{classify, AdapterGrant, ReqCtx};
 
 /// Rate-limited answers that, inside [`OVER_RATE_WINDOW`], are a protocol violation.
 pub const OVER_RATE_STRIKE: usize = 20;
@@ -250,5 +251,41 @@ impl Inbound for HostApi {
                 format!("method not found: {other}"),
             )),
         }
+    }
+}
+
+/// Restrict a tool's host channel to reads for the lifetime of a dry run.
+pub(super) struct ReadOnlyHost(pub Arc<dyn Inbound>);
+
+#[async_trait]
+impl Inbound for ReadOnlyHost {
+    fn for_connection(&self, strikes: StrikeHandle) -> Option<Arc<dyn Inbound>> {
+        self.0
+            .for_connection(strikes)
+            .map(|inbound| Arc::new(Self(inbound)) as Arc<dyn Inbound>)
+    }
+
+    async fn request(&self, name: &str, params: Params) -> Result<Params, ErrorObject> {
+        if name == method::HOST_REQUEST {
+            // Let the normal handler report malformed requests.
+            let request = params
+                .get("request")
+                .and_then(|value| Request::deserialize(value).ok());
+            if request.is_some_and(|request| classify(&request, false).mutates) {
+                return to_params(&HostRequestResult {
+                    response: serde_json::json!({
+                        "type": "error",
+                        "code": ErrorCode::PolicyDenied.as_str(),
+                        "message": "The adapter's dry-run grant only allows reads",
+                    }),
+                })
+                .map_err(|e| ErrorObject::new(rpc::INTERNAL_ERROR, e.to_string()));
+            }
+        }
+        self.0.request(name, params).await
+    }
+
+    fn notification(&self, name: &str, params: Params) {
+        self.0.notification(name, params);
     }
 }

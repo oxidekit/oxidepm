@@ -22,7 +22,7 @@ use oxidepm_adapter_proto::messages::{
     method, Grant, InitPaths, InitializeParams, InitializeResult, InvokeParams, InvokeResult,
     NameVersion,
 };
-use oxidepm_adapter_proto::permissions::SpawnPerm;
+use oxidepm_adapter_proto::permissions::{HostLevel, SpawnPerm};
 use oxidepm_adapter_proto::{Kind, Params, Permissions, Verb, SUPPORTED_PROTOCOLS};
 use oxidepm_core::restart::{CrashTracker, Decision, ExitCause};
 use oxidepm_core::{Error, RestartMode, RestartPolicy};
@@ -881,7 +881,7 @@ impl AdapterEntry {
         // the handshake
         let conn = Arc::clone(&proc.conn);
         let outcome = tokio::select! {
-            r = self.handshake(&conn) => Some(r),
+            r = self.handshake(&conn, self.spec.grant) => Some(r),
             _ = wait_stop(stop_rx, false) => None,
         };
         let Some(outcome) = outcome else {
@@ -1090,7 +1090,7 @@ impl AdapterEntry {
         cause_of(status)
     }
 
-    async fn handshake(&self, conn: &Arc<super::conn::AdapterConn>) -> Result<(), Handshake> {
+    async fn handshake(&self, conn: &Arc<AdapterConn>, grant: Grant) -> Result<(), Handshake> {
         let params = InitializeParams {
             protocols: SUPPORTED_PROTOCOLS.to_vec(),
             host: NameVersion {
@@ -1102,7 +1102,7 @@ impl AdapterEntry {
                 version: self.spec.version.clone(),
             },
             kind: self.spec.kind,
-            grant: self.spec.grant,
+            grant,
             paths: InitPaths {
                 state: self.spec.launch.state_dir.display().to_string(),
             },
@@ -1487,12 +1487,20 @@ impl AdapterEntry {
         // the host's order to end every call (a stop, a disable, the shutdown) joins the caller's
         let ended = self.begin_oneshot()?;
         let launch = self.call_launch(&call);
+        let mut grant = self.spec.grant;
+        let mut cfg = self.cfg.conn;
+        let mut inbound = Arc::clone(&self.inbound);
+        if call.params.dry_run {
+            grant.level = HostLevel::Read;
+            cfg.limits.host_in_flight = ConnConfig::protocol1().limits.host_in_flight;
+            inbound = Arc::new(super::hostapi::ReadOnlyHost(inbound));
+        }
         let start = AdapterProc::start_named(
             &launch,
             &self.pids,
             call.slot,
-            self.cfg.conn,
-            Arc::clone(&self.inbound),
+            cfg,
+            inbound,
             "stderr-invoke.log",
         );
         let started = tokio::select! {
@@ -1509,7 +1517,7 @@ impl AdapterEntry {
         let conn = Arc::clone(&proc.conn);
 
         let shaken = tokio::select! {
-            r = self.handshake(&conn) => r,
+            r = self.handshake(&conn, grant) => r,
             _ = cancel.cancelled() => { proc.kill().await; return Err(Error::Cancelled("the call was cancelled".to_string())) }
             _ = ended.cancelled() => { proc.kill().await; return Err(Error::Cancelled("the adapter was stopped".to_string())) }
         };
@@ -1615,7 +1623,7 @@ impl AdapterEntry {
         };
 
         let shaken = tokio::select! {
-            r = self.handshake(&conn) => r,
+            r = self.handshake(&conn, self.spec.grant) => r,
             _ = cancel.cancelled() => { proc.kill().await; bridge.abort(); return Err(Error::Cancelled("the session was ended before it started".to_string())) }
             _ = ended.cancelled() => { proc.kill().await; bridge.abort(); return Err(Error::Cancelled("the adapter was stopped".to_string())) }
         };
