@@ -611,30 +611,38 @@ impl Drop for AdapterProc {
     }
 }
 
-/// The bytes held by the files under `dir`, visiting at most `max_entries` entries. A
-/// directory that cannot be read counts as empty; links are not followed.
-pub fn dir_usage(dir: &Path, max_entries: usize) -> u64 {
+/// The bytes held by the entries under `dir`. Missing entries are skipped and symlinks
+/// are counted by their own size. An incomplete scan returns an error.
+pub fn dir_usage(dir: &Path, max_entries: usize) -> io::Result<u64> {
     let mut total = 0u64;
     let mut seen = 0usize;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry?;
             seen += 1;
-            if seen > max_entries {
-                return total;
+            if seen >= max_entries {
+                return Err(io::Error::other(format!(
+                    "reached the limit of {max_entries} entries"
+                )));
             }
-            let Ok(meta) = entry.metadata() else { continue };
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            total = total.saturating_add(meta.len().max(meta.blocks().saturating_mul(512)));
             if meta.is_dir() {
                 stack.push(entry.path());
-            } else {
-                total = total.saturating_add(meta.len());
             }
         }
     }
-    total
+    Ok(total)
 }
 
 /// Create the adapter's state directory (0700) if it is missing.
@@ -969,11 +977,17 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/b"), vec![0u8; 2000]).unwrap();
         std::os::unix::fs::symlink("/etc", dir.path().join("link")).unwrap();
-        // the link counts as its own few bytes; /etc is not walked
-        assert_eq!(dir_usage(dir.path(), 100), 3000 + "/etc".len() as u64);
-        // the cap bounds the walk: three entries below, a cap of one visits one of them
-        assert!(dir_usage(dir.path(), 1) <= 2000);
-        assert_eq!(dir_usage(&dir.path().join("missing"), 10), 0);
+        // The symlink contributes only its own size.
+        let expected = ["a", "sub", "sub/b", "link"]
+            .iter()
+            .map(|path| {
+                let meta = std::fs::symlink_metadata(dir.path().join(path)).unwrap();
+                meta.len().max(meta.blocks() * 512)
+            })
+            .sum::<u64>();
+        assert_eq!(dir_usage(dir.path(), 100).unwrap(), expected);
+        assert!(dir_usage(dir.path(), 1).is_err());
+        assert_eq!(dir_usage(&dir.path().join("missing"), 10).unwrap(), 0);
     }
 
     #[test]

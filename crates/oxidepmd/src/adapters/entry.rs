@@ -257,6 +257,8 @@ impl EntryConfig {
 
 /// The adapter's state directory may hold this much.
 pub const STATE_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
+/// Reaching this many entries also exceeds the state directory quota.
+const STATE_ENTRY_LIMIT: usize = 10_000;
 /// Processes and threads in the adapter's tree.
 pub const MAX_THREADS: u32 = 64;
 /// Relayed verbs one adapter runs at once.
@@ -1209,15 +1211,19 @@ impl AdapterEntry {
 
     async fn state_over_quota(&self) -> Option<String> {
         let dir = self.spec.launch.state_dir.clone();
-        let bytes = tokio::task::spawn_blocking(move || dir_usage(&dir, usize::MAX))
-            .await
-            .unwrap_or_default();
-        (bytes > self.cfg.state_quota_bytes).then(|| {
-            format!(
-                "its state directory holds {bytes} bytes; the limit is {} bytes. The data is kept; enable the adapter again after clearing it",
-                self.cfg.state_quota_bytes
-            )
-        })
+        let why =
+            match tokio::task::spawn_blocking(move || dir_usage(&dir, STATE_ENTRY_LIMIT)).await {
+                Ok(Ok(bytes)) if bytes <= self.cfg.state_quota_bytes => return None,
+                Ok(Ok(bytes)) => format!(
+                    "its state directory holds {bytes} bytes; the limit is {} bytes",
+                    self.cfg.state_quota_bytes
+                ),
+                Ok(Err(err)) => format!("cannot measure its state directory: {err}"),
+                Err(err) => format!("cannot finish measuring its state directory: {err}"),
+            };
+        Some(format!(
+            "{why}. The data is kept; enable the adapter again after clearing it"
+        ))
     }
 
     /// Check immediately after spawn and at each quota interval for the lifetime of the process.
@@ -1996,6 +2002,103 @@ impl Drop for AdapterEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quota_entry(home: &std::path::Path, state_quota_bytes: u64) -> Arc<AdapterEntry> {
+        let name = "quota".to_string();
+        let version = "1.0.0".to_string();
+        let mut cfg = EntryConfig::production();
+        cfg.state_quota_bytes = state_quota_bytes;
+        AdapterEntry::new(
+            EntrySpec {
+                name: name.clone(),
+                version: version.clone(),
+                kind: Kind::Tool,
+                launch: Launch {
+                    name,
+                    version,
+                    exec: home.join("adapter"),
+                    exe_sha256: String::new(),
+                    state_dir: home.join("state"),
+                    daemon_home: home.to_path_buf(),
+                    log_dir: home.join("logs"),
+                    env_pass: Vec::new(),
+                    connect_env_socket: Vec::new(),
+                    env_source: Arc::new(|_| None),
+                    sandbox: None,
+                    memory_mb: 0,
+                },
+                grant: Grant {
+                    level: HostLevel::Read,
+                    scope: oxidepm_adapter_proto::permissions::HostScope::OptedIn,
+                },
+                slot: 1,
+                verbs: Vec::new(),
+                recipe: None,
+                runtime: None,
+                ai_driven: false,
+            },
+            cfg,
+            PidTable::new(home.join("pids.json")),
+            Arc::new(super::super::conn::NoHostApi),
+            None,
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn state_quota_refuses_an_unreadable_subdirectory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let entry = quota_entry(home.path(), 1024 * 1024);
+        let nested = entry.spec.launch.state_dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("data"), [1; 16]).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&nested);
+        let result = entry.check_state_quota().await;
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // A privileged test runner may still be able to read a directory with mode 0000.
+        match readable {
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+                assert!(result.is_err());
+                assert_eq!(entry.state(), EntryState::Disabled);
+            }
+            Ok(_) => assert!(result.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn state_quota_counts_allocated_blocks() {
+        use std::os::unix::fs::MetadataExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let entry = quota_entry(home.path(), 1);
+        let dir = &entry.spec.launch.state_dir;
+        std::fs::create_dir(dir).unwrap();
+        let path = dir.join("data");
+        std::fs::write(&path, [1]).unwrap();
+        if std::fs::metadata(&path).unwrap().blocks() > 0 {
+            assert!(entry.check_state_quota().await.is_err());
+            assert_eq!(entry.state(), EntryState::Disabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn state_quota_refuses_a_directory_at_the_entry_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let entry = quota_entry(home.path(), STATE_QUOTA_BYTES);
+        let dir = &entry.spec.launch.state_dir;
+        std::fs::create_dir(dir).unwrap();
+        for i in 0..STATE_ENTRY_LIMIT {
+            std::fs::File::create(dir.join(i.to_string())).unwrap();
+        }
+
+        assert!(entry.check_state_quota().await.is_err());
+        assert_eq!(entry.state(), EntryState::Disabled);
+    }
 
     fn t0() -> Instant {
         Instant::now()
