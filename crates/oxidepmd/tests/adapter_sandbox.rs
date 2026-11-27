@@ -1530,6 +1530,41 @@ fn enable_accounts_for_reachable_unix_services() {
     }
 }
 
+#[test]
+fn update_explains_unix_reachability_when_network_enforcement_is_required() {
+    use common::adapter_kit::{IndexOpts, Kit, Pkg};
+
+    let v1 = Pkg::tool("net", "0.1.0").package();
+    let v2 = Pkg::tool("net", "0.2.0")
+        .perms(json!({"requires_enforcement": ["network"]}))
+        .package();
+    let kit = Kit::new();
+    let mut index = IndexOpts::default();
+    kit.publish(&[&v1], &index);
+    let state = oxidepm_core::Paths::new(kit.home.clone()).adapter_state("net");
+    let _daemon = kit.daemon_with(&[("TMPDIR", state.to_str().unwrap())]);
+    let imported = kit.run(&["adapter", "import", "net"]);
+    assert_eq!(imported.code, 0, "{}", imported.all());
+    let enabled = kit.run(&["adapter", "enable", "net", "--accept", &v1.fingerprint()]);
+    assert_eq!(enabled.code, 0, "{}", enabled.all());
+
+    index.sequence += 1;
+    kit.publish(&[&v1, &v2], &index);
+    let update = kit.run(&["adapter", "update", "net"]);
+    assert_eq!(update.code, 1, "{}", update.all());
+    assert!(
+        update.stderr.contains("net stays on 0.1.0"),
+        "{}",
+        update.all()
+    );
+    assert!(
+        update.stderr.contains("AF_UNIX services reachable:")
+            && update.stderr.contains("pathname_socket"),
+        "{}",
+        update.all()
+    );
+}
+
 #[tokio::test]
 async fn launcher_failure_marks_failed_sandbox_and_the_daemon_is_unaffected() {
     let tmp = tempfile::tempdir().unwrap();

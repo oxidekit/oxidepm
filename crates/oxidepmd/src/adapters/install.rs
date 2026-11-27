@@ -1738,8 +1738,11 @@ impl AdapterHost {
                     record.check_with_unix_reachability(&grant.requires_enforcement)
                 {
                     let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
+                    let unix_note = record
+                        .unix_note()
+                        .map_or(String::new(), |note| format!(". {note}"));
                     return Err(Error::AdapterInvalid(format!(
-                        "{name} {} requires the sandbox to enforce {}, which this machine cannot; {name} stays on {}",
+                        "{name} {} requires the sandbox to enforce {}, which this machine cannot{unix_note}. {name} stays on {}",
                         manifest.version,
                         names.join(", "),
                         old.version
