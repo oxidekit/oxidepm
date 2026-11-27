@@ -9,7 +9,9 @@
 //! (the adapter) and the self-test (the launcher).
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,6 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::{SecondsFormat, Utc};
+use nix::errno::Errno;
+use nix::fcntl::{openat, OFlag};
+use nix::sys::stat::Mode;
+use nix::unistd::{geteuid, unlinkat, UnlinkatFlags};
 use oxidepm_adapter_proto::manifest::Rule;
 use oxidepm_adapter_proto::messages::method;
 use oxidepm_adapter_proto::permissions::{HostLevel, HostScope};
@@ -24,6 +30,7 @@ use oxidepm_adapter_proto::{
     host_target, Index, Invalid, Kind, Manifest, Permissions, ValidateCtx, VerifiedIndex,
     INDEX_MAX_BYTES,
 };
+use oxidepm_core::constants::ADAPTERS_DIR;
 use oxidepm_core::release_bundle::{self, ReleaseBundle};
 use oxidepm_core::{runtime_hints, Error, Paths, Result};
 use oxidepm_db::AdapterRow;
@@ -56,17 +63,58 @@ const ADAPTER_PATH: [&str; 3] = ["/usr/local/bin", "/usr/bin", "/bin"];
 
 // ---- housekeeping ----------------------------------------------------------------------------
 
+fn open_relative(parent: Option<&File>, path: &Path, flags: OFlag) -> nix::Result<File> {
+    let fd = openat(
+        parent.map(AsRawFd::as_raw_fd),
+        path,
+        flags | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?;
+    // SAFETY: openat returned a new descriptor owned by this caller.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn open_cleanup_dir(parent: Option<&File>, path: &Path) -> io::Result<File> {
+    let dir = open_relative(parent, path, OFlag::O_DIRECTORY)?;
+    let metadata = dir.metadata()?;
+    if metadata.uid() != geteuid().as_raw() || metadata.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} must be private to the current user", path.display()),
+        ));
+    }
+    Ok(dir)
+}
+
+fn open_adapter_cleanup_root(paths: &Paths) -> io::Result<File> {
+    // Ignore a trailing slash so O_NOFOLLOW also applies to the last home component.
+    let home_path: PathBuf = paths.home().components().collect();
+    let home = open_cleanup_dir(None, &home_path)?;
+    open_cleanup_dir(Some(&home), Path::new(ADAPTERS_DIR))
+}
+
+fn directory_fd_path(dir: &File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+}
+
+fn cleanup_entries(parent: &File, name: &Path) -> io::Result<(File, std::fs::ReadDir)> {
+    let dir = open_cleanup_dir(Some(parent), name)?;
+    let entries = std::fs::read_dir(directory_fd_path(&dir))?;
+    Ok((dir, entries))
+}
+
 /// Delete what an import left behind in `adapters/staging` more than [`STAGING_MAX_AGE`] ago. A
 /// fresh entry is another import in progress and stays.
 pub fn clean_staging(paths: &Paths) {
-    let dir = paths.adapter_staging();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    let Ok(root) = open_adapter_cleanup_root(paths) else {
+        return;
+    };
+    let Ok((dir, entries)) = cleanup_entries(&root, Path::new("staging")) else {
         return;
     };
     let now = SystemTime::now();
     for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        let Ok(meta) = entry.metadata() else {
             continue;
         };
         let age = meta
@@ -75,10 +123,11 @@ pub fn clean_staging(paths: &Paths) {
             .and_then(|m| now.duration_since(m).ok())
             .unwrap_or(Duration::ZERO);
         if age >= STAGING_MAX_AGE {
-            if let Err(e) = remove_any(&path) {
+            let name = entry.file_name();
+            if let Err(e) = remove_any_at(&dir, Path::new(&name)) {
                 warn!(
                     "Could not delete the old staging entry {}: {}",
-                    path.display(),
+                    paths.adapter_staging().join(name).display(),
                     e
                 );
             }
@@ -90,18 +139,20 @@ pub fn clean_staging(paths: &Paths) {
 /// an install or an update leaves them) and everything in `trash/`. A version that a row names
 /// as current or as its rollback step stays.
 pub fn sweep_installed(paths: &Paths, rows: &[AdapterRow]) {
-    let root = paths.adapter_installed_root();
-    if let Ok(names) = std::fs::read_dir(&root) {
-        for name in names.flatten() {
-            let path = name.path();
-            let Some(file) = name.file_name().to_str().map(str::to_string) else {
+    let Ok(adapters) = open_adapter_cleanup_root(paths) else {
+        return;
+    };
+    if let Ok((root, names)) = cleanup_entries(&adapters, Path::new("installed")) {
+        for entry in names.flatten() {
+            let name = entry.file_name();
+            let Some(text) = name.to_str() else {
                 continue;
             };
-            let row = rows.iter().find(|r| r.name == file);
-            let meta = std::fs::symlink_metadata(&path);
-            let is_dir = meta.as_ref().is_ok_and(|m| m.is_dir());
+            let path = paths.adapter_installed_root().join(&name);
+            let row = rows.iter().find(|r| r.name == text);
+            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
             let Some(row) = row.filter(|_| is_dir) else {
-                if let Err(e) = remove_any(&path) {
+                if let Err(e) = remove_any_at(&root, Path::new(&name)) {
                     warn!(
                         "Could not delete the unreferenced {}: {}",
                         path.display(),
@@ -110,19 +161,19 @@ pub fn sweep_installed(paths: &Paths, rows: &[AdapterRow]) {
                 }
                 continue;
             };
-            let Ok(versions) = std::fs::read_dir(&path) else {
+            let Ok((dir, versions)) = cleanup_entries(&root, Path::new(&name)) else {
                 continue;
             };
-            for version in versions.flatten() {
+            for entry in versions.flatten() {
+                let version = entry.file_name();
                 let keep = version
-                    .file_name()
                     .to_str()
                     .is_some_and(|v| v == row.version || row.prev_version.as_deref() == Some(v));
                 if !keep {
-                    if let Err(e) = remove_any(&version.path()) {
+                    if let Err(e) = remove_any_at(&dir, Path::new(&version)) {
                         warn!(
                             "Could not delete the unreferenced {}: {}",
-                            version.path().display(),
+                            path.join(version).display(),
                             e
                         );
                     }
@@ -130,12 +181,13 @@ pub fn sweep_installed(paths: &Paths, rows: &[AdapterRow]) {
             }
         }
     }
-    if let Ok(entries) = std::fs::read_dir(paths.adapter_trash()) {
+    if let Ok((dir, entries)) = cleanup_entries(&adapters, Path::new("trash")) {
         for entry in entries.flatten() {
-            if let Err(e) = remove_any(&entry.path()) {
+            let name = entry.file_name();
+            if let Err(e) = remove_any_at(&dir, Path::new(&name)) {
                 warn!(
                     "Could not empty the trash entry {}: {}",
-                    entry.path().display(),
+                    paths.adapter_trash().join(name).display(),
                     e
                 );
             }
@@ -145,26 +197,66 @@ pub fn sweep_installed(paths: &Paths, rows: &[AdapterRow]) {
 
 /// Delete a file, a link or a directory tree, and check that it is gone.
 pub(super) fn remove_any(path: &Path) -> std::io::Result<()> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "missing name for adapter cleanup",
+        )
+    })?;
+    let parent_path = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = match open_cleanup_dir(None, parent_path) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if meta.is_dir() {
-        // a directory the owner cannot write would stop the deletion: the extractor makes them
-        // 0700, but a tree from another hand is made deletable first
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-        std::fs::remove_dir_all(path)?;
+    remove_any_at(&parent, Path::new(name))
+}
+
+fn remove_any_at(parent: &File, name: &Path) -> io::Result<()> {
+    let entry = match open_relative(Some(parent), name, OFlag::O_PATH) {
+        Ok(entry) => entry,
+        Err(Errno::ENOENT) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let path = directory_fd_path(parent).join(name);
+    if entry.metadata()?.is_dir() {
+        // Change permissions on the opened directory. On Linux remove_dir_all walks from the
+        // parent descriptor and does not follow links in the tree.
+        let _ = std::fs::set_permissions(
+            directory_fd_path(&entry),
+            std::fs::Permissions::from_mode(0o700),
+        );
+        std::fs::remove_dir_all(&path)?;
     } else {
-        std::fs::remove_file(path)?;
+        match unlinkat(Some(parent.as_raw_fd()), name, UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
-    match std::fs::symlink_metadata(path) {
+    match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(std::io::Error::other(format!(
             "{} is still there after it was deleted",
-            path.display()
+            name.display()
         ))),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod housekeeping_tests {
+    use super::*;
+    use nix::fcntl::{fcntl, FcntlArg};
+
+    #[test]
+    fn cleanup_directory_descriptor_does_not_follow_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = open_cleanup_dir(None, temp.path()).unwrap();
+        let flags = fcntl(dir.as_raw_fd(), FcntlArg::F_GETFL).unwrap();
+        assert!(OFlag::from_bits_retain(flags).contains(OFlag::O_NOFOLLOW));
     }
 }
 
