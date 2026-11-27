@@ -1,7 +1,10 @@
-//! Counters of the tasks the supervisor owns, for tests (`Supervisor::stats`).
+//! Live app measurements and counters of the tasks the supervisor owns.
 //!
-//! Compiled only with the `test-stats` feature: without it a [`Counted`] guard is a zero-sized
+//! Task counters are compiled only with `test-stats`. A [`Counted`] guard is otherwise a zero-sized
 //! type and costs nothing, so production builds carry no counters.
+
+use oxidepm_core::{AppStats, ProcessTreeStats};
+use oxidepm_logs::LogCapture;
 
 /// The kinds of task that are counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,14 +113,23 @@ pub use imp::{Counted, Stats};
 pub(super) struct Reading {
     pub cpu_percent: f32,
     pub mem_bytes: u64,
-    pub tree: oxidepm_core::ProcessTreeStats,
+    pub tree: ProcessTreeStats,
 }
 
 impl super::Supervisor {
     /// Live measurements for a registered application.
-    pub fn app_stats(&self, id: super::AppId) -> Option<oxidepm_core::AppStats> {
-        self.registry.get(id).map(|handle| oxidepm_core::AppStats {
-            tree: handle.live().metrics().tree,
+    pub fn app_stats(&self, id: super::AppId) -> Option<AppStats> {
+        let handle = self.registry.get(id)?;
+        let live = handle.live();
+        let output = if live.proc().is_some() {
+            let path = self.paths.log_path(&handle.snapshot().spec.name, "out");
+            LogCapture::output_stats(&path)
+        } else {
+            Default::default()
+        };
+        Some(AppStats {
+            tree: live.metrics().tree,
+            output,
         })
     }
 }

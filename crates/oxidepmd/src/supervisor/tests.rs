@@ -1038,6 +1038,61 @@ async fn samples_fifty_apps_within_the_interval_budget() {
     fx.sup.shutdown(Duration::from_secs(5)).await;
 }
 
+#[tokio::test]
+async fn stdout_and_stderr_bytes_reset_the_output_age() {
+    let fx = fixture().await;
+    let silent = fx.sup.start(fx.sleeper("silent").0).await.unwrap();
+    let chatty = fx
+        .sup
+        .start(fx.cmd(
+            "chatty",
+            r#"
+            while [ ! -e say-out ]; do sleep .02; done
+            printf x
+            while [ ! -e say-err ]; do sleep .02; done
+            printf y >&2
+            exec sleep 30
+            "#,
+        ))
+        .await
+        .unwrap();
+    let stats = |id| fx.sup.app_stats(id).unwrap().output;
+    let initial_age = stats(silent).seconds_since_output.expect("capture age");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let silent_stats = stats(silent);
+    assert!(silent_stats.seconds_since_output.unwrap() > initial_age);
+    assert_eq!(silent_stats.last_output_at, None);
+    assert_eq!(stats(chatty).last_output_at, None);
+    assert!(stats(chatty).seconds_since_output.unwrap() >= 1);
+
+    let wait_for_output = |previous| async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let output = stats(chatty);
+                if output.last_output_at > previous {
+                    break output;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the capture records the bytes")
+    };
+    std::fs::write(fx.file("say-out"), "").unwrap();
+    let stdout = wait_for_output(None).await;
+    assert!(stdout.seconds_since_output.unwrap() < stats(silent).seconds_since_output.unwrap());
+    std::fs::write(fx.file("say-err"), "").unwrap();
+    let stderr = wait_for_output(stdout.last_output_at).await;
+    assert!(stderr.seconds_since_output.unwrap() < stats(silent).seconds_since_output.unwrap());
+    for stream in ["out", "err"] {
+        let path = fx.paths.log_path("chatty", stream);
+        assert_eq!(path.metadata().unwrap().len(), 0, "no complete line yet");
+    }
+    fx.sup.stop(chatty).await.unwrap();
+    assert_eq!(stats(chatty), Default::default());
+    fx.sup.stop(silent).await.unwrap();
+}
+
 /// A stop cancels the dependency wait: the pipeline future is dropped (no task is left waiting
 /// on the dependency's snapshot) and the app is stopped, not errored by a later timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

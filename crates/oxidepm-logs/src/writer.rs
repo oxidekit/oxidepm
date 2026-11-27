@@ -1,16 +1,16 @@
 //! Log writer with rotation support
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use oxidepm_core::Result;
+use oxidepm_core::{OutputStats, Result};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{ChildStderr, ChildStdout};
 use tracing::{debug, warn};
@@ -366,6 +366,41 @@ fn locked<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+struct OutputActivity {
+    started: Instant,
+    last: Mutex<Option<(DateTime<Utc>, Instant)>>,
+}
+
+fn capture_activity() -> &'static Mutex<HashMap<PathBuf, Weak<OutputActivity>>> {
+    static CAPTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<OutputActivity>>>> = OnceLock::new();
+    CAPTURES.get_or_init(Mutex::default)
+}
+
+impl OutputActivity {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last: Mutex::new(None),
+        }
+    }
+
+    fn record(&self) {
+        let mut last = locked(&self.last);
+        *last = Some((Utc::now(), Instant::now()));
+    }
+
+    fn stats(&self) -> OutputStats {
+        let (last_output_at, since) = match *locked(&self.last) {
+            Some((utc, instant)) => (Some(utc), instant),
+            None => (None, self.started),
+        };
+        OutputStats {
+            last_output_at,
+            seconds_since_output: Some(since.elapsed().as_secs()),
+        }
+    }
+}
+
 async fn write_batch(
     writer: &Arc<Mutex<LogWriter>>,
     label: &'static str,
@@ -408,8 +443,9 @@ async fn capture_stream<R: AsyncRead + Unpin>(
     reader: R,
     writer: &Arc<Mutex<LogWriter>>,
     label: &'static str,
+    activity: &OutputActivity,
 ) {
-    capture_stream_with(reader, writer, label, read_error_backoff).await;
+    capture_stream_with(reader, writer, label, activity, read_error_backoff).await;
 }
 
 /// The writer is locked for one batch of lines at a time and never across an await, so
@@ -418,6 +454,7 @@ async fn capture_stream_with<R: AsyncRead + Unpin>(
     mut reader: R,
     writer: &Arc<Mutex<LogWriter>>,
     label: &'static str,
+    activity: &OutputActivity,
     backoff: impl Fn(u32) -> Duration,
 ) {
     let mut chunk = vec![0u8; 8192];
@@ -429,6 +466,7 @@ async fn capture_stream_with<R: AsyncRead + Unpin>(
         match reader.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
+                activity.record();
                 read_errors = 0;
                 let mut lines = Vec::new();
                 splitter.push(&chunk[..n], &mut |line| lines.push(line));
@@ -468,6 +506,14 @@ impl LogCapture {
         })
     }
 
+    /// Activity from both pipes of the current capture opened at this stdout log path.
+    pub fn output_stats(stdout: &Path) -> OutputStats {
+        let activity = locked(capture_activity())
+            .get(stdout)
+            .and_then(Weak::upgrade);
+        activity.map_or_else(OutputStats::default, |activity| activity.stats())
+    }
+
     /// Spawn tasks to capture stdout and stderr
     pub fn spawn_capture(
         self,
@@ -488,21 +534,33 @@ impl LogCapture {
         stdout: Option<ChildStdout>,
         stderr: Option<ChildStderr>,
     ) -> CaptureTasks {
+        let activity = Arc::new(OutputActivity::new());
+        {
+            let mut captures = locked(capture_activity());
+            captures.retain(|_, activity| activity.strong_count() != 0);
+            // Each launch owns a new clock. An older reader can only update its own capture.
+            captures.insert(
+                self.stdout_writer.path().to_path_buf(),
+                Arc::downgrade(&activity),
+            );
+        }
         let out_writer = Arc::new(Mutex::new(self.stdout_writer));
         let err_writer = Arc::new(Mutex::new(self.stderr_writer));
         let control = LogControl {
             stdout: Arc::clone(&out_writer),
             stderr: Arc::clone(&err_writer),
+            _activity: Arc::clone(&activity),
         };
 
         let stdout_handle = stdout.map(|out| {
+            let activity = Arc::clone(&activity);
             tokio::spawn(async move {
-                capture_stream(out, &out_writer, "stdout").await;
+                capture_stream(out, &out_writer, "stdout", &activity).await;
             })
         });
         let stderr_handle = stderr.map(|err| {
             tokio::spawn(async move {
-                capture_stream(err, &err_writer, "stderr").await;
+                capture_stream(err, &err_writer, "stderr", &activity).await;
             })
         });
 
@@ -526,6 +584,8 @@ pub struct CaptureTasks {
 pub struct LogControl {
     stdout: Arc<Mutex<LogWriter>>,
     stderr: Arc<Mutex<LogWriter>>,
+    // A running app can close both pipes and still have output history.
+    _activity: Arc<OutputActivity>,
 }
 
 impl LogControl {
@@ -906,6 +966,7 @@ mod tests {
             },
             &writer,
             "stdout",
+            &OutputActivity::new(),
             |_| Duration::ZERO,
         )
         .await;
@@ -930,9 +991,10 @@ mod tests {
         });
         ready_rx.recv().unwrap();
 
+        let activity = OutputActivity::new();
         tokio::join!(
             biased;
-            capture_stream(&b"line\n"[..], &writer, "stdout"),
+            capture_stream(&b"line\n"[..], &writer, "stdout", &activity),
             async { let _ = progress_tx.send(()); },
         );
         assert!(worker.join().unwrap());

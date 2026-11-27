@@ -798,6 +798,15 @@ pub struct ProcessTreeStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AppStats {
     pub tree: ProcessTreeStats,
+    pub output: OutputStats,
+}
+
+/// Output activity for the current capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutputStats {
+    pub last_output_at: Option<DateTime<Utc>>,
+    /// Counts from capture start until the first bytes arrive.
+    pub seconds_since_output: Option<u64>,
 }
 
 /// Runtime state of an application
