@@ -88,25 +88,14 @@ fn rules(profile: &Profile) -> Result<BTreeMap<i64, Vec<SeccompRule>>, String> {
         rules.insert(nr, Vec::new());
     }
     if profile.network == NetworkMode::None {
-        // no IP networking, no raw packets, no netlink; AF_UNIX stays
-        let mut sockets = Vec::new();
-        for domain in [
-            libc::AF_INET,
-            libc::AF_INET6,
-            libc::AF_PACKET,
-            libc::AF_NETLINK,
-        ] {
-            sockets.push(
-                SeccompRule::new(vec![cond(
-                    0,
-                    SeccompCmpArgLen::Dword,
-                    SeccompCmpOp::Eq,
-                    domain as u64,
-                )?])
-                .map_err(|e| format!("seccomp: {e}"))?,
-            );
-        }
-        rules.insert(libc::SYS_socket, sockets);
+        let non_unix_socket = SeccompRule::new(vec![cond(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Ne,
+            libc::AF_UNIX as u64,
+        )?])
+        .map_err(|e| format!("seccomp: {e}"))?;
+        rules.insert(libc::SYS_socket, vec![non_unix_socket]);
     }
     if profile.spawn == SpawnMode::None {
         for nr in fork_calls() {
@@ -325,6 +314,32 @@ mod tests {
         assert_eq!(
             action(&program, 0, libc::SYS_getpid, 0),
             libc::SECCOMP_RET_KILL_PROCESS
+        );
+    }
+
+    #[test]
+    fn network_none_allows_only_unix_sockets() {
+        let (arch, audit_arch) = native_arch();
+        let mut profile = profile();
+        profile.network = NetworkMode::None;
+        let program = compile(&profile, arch).unwrap();
+        assert_eq!(
+            action(&program, audit_arch, libc::SYS_socket, libc::AF_UNIX as u64),
+            libc::SECCOMP_RET_ALLOW
+        );
+        let unknown_family = u64::from(u32::MAX);
+        for family in [libc::AF_INET as u64, libc::AF_INET6 as u64, unknown_family] {
+            assert_eq!(
+                action(&program, audit_arch, libc::SYS_socket, family),
+                libc::SECCOMP_RET_ERRNO | libc::EPERM as u32
+            );
+        }
+
+        profile.network = NetworkMode::Outbound;
+        let program = compile(&profile, arch).unwrap();
+        assert_eq!(
+            action(&program, audit_arch, libc::SYS_socket, libc::AF_INET as u64),
+            libc::SECCOMP_RET_ALLOW
         );
     }
 }
