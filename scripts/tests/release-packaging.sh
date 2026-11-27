@@ -7,6 +7,18 @@ trap 'rm -rf -- "$work"' EXIT
 mkdir "$work/assets" "$work/bin" "$work/bundle"
 tag=v1.2.3-rc.1
 
+export TEST_PACKAGING_TAR=$(command -v tar)
+cat > "$work/bin/tar" <<'MOCK'
+#!/bin/sh
+set -eu
+if [ "$1" != --no-same-owner ]; then
+    echo 'Release extraction must use --no-same-owner' >&2
+    exit 1
+fi
+exec "$TEST_PACKAGING_TAR" "$@"
+MOCK
+chmod +x "$work/bin/tar"
+
 test_pkgbuild() {
     if grep -Fq "'SKIP'" "$root/dist/aur/PKGBUILD"; then
         echo 'The package template skips source verification' >&2
@@ -53,6 +65,18 @@ test_pkgbuild() {
         test ! -s "$work/bad-PKGBUILD"
     done
     printf 'ok - refuses missing, duplicate, and malformed package checksums\n'
+
+    src="$work/oxidepm-${tag#v}"
+    mkdir -p "$src/target/release" "$work/pkg"
+    touch "$src/target/release/oxidepm" "$src/target/release/oxidepmd" \
+        "$src/target/release/oxidepm-sandbox" "$src/LICENSE-MIT" "$src/LICENSE-APACHE"
+    printf '{}\n' > "$work/bundle/index.json"
+    (cd "$work/bundle" && sha256sum index.json > SHA256SUMS)
+    tar -czf "$work/assets/oxidepm-adapters-$tag-x86_64.tar.gz" -C "$work/bundle" .
+    PATH="$work/bin:$PATH" CARCH=x86_64 srcdir="$work/assets" pkgdir="$work/pkg" \
+        bash -eu -c 'source "$1"; cd "$2"; package' _ "$work/PKGBUILD" "$work"
+    cmp "$work/bundle/index.json" "$work/pkg/usr/share/oxidepm/adapters/index.json"
+    printf 'ok - extracts the package adapter bundle without archive ownership\n'
 }
 
 test_docker_bundle() {
@@ -105,7 +129,7 @@ MOCK
     sign_checksums "$tag"
     ADAPTER_BUNDLE_URL="https://example.invalid/download/$tag" PATH="$work/bin:$PATH" sh "$work/docker-run"
     test -f "$work/extracted/index.json"
-    printf 'ok - extracts an adapter bundle with authenticated release checksums\n'
+    printf 'ok - extracts an authenticated adapter bundle without archive ownership\n'
 
     for rejected in signature tag archive; do
         rm -rf -- "$work/extracted"

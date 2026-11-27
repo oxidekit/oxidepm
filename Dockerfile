@@ -58,7 +58,7 @@ RUN set -eu; \
          fi; \
          curl -fsSL "$base/$archive" -o "$archive"; \
          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict; \
-         tar -xzf "$archive" -C /usr/share/oxidepm/adapters; \
+         tar --no-same-owner -xzf "$archive" -C /usr/share/oxidepm/adapters; \
          test -f /usr/share/oxidepm/adapters/index.json; \
          (cd /usr/share/oxidepm/adapters && sha256sum -c SHA256SUMS); \
        else \

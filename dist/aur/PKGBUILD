@@ -31,7 +31,7 @@ package() {
     install -Dm755 "target/release/oxidepmd" "$pkgdir/usr/bin/oxidepmd"
     install -Dm755 "target/release/oxidepm-sandbox" "$pkgdir/usr/bin/oxidepm-sandbox"
     install -dm755 "$pkgdir/usr/share/oxidepm/adapters"
-    tar -xzf "$srcdir/$pkgname-adapters-$_tag-$CARCH.tar.gz" -C "$pkgdir/usr/share/oxidepm/adapters"
+    tar --no-same-owner -xzf "$srcdir/$pkgname-adapters-$_tag-$CARCH.tar.gz" -C "$pkgdir/usr/share/oxidepm/adapters"
     (cd "$pkgdir/usr/share/oxidepm/adapters" && sha256sum --check SHA256SUMS)
     install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
     install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
