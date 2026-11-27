@@ -191,7 +191,7 @@ enum Launch {
     First,
     /// An operator restart of an app that was up: no gate, the event is `Restarted`.
     Restart(Cause),
-    /// A launch the actor decided on (crash restart, cron): the cached plan, no gate.
+    /// A launch the actor decided on, such as a crash restart or a cron tick.
     Auto(Cause),
 }
 
@@ -207,11 +207,10 @@ impl Launch {
 enum PipelineMode {
     /// Operator launch: gate (when `gate`), startup delay, then `prepare` and `plan`.
     Operator { gate: bool },
-    /// Automatic launch: the cached plan.
-    Cached,
+    /// Automatic relaunch without a dependency gate or startup delay.
+    Automatic,
 }
 
-#[derive(Clone)]
 struct PreparedLaunch {
     plan: LaunchPlan,
     invocation: Option<PathBuf>,
@@ -221,7 +220,7 @@ struct PreparedLaunch {
 
 enum PipelineResult {
     /// The plan to launch, and the launch slot to hold until the launch is over (an operator
-    /// launch; an automatic one needs no build and takes none).
+    /// launch or an adapter launch that needs preparation).
     Ready(PreparedLaunch, Option<OwnedSemaphorePermit>, Vec<String>),
     Failed(Error),
 }
@@ -264,7 +263,8 @@ pub struct ProcessActor {
     ctx: Arc<ActorCtx>,
     child: Option<GroupChild>,
     capture: Option<Capture>,
-    plan: Option<PreparedLaunch>,
+    /// The in-memory plan for automatic relaunches of a plain command.
+    plan: Option<LaunchPlan>,
     /// Owns the verified executable for as long as the child may reopen it.
     running_pin: Option<Arc<dyn Runner>>,
     /// Cancelled when the child goes away; the health task is tied to it.
@@ -1121,11 +1121,11 @@ impl ProcessActor {
         self.emit(LifecycleKind::CronFired, Cause::Cron, detail);
         self.terminate(None).await;
         self.restarts += 1;
-        self.begin_pipeline(PipelineMode::Cached, Launch::Auto(Cause::Cron));
+        self.begin_pipeline(PipelineMode::Automatic, Launch::Auto(Cause::Cron));
     }
 
     /// the child of generation `gen` is over its memory limit, or has run for
-    /// `max_uptime_secs`. It is replaced by the cached plan after the tracker's delay. The
+    /// `max_uptime_secs`. It is relaunched after the tracker's delay. The
     /// tracker is told it was a limit restart, so it never ends a periodic restart in a crash
     /// loop, while a limit that fires within seconds of every start still does.
     async fn on_limit(&mut self, gen: u64, kind: LimitKind) {
@@ -1190,7 +1190,7 @@ impl ProcessActor {
                 (*gate && !self.spec.depends_on.is_empty())
                     || (*gate && self.spec.startup_delay_ms.unwrap_or(0) > 0)
             }
-            PipelineMode::Cached => false,
+            PipelineMode::Automatic => false,
         };
         self.state = if waits {
             State::Waiting
@@ -1198,7 +1198,7 @@ impl ProcessActor {
             State::Building
         };
         building.store(!waits, Ordering::SeqCst);
-        let origin = if matches!(mode, PipelineMode::Cached) {
+        let origin = if matches!(mode, PipelineMode::Automatic) {
             Origin::Auto
         } else {
             self.launch_origin
@@ -1239,7 +1239,9 @@ impl ProcessActor {
         self.pipeline = None;
         match result {
             PipelineResult::Ready(plan, slot, warnings) => {
-                self.plan = plan.pin_owner.is_none().then(|| plan.clone());
+                if self.spec.mode.is_cmd() {
+                    self.plan = Some(plan.plan.clone());
+                }
                 self.launch_warnings = warnings;
                 let launched = self.launch(&plan).await;
                 // the slot is free as soon as the launch is over, whatever came of it
@@ -1330,7 +1332,7 @@ impl ProcessActor {
         }
     }
 
-    /// the cached plan could not be spawned again. The tracker counts it like a crash
+    /// An automatic relaunch failed. The tracker counts it like a crash
     /// (longer delay, closer to the breaker); the operator's first launch is never retried.
     fn on_auto_launch_failed(&mut self, cause: Cause, message: String) -> Flow {
         self.last_exit_code = None;
@@ -1679,7 +1681,7 @@ impl ProcessActor {
         }
     }
 
-    /// the backoff is over; the automatic launch reuses the cached plan.
+    /// Start the automatic relaunch when the backoff ends.
     async fn on_backoff_elapsed(&mut self) -> Flow {
         if self.is_closed() {
             self.state = State::Stopped;
@@ -1689,7 +1691,7 @@ impl ProcessActor {
             "Restarting process {} (attempt {})",
             self.spec.name, self.restarts
         );
-        self.begin_pipeline(PipelineMode::Cached, Launch::Auto(self.backoff_cause));
+        self.begin_pipeline(PipelineMode::Automatic, Launch::Auto(self.backoff_cause));
         Flow::Continue
     }
 
@@ -1890,18 +1892,26 @@ async fn run_pipeline(
     spec: Arc<AppSpec>,
     mode: PipelineMode,
     origin: Origin,
-    cached: Option<PreparedLaunch>,
+    cached: Option<LaunchPlan>,
     building: Arc<AtomicBool>,
     phase: Arc<Notify>,
 ) -> PipelineResult {
     let gate = match mode {
-        PipelineMode::Cached => match cached {
-            Some(plan) => return PipelineResult::Ready(plan, None, Vec::new()),
-            None => {
-                // not expected (the plan is cached by the first launch); prepare again
-                false
+        PipelineMode::Automatic => {
+            if let Some(plan) = cached {
+                return PipelineResult::Ready(
+                    PreparedLaunch {
+                        plan,
+                        invocation: None,
+                        adapter: false,
+                        pin_owner: None,
+                    },
+                    None,
+                    Vec::new(),
+                );
             }
-        },
+            false
+        }
         PipelineMode::Operator { gate } => gate,
     };
 

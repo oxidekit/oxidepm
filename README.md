@@ -480,12 +480,15 @@ takes the new spec).
 
 `daemon.toml` in the data directory holds the daemon's own settings: `shutdown_budget_secs`
 (10 to 900, default 120), `launch_concurrency` (1 to 64, default 4) and `agent_socket`
-(default `true`, see [AI-SAFETY](docs/AI-SAFETY.md)) and `reuse_plan` (default `true`): an app
-whose runtime an adapter provides keeps the launch plan the adapter made, and a resurrect at
-boot or an automatic launch may start from it when the app, the adapter and its executable are
-unchanged (at once when the plan had no build steps, otherwise only when the adapter cannot be
-asked, and then with a warning); `false` always asks the adapter. A start or restart by a person
-never uses a stored plan. An unknown key or a value out of range keeps the daemon from starting.
+(default `true`, see [AI-SAFETY](docs/AI-SAFETY.md)) and `reuse_plan` (default `true`). On
+resurrection or automatic relaunch, the daemon can reuse an adapter's saved plan when the
+adapter's view of the app is unchanged, the same adapter is enabled with the same version and
+executable, and the plan passes current validation. A built executable must still match its
+saved digest. The daemon uses a valid plan with no build steps immediately. For a plan with
+build steps, the daemon consults the adapter first and warns if an outage leads it to use the
+saved plan. Set `reuse_plan = false` to require fresh preparation on every launch. A manual
+start or restart always requests fresh preparation. An unknown key or a value out of range
+keeps the daemon from starting.
 
 ## Project init
 

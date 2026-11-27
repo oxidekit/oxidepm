@@ -254,25 +254,29 @@ struct Consulted {
     steps: Vec<CheckedStep>,
     /// The stored plan of an earlier launch, when plan reuse is allowed for this launch.
     stored: Option<Stored>,
-    /// `prepare` is to use the stored plan and ask nothing.
-    use_stored: bool,
+    /// The stored plan has already been checked and selected for this launch.
+    selected: Option<ValidatedPlan>,
     /// What the person should be told about this launch.
     warnings: Vec<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct SavedPlan {
+    adapter_version: String,
     #[serde(flatten)]
     reply: PlanResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     built_sha256: Option<[u8; 32]>,
 }
 
-/// A stored plan that passed the reuse checks.
 struct Stored {
+    saved: SavedPlan,
+    had_steps: bool,
+}
+
+struct ValidatedPlan {
     plan: CheckedPlan,
     pinned: Option<PinnedBinary>,
-    had_steps: bool,
 }
 
 /// A sealed copy keeps the executable's verified contents stable until the child runs.
@@ -420,9 +424,7 @@ impl AdapterRunner {
         }
     }
 
-    /// The stored plan of this app, when this launch may use it and it still holds: same spec
-    /// digest, same adapter and executable, and a plan that passes today's checks with a
-    /// program that still exists.
+    /// Find the stored plan for this app and adapter. Validate it when it is selected.
     async fn load_stored(&self, spec: &AppSpec, digest: &str) -> Option<Stored> {
         if !self.reuse_plan || !matches!(self.origin, Origin::Resurrect | Origin::Auto) {
             return None;
@@ -436,16 +438,39 @@ impl AdapterRunner {
             return None;
         }
         let saved: SavedPlan = serde_json::from_str(&row.plan_json).ok()?;
-        let plan = validate_plan(&saved.reply, spec, &self.rules).ok()?;
-        let pinned = Self::pin_binary(&plan).ok()?;
-        if pinned.as_ref().map(|binary| binary.digest) != saved.built_sha256 {
+        if saved.adapter_version != self.entry.version() {
             return None;
         }
         Some(Stored {
-            plan,
-            pinned,
+            saved,
             had_steps: row.had_steps,
         })
+    }
+
+    fn check_stored(&self, spec: &AppSpec, stored: &Stored) -> Option<ValidatedPlan> {
+        let plan = validate_plan(&stored.saved.reply, spec, &self.rules).ok()?;
+        if plan.built_binary.is_some() && (!stored.had_steps || stored.saved.built_sha256.is_none())
+        {
+            return None;
+        }
+        let pinned = Self::pin_binary(&plan).ok()?;
+        if pinned.as_ref().map(|binary| binary.digest) != stored.saved.built_sha256 {
+            return None;
+        }
+        Some(ValidatedPlan { plan, pinned })
+    }
+
+    fn ensure_current(&self) -> Result<()> {
+        if matches!(
+            self.host.runtime_provider(self.runtime.as_str()),
+            Provider::Enabled(entry) if Arc::ptr_eq(&entry, &self.entry)
+        ) {
+            return Ok(());
+        }
+        Err(Error::AdapterMissing(format!(
+            "runtime adapter '{}' changed or was disabled while preparing the launch",
+            self.entry.name()
+        )))
     }
 
     /// Remember the plan and the digest of any build executable it uses.
@@ -481,12 +506,8 @@ impl AdapterRunner {
     }
 
     /// An adapter hands the actor the launch path and the invocation path together.
-    fn prepared_plan(
-        &self,
-        plan: CheckedPlan,
-        pinned: Option<PinnedBinary>,
-        warnings: Vec<String>,
-    ) -> PrepareResult {
+    fn prepared_plan(&self, validated: ValidatedPlan, warnings: Vec<String>) -> PrepareResult {
+        let ValidatedPlan { plan, pinned } = validated;
         let mut result = PrepareResult::success("");
         let mut launch = plan.launch;
         result.binary_path = if let Some(pinned) = pinned {
@@ -545,19 +566,20 @@ impl Runner for AdapterRunner {
     /// are checked here, so an adapter that asks for a program the manifest does not list fails
     /// the launch before anything runs.
     ///
-    /// A resurrect or an automatic launch may stand on the plan stored by an earlier launch. It is used at once, without asking, when that plan had no build steps; or when the adapter
-    /// cannot be asked. A person's start or restart never does.
+    /// For resurrection and automatic relaunch, a valid saved plan can be used immediately if
+    /// it had no build steps. A saved plan with build steps is a fallback when the adapter is
+    /// unavailable.
     async fn consult(&self, spec: &AppSpec) -> Result<()> {
         let view = spec_view(spec, self.entry.name());
         let stored = self.load_stored(spec, &spec_digest(&view)).await;
-        if stored.as_ref().is_some_and(|s| !s.had_steps) {
-            info!(
-                "{} starts from its stored launch plan; the adapter is not asked",
-                spec.name
-            );
-            let mut state = self.state.lock();
-            state.use_stored = true;
-            state.stored = stored;
+        self.ensure_current()?;
+        if let Some(selected) = stored
+            .as_ref()
+            .filter(|stored| !stored.had_steps)
+            .and_then(|stored| self.check_stored(spec, stored))
+        {
+            info!("{} starts from its stored launch plan", spec.name);
+            self.state.lock().selected = Some(selected);
             return Ok(());
         }
         // The adapter runs in its own working directory. Resolve relative PATH entries against
@@ -581,13 +603,18 @@ impl Runner for AdapterRunner {
         };
         let reply: PrepareReply = match self.ask(method::RUNTIME_PREPARE, &params).await {
             Ok(reply) => reply,
-            Err(e) if is_outage(&e) && stored.is_some() => {
-                let stored = stored.expect("checked");
+            Err(e) if is_outage(&e) => {
+                self.ensure_current()?;
+                let Some(stored) = stored else {
+                    return Err(e);
+                };
+                let Some(selected) = self.check_stored(spec, &stored) else {
+                    return Err(e);
+                };
                 let warning = self.stored_warning(&e, stored.had_steps);
                 let mut state = self.state.lock();
                 state.warnings.push(warning);
-                state.use_stored = true;
-                state.stored = Some(stored);
+                state.selected = Some(selected);
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -609,18 +636,18 @@ impl Runner for AdapterRunner {
     /// Run the steps in the core, then ask `runtime.plan` and check the plan. Called while the
     /// launch slot is held.
     async fn prepare(&self, spec: &AppSpec) -> Result<PrepareResult> {
-        let (steps, stored, use_stored, mut warnings) = {
+        self.ensure_current()?;
+        let (steps, stored, selected, mut warnings) = {
             let mut state = self.state.lock();
             (
                 std::mem::take(&mut state.steps),
                 state.stored.take(),
-                state.use_stored,
+                state.selected.take(),
                 std::mem::take(&mut state.warnings),
             )
         };
-        if use_stored {
-            let stored = stored.expect("a stored plan was chosen");
-            return Ok(self.prepared_plan(stored.plan, stored.pinned, warnings));
+        if let Some(selected) = selected {
+            return Ok(self.prepared_plan(selected, warnings));
         }
         let had_steps = !steps.is_empty();
         let log_path = self
@@ -667,12 +694,16 @@ impl Runner for AdapterRunner {
         };
         let reply: PlanResult = match self.ask(method::RUNTIME_PLAN, &params).await {
             Ok(reply) => reply,
-            // the steps ran and the adapter then could not be asked: the stored plan is the same
-            // program the same adapter chose earlier
-            Err(e) if is_outage(&e) && stored.is_some() => {
-                let stored = stored.expect("checked");
+            Err(e) if is_outage(&e) => {
+                self.ensure_current()?;
+                let Some(selected) = stored
+                    .as_ref()
+                    .and_then(|stored| self.check_stored(spec, stored))
+                else {
+                    return Err(e);
+                };
                 warnings.push(self.stored_warning(&e, false));
-                return Ok(self.prepared_plan(stored.plan, stored.pinned, warnings));
+                return Ok(self.prepared_plan(selected, warnings));
             }
             Err(e) => return Err(e),
         };
@@ -700,11 +731,19 @@ impl Runner for AdapterRunner {
             );
         }
         let saved = SavedPlan {
+            adapter_version: self.entry.version().to_string(),
             reply,
             built_sha256: pinned.as_ref().map(|binary| binary.digest),
         };
         self.store_plan(spec, digest, &saved, had_steps).await;
-        Ok(self.prepared_plan(checked, pinned, warnings))
+        self.ensure_current()?;
+        Ok(self.prepared_plan(
+            ValidatedPlan {
+                plan: checked,
+                pinned,
+            },
+            warnings,
+        ))
     }
 
     /// The plan comes from `prepare` for a runtime adapter.

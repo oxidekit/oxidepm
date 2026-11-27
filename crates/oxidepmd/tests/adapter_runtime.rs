@@ -1213,7 +1213,7 @@ fn reboot_with_adapter_down_uses_the_persisted_plan_for_an_unchanged_spec() {
 }
 
 #[test]
-fn the_built_program_runs_and_can_be_reused_after_boot() {
+fn a_stored_built_program_must_match_its_saved_digest() {
     let m = marker();
     let mut rig = runtime_rig(
         |work| {
@@ -1244,8 +1244,17 @@ fn the_built_program_runs_and_can_be_reused_after_boot() {
     assert!(wait_running(&rig, name), "{}", last_error(&rig, name));
     let pid = rig.pid_of(name).expect("a pid after reboot");
     assert!(wait_for(10, || cmdline_of(pid).contains(&m)));
-    assert!(rig.audit_text().contains("stored_plan_used"));
-    assert_eq!(rig.stop(name)["type"], "stopped");
+    let uses = || rig.audit_text().matches("stored_plan_used").count();
+    let before = uses();
+    assert!(before > 0);
+
+    rig.shutdown_daemon();
+    let artifact = rig.work.join("app");
+    let script = std::fs::read_to_string(&artifact).unwrap();
+    std::fs::write(artifact, format!("{script}# changed build\n")).unwrap();
+    rig.boot_daemon();
+    assert!(wait_for(30, || rig.status_of(name).as_deref() == Some("errored")));
+    assert_eq!(rig.audit_text().matches("stored_plan_used").count(), before);
 }
 
 #[test]
@@ -1363,6 +1372,30 @@ fn stored_plan_is_refused_when_the_exe_hash_changed() {
 }
 
 #[test]
+fn stored_plan_is_refused_when_the_adapter_version_changed() {
+    let m = marker();
+    let mut rig = runtime_rig(
+        |work| script(json!([]), sleep_plan(work, &m)),
+        &["sleep"],
+        &[],
+        &[FAST],
+    );
+    let name = "versioned-plan";
+    assert_eq!(rig.start(name, json!({}))["type"], "started");
+    rig.set_script(hanging());
+    rig.shutdown_daemon();
+    rig.sql(
+        "adapters.db",
+        "UPDATE plans SET plan_json = json_set(plan_json, '$.adapter_version', '0.0.0')",
+    );
+    rig.boot_daemon();
+
+    assert!(wait_for(30, || rig.status_of(name).as_deref() == Some("errored")));
+    assert_eq!(rig.calls("runtime.prepare").len(), 2);
+    assert!(!rig.audit_text().contains("stored_plan_used"));
+}
+
+#[test]
 fn operator_restart_never_uses_the_stored_plan() {
     let m = marker();
     let rig = runtime_rig(
@@ -1409,6 +1442,60 @@ fn reuse_plan_false_turns_the_stored_plan_off() {
         "with reuse_plan = false the adapter is asked at the boot"
     );
     rig.stop("rp-app");
+}
+
+#[test]
+fn automatic_relaunch_asks_the_adapter_when_reuse_is_off() {
+    let m = marker();
+    let rig = runtime_rig_with(
+        |work| {
+            let failing =
+                json!({ "program": "sh", "args": ["-c", "sleep 0.3; exit 1"], "cwd": work });
+            script_plans(vec![failing, sleep_plan(work, &m)])
+        },
+        &["sh", "sleep"],
+        &[],
+        &[FAST],
+        "reuse_plan = false\n",
+    );
+    let name = "fresh-relaunch";
+    let reply = rig.start(name, json!({}));
+    assert_eq!(reply["type"], "started", "{reply}");
+    assert!(wait_for(10, || rig
+        .pid_of(name)
+        .is_some_and(|pid| cmdline_of(pid).contains(&m))));
+    assert_eq!(rig.calls("runtime.prepare").len(), 2);
+    assert_eq!(rig.calls("runtime.plan").len(), 2);
+    assert_eq!(rig.stop(name)["type"], "stopped");
+}
+
+#[test]
+fn automatic_relaunch_requires_an_enabled_runtime_adapter() {
+    let rig = runtime_rig(
+        |work| {
+            let exit = format!(
+                "while [ ! -f '{}' ]; do sleep 0.1; done; exit 1",
+                work.join("exit").display(),
+            );
+            let plan = json!({ "program": "sh", "args": ["-c", exit], "cwd": work });
+            script(json!([]), plan)
+        },
+        &["sh"],
+        &[],
+        &[],
+    );
+    let name = "disabled-relaunch";
+    assert_eq!(rig.start(name, json!({}))["type"], "started");
+    let reply = rig
+        .daemon()
+        .rpc(json!({ "type": "adapter", "op": "disable", "name": ADAPTER }));
+    assert_eq!(reply["type"], "adapter", "{reply}");
+    std::fs::write(rig.work.join("exit"), "").unwrap();
+
+    assert!(wait_for(10, || last_error(&rig, name).contains("not enabled")));
+    assert!(rig.pid_of(name).is_none());
+    assert_eq!(rig.calls("runtime.prepare").len(), 1);
+    assert!(!rig.audit_text().contains("stored_plan_used"));
 }
 
 #[test]
