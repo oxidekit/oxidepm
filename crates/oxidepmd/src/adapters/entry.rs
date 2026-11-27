@@ -318,7 +318,7 @@ pub struct InvokeCall {
 pub struct SessionCall {
     /// The verb, as for a relayed call. Its `max_runtime` is the longest the session may last.
     pub call: InvokeCall,
-    /// The terminal the CLI handed over: the adapter's standard input and output.
+    /// The session relay's descriptors for the adapter's standard input and output.
     pub terminal: (std::os::fd::OwnedFd, std::os::fd::OwnedFd),
     /// Where the adapter connects, the file that names it, and the single-use token it presents.
     pub listener: tokio::net::UnixListener,

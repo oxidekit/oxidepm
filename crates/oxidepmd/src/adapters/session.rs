@@ -3,10 +3,8 @@
 //! The CLI cannot execute an adapter: the sandbox, the supervision and the audit trail are the
 //! daemon's, and they must hold for the monitor as much as for any other adapter. So the daemon
 //! starts the adapter itself and the CLI hands over its standard input and output as open
-//! descriptors (`oxidepm_ipc::session` describes the lines). The adapter cannot use those streams
-//! for the protocol, so it connects to a socket the daemon made for this one session and speaks
-//! the adapter protocol there; the daemon bridges that connection onto the channel the host
-//! already reads, and everything after the handshake is as for any tool.
+//! descriptors (`oxidepm_ipc::session` describes the lines). The daemon relays them through
+//! private session descriptors and bridges the adapter's protocol connection separately.
 //!
 //! What is checked, in the order it happens: the policy (a person, or an `ai` claim for a verb of
 //! an adapter marked `ai_driven`); the verb is a session verb of a tool adapter; the working
@@ -18,11 +16,15 @@
 //! it. A session ends when the verb returns, when the CLI closes its connection, when the adapter
 //! stops, when the adapter is disabled or the daemon shuts down, or after 12 hours.
 
-use std::os::fd::OwnedFd;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read as _, Write as _};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use nix::libc;
 use oxidepm_adapter_proto::messages::{ActorView, InvokeParams};
 use oxidepm_adapter_proto::Kind;
 use oxidepm_core::{Error, ErrorCode, Paths, Result};
@@ -32,7 +34,7 @@ use oxidepm_ipc::session::{
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{unix::AsyncFd, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Interest};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -49,6 +51,8 @@ const MAX_BAD_ATTACHES: u32 = 5;
 const FIRST_LINE_WAIT: Duration = Duration::from_secs(5);
 /// How long the closing line may take to reach the CLI.
 const CLOSING_LINE_WAIT: Duration = Duration::from_secs(5);
+/// A helper can keep the private output open. Bound any drain after the adapter ends.
+const TERMINAL_DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// How long a cancelled session is given to end before it is abandoned.
 const END_WAIT: Duration = Duration::from_secs(20);
 /// The adapter's first line: `{"session":"adapter","token":"..."}`.
@@ -62,6 +66,279 @@ pub struct SessionRun {
     pub actor: ActorView,
     /// The process may write only to the adapter's state directory (an `ai` claim opened it).
     pub restrict_writes: bool,
+}
+
+/// Only the relay owns the CLI's descriptors. The adapter and its helpers get a private
+/// pseudo-terminal for a tty and private pipes otherwise.
+struct TerminalRelay {
+    terminal: (OwnedFd, OwnedFd),
+    input: (RelayFd, RelayFd),
+    output: (RelayFd, RelayFd),
+    settings: [Option<TerminalSettings>; 2],
+    window: Option<TerminalWindow>,
+    tty_output: bool,
+}
+
+impl TerminalRelay {
+    fn new((input, output): (OwnedFd, OwnedFd)) -> io::Result<Self> {
+        let settings = [
+            TerminalSettings::save(&input)?,
+            TerminalSettings::save(&output)?,
+        ];
+        let input = RelayFd::from_client(input, Interest::READABLE)?;
+        let output = RelayFd::from_client(output, Interest::WRITABLE)?;
+        let mut window = None;
+        let mut slave = None;
+        if let Some(tty) = settings.iter().flatten().next() {
+            let (master, new_slave) = private_terminal(&tty.original)?;
+            let terminal_window = TerminalWindow {
+                source: tty.fd.try_clone()?,
+                master,
+            };
+            terminal_window.update();
+            window = Some(terminal_window);
+            slave = Some(new_slave);
+        }
+        let (adapter_input, send_input) = match (&settings[0], &window, &slave) {
+            (Some(_), Some(window), Some(slave)) => (
+                slave.try_clone()?,
+                RelayFd::pollable(window.master.try_clone()?.into(), Interest::WRITABLE)?,
+            ),
+            _ => {
+                let (read, write) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
+                (read, RelayFd::private_pipe(write, Interest::WRITABLE)?)
+            }
+        };
+        let (adapter_output, read_output) = match (&settings[1], &window, &slave) {
+            (Some(_), Some(window), Some(slave)) => (
+                slave.try_clone()?,
+                RelayFd::pollable(window.master.try_clone()?.into(), Interest::READABLE)?,
+            ),
+            _ => {
+                let (read, write) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
+                (write, RelayFd::private_pipe(read, Interest::READABLE)?)
+            }
+        };
+        for tty in settings.iter().flatten() {
+            tty.relay_mode()?;
+        }
+        Ok(Self {
+            terminal: (adapter_input, adapter_output),
+            input: (input, send_input),
+            output: (read_output, output),
+            tty_output: settings[1].is_some(),
+            settings,
+            window,
+        })
+    }
+}
+
+struct TerminalSettings {
+    fd: OwnedFd,
+    original: libc::termios,
+}
+
+impl TerminalSettings {
+    fn save(fd: &OwnedFd) -> io::Result<Option<Self>> {
+        // SAFETY: the ioctl writes into a termios struct when the descriptor is a tty.
+        let mut original = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut original) } == 0 {
+            return Ok(Some(Self {
+                fd: fd.try_clone()?,
+                original,
+            }));
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOTTY) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    }
+
+    fn relay_mode(&self) -> io::Result<()> {
+        let mut settings = self.original;
+        // SAFETY: settings is an initialized termios for this terminal.
+        unsafe { libc::cfmakeraw(&mut settings) };
+        // Keep the caller's terminal signals, including the CLI's interrupt handler.
+        settings.c_lflag |= self.original.c_lflag & libc::ISIG;
+        nix::errno::Errno::result(unsafe {
+            libc::tcsetattr(self.fd.as_raw_fd(), libc::TCSANOW, &settings)
+        })?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSettings {
+    fn drop(&mut self) {
+        // SAFETY: restore the settings saved from this terminal.
+        unsafe { libc::tcsetattr(self.fd.as_raw_fd(), libc::TCSANOW, &self.original) };
+    }
+}
+
+fn private_terminal(settings: &libc::termios) -> io::Result<(OwnedFd, OwnedFd)> {
+    use nix::errno::Errno;
+
+    // SAFETY: open a fresh PTY and use its master to obtain the slave, both close-on-exec.
+    unsafe {
+        let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+        let master =
+            OwnedFd::from_raw_fd(Errno::result(libc::posix_openpt(flags | libc::O_NONBLOCK))?);
+        Errno::result(libc::grantpt(master.as_raw_fd()))?;
+        Errno::result(libc::unlockpt(master.as_raw_fd()))?;
+        let slave = OwnedFd::from_raw_fd(Errno::result(libc::ioctl(
+            master.as_raw_fd(),
+            libc::TIOCGPTPEER,
+            flags,
+        ))?);
+        Errno::result(libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, settings))?;
+        Ok((master, slave))
+    }
+}
+
+struct TerminalWindow {
+    source: OwnedFd,
+    master: OwnedFd,
+}
+
+impl TerminalWindow {
+    fn update(&self) {
+        // SAFETY: read the size into a winsize and copy it to the private terminal.
+        unsafe {
+            let mut size: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(self.source.as_raw_fd(), libc::TIOCGWINSZ, &mut size) == 0 {
+                libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &size);
+            }
+        }
+    }
+}
+
+enum RelayFd {
+    Stream(AsyncFd<File>),
+    Socket(AsyncFd<File>),
+    File(tokio::fs::File),
+}
+
+impl RelayFd {
+    fn from_client(fd: OwnedFd, interest: Interest) -> io::Result<Self> {
+        let file = File::from(fd);
+        let kind = file.metadata()?.file_type();
+        if kind.is_socket() {
+            // SAFETY: File owns this descriptor and the relay never replaces it.
+            return Ok(Self::Socket(unsafe {
+                AsyncFd::register_with_interest(file, interest)?
+            }));
+        }
+        if kind.is_fifo() || kind.is_char_device() {
+            // A new open file description keeps O_NONBLOCK local to the relay.
+            let file = OpenOptions::new()
+                .read(interest.is_readable())
+                .write(interest.is_writable())
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+            return Self::pollable(file, interest);
+        }
+        Ok(Self::File(file.into()))
+    }
+
+    fn private_pipe(fd: OwnedFd, interest: Interest) -> io::Result<Self> {
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+
+        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+        Self::pollable(File::from(fd), interest)
+    }
+
+    fn pollable(file: File, interest: Interest) -> io::Result<Self> {
+        // SAFETY: File owns this descriptor and the relay never replaces it.
+        match unsafe { AsyncFd::register_with_interest(file, interest) } {
+            Ok(fd) => Ok(Self::Stream(fd)),
+            Err(e) => {
+                let (file, e) = e.into_parts();
+                // Devices such as /dev/null don't support epoll.
+                if e.raw_os_error() == Some(libc::EPERM) {
+                    Ok(Self::File(file.into()))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Stream(fd) => {
+                fd.async_io(Interest::READABLE, |mut file| file.read(buf))
+                    .await
+            }
+            Self::Socket(fd) => {
+                fd.async_io(Interest::READABLE, |file| {
+                    // SAFETY: buf covers the requested bytes. MSG_DONTWAIT preserves the client's flags.
+                    let n = unsafe {
+                        libc::recv(
+                            file.as_raw_fd(),
+                            buf.as_mut_ptr().cast(),
+                            buf.len(),
+                            libc::MSG_DONTWAIT,
+                        )
+                    };
+                    Ok(nix::errno::Errno::result(n)? as usize)
+                })
+                .await
+            }
+            Self::File(file) => file.read(buf).await,
+        }
+    }
+
+    async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            let len = match self {
+                Self::Stream(fd) => {
+                    fd.async_io(Interest::WRITABLE, |mut file| file.write(buf))
+                        .await?
+                }
+                Self::Socket(fd) => {
+                    fd.async_io(Interest::WRITABLE, |file| {
+                        // SAFETY: buf covers the requested bytes.
+                        let n = unsafe {
+                            libc::send(
+                                file.as_raw_fd(),
+                                buf.as_ptr().cast(),
+                                buf.len(),
+                                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                            )
+                        };
+                        Ok(nix::errno::Errno::result(n)? as usize)
+                    })
+                    .await?
+                }
+                Self::File(file) => file.write(buf).await?,
+            };
+            if len == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            buf = &buf[len..];
+        }
+        if let Self::File(file) = self {
+            file.flush().await?;
+        }
+        Ok(())
+    }
+}
+
+async fn relay_terminal(
+    (mut reader, mut writer): (RelayFd, RelayFd),
+    tty_reader: bool,
+) -> io::Result<()> {
+    let mut buf = [0; 8192];
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => return Ok(()),
+            Ok(n) => n,
+            Err(e) if tty_reader && e.raw_os_error() == Some(libc::EIO) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        writer.write_all(&buf[..n]).await?;
+    }
 }
 
 /// `n` random bytes as lowercase hex.
@@ -334,6 +611,7 @@ fn watch_cli(
     reader: tokio::net::unix::OwnedReadHalf,
     winch: mpsc::UnboundedSender<()>,
     cancel: CancellationToken,
+    window: Option<TerminalWindow>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
@@ -350,6 +628,9 @@ fn watch_cli(
                         serde_json::from_slice::<ClientLine>(&line),
                         Ok(ClientLine::Winch)
                     ) {
+                        if let Some(window) = &window {
+                            window.update();
+                        }
                         let _ = winch.send(());
                     }
                 }
@@ -503,12 +784,35 @@ async fn run_session(pending: Pending) {
         winches,
     } = attached;
     let (reader, mut writer) = stream.into_split();
+    let TerminalRelay {
+        terminal,
+        input,
+        output,
+        settings,
+        window,
+        tty_output,
+    } = match TerminalRelay::new(terminal) {
+        Ok(relay) => relay,
+        Err(e) => {
+            let error = Error::IoError(e);
+            send_closing_line(
+                &mut writer,
+                &ServerLine::Error {
+                    code: error.code().as_str().to_string(),
+                    message: format!("cannot relay the session terminal: {error}"),
+                },
+            )
+            .await;
+            let _ = std::fs::remove_file(&socket);
+            return;
+        }
+    };
     let (winch_tx, winch_rx) = mpsc::unbounded_channel();
     for _ in 0..winches {
         let _ = winch_tx.send(());
     }
     let cancel = CancellationToken::new();
-    let watcher = watch_cli(reader, winch_tx, cancel.clone());
+    let watcher = watch_cli(reader, winch_tx, cancel.clone(), window);
 
     let call = SessionCall {
         call: InvokeCall {
@@ -533,20 +837,46 @@ async fn run_session(pending: Pending) {
     };
     info!("Session {name} started");
     let started = std::time::Instant::now();
-    let mut session = Box::pin(resolved.entry.run_session(call, cancel.clone()));
-    let result = tokio::select! {
-        r = &mut session => r,
-        _ = tokio::time::sleep(max) => {
-            // the longest a session may last: end it, and let it clean up
-            cancel.cancel();
-            match tokio::time::timeout(END_WAIT, &mut session).await {
-                Ok(_) => Err(Error::Cancelled(format!("the session reached its limit of {} hours", MAX_SESSION_SECS / 3600))),
-                Err(_) => Err(Error::Cancelled("the session reached its limit and did not stop in time".to_string())),
+    let result = {
+        let session = async {
+            let mut run = Box::pin(resolved.entry.run_session(call, cancel.clone()));
+            tokio::select! {
+                r = &mut run => r,
+                _ = tokio::time::sleep(max) => {
+                    cancel.cancel();
+                    match tokio::time::timeout(END_WAIT, &mut run).await {
+                        Ok(_) => Err(Error::Cancelled(format!("the session reached its limit of {} hours", MAX_SESSION_SECS / 3600))),
+                        Err(_) => Err(Error::Cancelled("the session reached its limit and did not stop in time".to_string())),
+                    }
+                }
             }
+        };
+        let mut input = Box::pin(relay_terminal(input, tty));
+        let mut output = Box::pin(relay_terminal(output, tty_output));
+        tokio::pin!(session);
+        let mut input_done = false;
+        let mut output_done = false;
+        let result = loop {
+            tokio::select! {
+                result = &mut session => break result,
+                _ = &mut input, if !input_done => input_done = true,
+                result = &mut output, if !output_done => {
+                    output_done = true;
+                    if result.is_err() {
+                        cancel.cancel();
+                    }
+                }
+            }
+        };
+        drop(input);
+        if !output_done {
+            let _ = tokio::time::timeout(TERMINAL_DRAIN_WAIT, &mut output).await;
         }
+        result
     };
-    drop(session);
     watcher.abort();
+    let _ = watcher.await;
+    drop(settings);
 
     let line = match &result {
         Ok(done) => ServerLine::Done {

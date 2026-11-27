@@ -365,6 +365,24 @@ macro_rules! need_landlock {
 // ---- the happy path --------------------------------------------------------------------------
 
 #[tokio::test]
+async fn a_session_adapter_receives_a_private_terminal() {
+    let rig = Rig::new(Setup::new(
+        json!([{ "on": "command.invoke", "do": "hang" }]),
+    ));
+    let pty = Pty::new();
+    let (mut events, control) = attach(&rig.open(), &pty).await;
+    let pid = rig.wait_invoked();
+    let terminal = std::fs::read_link(format!("/proc/self/fd/{}", pty.slave.as_raw_fd())).unwrap();
+    let input = std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap();
+    let output = std::fs::read_link(format!("/proc/{pid}/fd/1")).unwrap();
+    drop(control);
+    let _ = closing_line(&mut events, 20).await;
+
+    assert_ne!(input, terminal);
+    assert_eq!(input, output);
+}
+
+#[tokio::test]
 async fn session_runs_the_verb_on_the_terminal_the_client_handed_over() {
     let rig = Rig::new(Setup::new(echo_script(7)));
     let offer = rig.open();

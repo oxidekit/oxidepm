@@ -10,8 +10,8 @@
 //! 1. The CLI asks for the session on the daemon's main socket. The answer is a [`SessionOffer`]:
 //!    the path of a fresh socket and a single-use token that is valid for [`TOKEN_SECS`] seconds.
 //! 2. The CLI connects to that socket and sends one line, [`ClientLine::Attach`], together with
-//!    its standard input and output as `SCM_RIGHTS`. The daemon starts the adapter with them as
-//!    its descriptors 0 and 1.
+//!    its standard input and output as `SCM_RIGHTS`. The daemon relays those streams to the
+//!    adapter over private session descriptors.
 //! 3. The adapter connects to the same socket (it is given the path and a second token in its
 //!    environment) and speaks the adapter protocol over it; its standard streams are the
 //!    terminal's, so they cannot carry the protocol.
