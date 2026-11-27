@@ -26,12 +26,14 @@ use oxidepm_adapter_proto::messages::{
 };
 use oxidepm_adapter_proto::{from_params, to_params};
 use oxidepm_core::{runtime_hints, AppSpec, Error, Result, Runtime};
+use oxidepm_runtime::resolve::{absolute_search_path, anchor_runtime_path};
 use oxidepm_runtime::step::{
-    run_step, validate_plan, validate_steps, BuildLog, CheckedPlan, CheckedStep,
+    canonical_app_dir, open_runtime_cwd, run_step, validate_plan, validate_steps, BuildLog,
+    CheckedPlan, CheckedStep,
 };
 use oxidepm_runtime::{
-    build_env, get_runner, group_command, ChildEnv, GroupChild, LaunchPlan, Origin, PrepareResult,
-    Runner, RuntimeSource,
+    build_env, get_runner, group_command, GroupChild, LaunchPlan, Origin, PrepareResult, Runner,
+    RuntimeSource,
 };
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -331,17 +333,26 @@ pub(crate) fn uses_pinned_binary(plan: &LaunchPlan) -> bool {
 
 pub(crate) fn spawn_runtime(
     plan: &LaunchPlan,
-    invocation: &Path,
-    env: &ChildEnv,
+    invocation: Option<&Path>,
+    spec: &AppSpec,
 ) -> Result<GroupChild> {
+    let app_dir = canonical_app_dir(&spec.cwd)?;
+    let cwd = open_runtime_cwd(&app_dir, &plan.cwd)?;
+    let mut env = build_env(spec, &plan.extra_env);
+    anchor_runtime_path(&mut env, &app_dir)?;
     let mut cmd = group_command(&plan.program);
-    cmd.arg0(invocation).args(&plan.args).current_dir(&plan.cwd);
+    if let Some(invocation) = invocation {
+        cmd.arg0(invocation);
+    }
+    cmd.args(&plan.args)
+        .current_dir(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
     if env.clear {
         cmd.env_clear();
     }
     cmd.envs(env.vars.iter().map(|(k, v)| (k, v)));
     GroupChild::spawn(&mut cmd).map_err(|e| {
-        Error::ProcessStartFailed(format!("Failed to start '{}': {e}", invocation.display()))
+        let program = invocation.unwrap_or(&plan.program);
+        Error::ProcessStartFailed(format!("Failed to start '{}': {e}", program.display()))
     })
 }
 
@@ -551,14 +562,14 @@ impl Runner for AdapterRunner {
         }
         // The adapter runs in its own working directory. Resolve relative PATH entries against
         // the app's directory before passing the lookup hint.
+        let app_dir = canonical_app_dir(&spec.cwd)?;
         let path_hint = build_env(spec, &[])
             .get("PATH")
-            .map(|path| {
-                oxidepm_runtime::resolve::absolute_search_path(&path, &spec.cwd)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_default();
+            .map(|path| absolute_search_path(&path, &app_dir))
+            .transpose()?
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         let params = PrepareParams {
             spec: view,
             path_hint,

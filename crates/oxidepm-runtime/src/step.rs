@@ -7,7 +7,7 @@
 //! overrides the app's own `env`. Everything here is a pure check or a bounded runner, and
 //! none of it knows the name of a language.
 
-use crate::resolve::daemon_vars;
+use crate::resolve::{absolute_search_path, anchor_runtime_path, daemon_vars};
 use crate::spawn::{ChildEnv, GroupChild};
 use crate::traits::LaunchPlan;
 use oxidepm_adapter_proto::messages::{Capture, PlanResult, Step};
@@ -67,6 +67,7 @@ pub struct CheckedStep {
     pub description: String,
     pub program: PathBuf,
     invocation: Option<PathBuf>,
+    app_dir: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: ChildEnv,
@@ -90,7 +91,7 @@ fn has_nul(s: &str) -> bool {
 /// Absolute requests are authorized by file identity as resolved by canonicalization.
 fn resolve_program(
     program: &str,
-    cwd: &Path,
+    app_dir: &Path,
     search: Option<&std::ffi::OsStr>,
     rules: &RuntimeRules,
     capturing: bool,
@@ -105,11 +106,13 @@ fn resolve_program(
             "program '{program}' is a relative path; it must be absolute or a bare name"
         ));
     }
-    let search = search.map(|search| crate::resolve::absolute_search_path(search, cwd));
+    let search = search
+        .map(|search| absolute_search_path(search, app_dir))
+        .transpose()?;
     let lookup = |name: &str| {
         search
             .as_ref()
-            .and_then(|search| which::which_in(name, Some(search), cwd).ok())
+            .and_then(|search| which::which_in(name, Some(search), app_dir).ok())
     };
     let may_capture = |name: &str| !capturing || rules.capture_programs.iter().any(|p| p == name);
     let name = path
@@ -187,6 +190,55 @@ fn program_search_path<'a>(
         .map(std::ffi::OsStr::new)
 }
 
+/// The directory that bounds a runtime adapter's path selections for this app.
+pub fn canonical_app_dir(cwd: &Path) -> Result<PathBuf> {
+    let dir = cwd
+        .canonicalize()
+        .map_err(|e| Error::AdapterInvalid(format!("cannot resolve the app directory: {e}")))?;
+    if !dir.is_dir() {
+        return invalid(format!(
+            "app directory '{}' is not a directory",
+            cwd.display()
+        ));
+    }
+    Ok(dir)
+}
+
+fn checked_cwd(app_dir: &Path, path: &Path) -> Result<PathBuf> {
+    let not_directory =
+        || Error::AdapterInvalid(format!("cwd '{}' is not a directory", path.display()));
+    let cwd = path.canonicalize().map_err(|_| not_directory())?;
+    if !cwd.starts_with(app_dir) {
+        return invalid(format!(
+            "cwd '{}' must be inside the app directory",
+            path.display()
+        ));
+    }
+    if !cwd.is_dir() {
+        return Err(not_directory());
+    }
+    Ok(cwd)
+}
+
+/// Open the checked working directory for use by the child. Holding the descriptor until spawn
+/// prevents a changed path from sending the child to a different directory.
+pub fn open_runtime_cwd(app_dir: &Path, cwd: &Path) -> Result<File> {
+    let relative = cwd.strip_prefix(app_dir).map_err(|_| {
+        Error::AdapterInvalid(format!(
+            "cwd '{}' must be inside the app directory",
+            cwd.display()
+        ))
+    })?;
+    let relative = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    let directory = open_app_dir(app_dir)?;
+    open_beneath(&directory, relative, libc::O_DIRECTORY)
+        .map_err(|e| Error::AdapterInvalid(format!("cannot open cwd '{}': {e}", cwd.display())))
+}
+
 /// The entries of an adapter's environment that apply, and the keys left out.
 type EnvCheck = (Vec<(String, String)>, Vec<String>);
 
@@ -249,6 +301,10 @@ pub fn validate_steps_with(
             rules.limits.max_steps
         ));
     }
+    if steps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let app_dir = canonical_app_dir(&spec.cwd)?;
     let mut ids = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(steps.len());
     for step in steps {
@@ -275,8 +331,8 @@ pub fn validate_steps_with(
             }
         }
         let cwd = match &step.cwd {
-            Some(c) if !c.is_empty() => spec.cwd.join(c),
-            _ => spec.cwd.clone(),
+            Some(c) if !c.is_empty() => checked_cwd(&app_dir, &app_dir.join(c))?,
+            _ => app_dir.clone(),
         };
         let capturing = step.capture != Capture::None;
         let capture_max = match step.capture_max {
@@ -292,7 +348,7 @@ pub fn validate_steps_with(
         let (add, dropped_env) = check_env(&step.env_add, spec, rules, &what)?;
         // A capturing step runs without the app's env, so `cargo metadata` can be captured and
         // `env` cannot.
-        let env = if capturing {
+        let mut env = if capturing {
             let mut bare = spec.clone();
             bare.env.clear();
             bare.env_inherit = false;
@@ -305,9 +361,10 @@ pub fn validate_steps_with(
         } else {
             crate::resolve::build_env_from(spec, &add, daemon_env, crate::resolve::APP_ENV_MODE)
         };
+        anchor_runtime_path(&mut env, &app_dir)?;
         let (program, invocation) = resolve_program(
             argv0,
-            &cwd,
+            &app_dir,
             program_search_path(spec, daemon_env),
             rules,
             capturing,
@@ -319,6 +376,7 @@ pub fn validate_steps_with(
             description: step.description.clone(),
             program,
             invocation,
+            app_dir: app_dir.clone(),
             args: step.argv[1..].to_vec(),
             cwd,
             env,
@@ -388,17 +446,16 @@ pub fn validate_plan_with(
     if !cwd.is_absolute() {
         return invalid(format!("plan: cwd '{}' is not an absolute path", plan.cwd));
     }
-    if !cwd.is_dir() {
-        return invalid(format!("plan: cwd '{}' is not a directory", plan.cwd));
-    }
+    let app_dir = canonical_app_dir(&spec.cwd)?;
+    let cwd = checked_cwd(&app_dir, &cwd)?;
     let (extra, dropped_env) = check_env(&plan.extra_env, spec, rules, what)?;
     let (program, invocation, built_binary) = if built {
-        let (path, source) = check_built_binary(&plan.program, &spec.cwd)?;
+        let (path, source) = check_built_binary(&plan.program, &spec.cwd, &app_dir)?;
         (path, None, Some(Arc::new(source)))
     } else {
         let (program, invocation) = resolve_program(
             &plan.program,
-            &cwd,
+            &app_dir,
             program_search_path(spec, daemon_env),
             rules,
             false,
@@ -428,14 +485,11 @@ pub fn validate_plan_with(
 }
 
 /// Open the app's executable without following links below the app directory.
-fn check_built_binary(program: &str, app_dir: &Path) -> Result<(PathBuf, File)> {
+fn check_built_binary(program: &str, app_dir: &Path, root: &Path) -> Result<(PathBuf, File)> {
     let path = Path::new(program);
     if !path.is_absolute() {
         return invalid(format!("plan: binary_path '{program}' is not absolute"));
     }
-    let root = app_dir.canonicalize().map_err(|e| {
-        Error::AdapterInvalid(format!("plan: cannot resolve the app directory: {e}"))
-    })?;
     let outside = || {
         Error::AdapterInvalid(format!(
             "plan: the binary '{program}' must be inside the app directory"
@@ -446,20 +500,17 @@ fn check_built_binary(program: &str, app_dir: &Path) -> Result<(PathBuf, File)> 
             "plan: the binary '{program}' that the build should have made is not there: {e}"
         ))
     })?;
-    if !actual.starts_with(&root) {
+    if !actual.starts_with(root) {
         return Err(outside());
     }
     let relative = path
-        .strip_prefix(&root)
+        .strip_prefix(root)
         .or_else(|_| path.strip_prefix(app_dir))
         .map_err(|_| outside())?;
     let not_executable =
         || Error::AdapterInvalid(format!("plan: '{program}' is not an executable file"));
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(&root)?;
-    let handle = open_beneath(&directory, relative).map_err(|_| not_executable())?;
+    let directory = open_app_dir(root)?;
+    let handle = open_beneath(&directory, relative, 0).map_err(|_| not_executable())?;
     let meta = handle.metadata()?;
     if !meta.is_file() || meta.mode() & 0o100 == 0 {
         return Err(not_executable());
@@ -482,11 +533,18 @@ fn check_built_binary(program: &str, app_dir: &Path) -> Result<(PathBuf, File)> 
     Ok((actual, source))
 }
 
-fn open_beneath(directory: &File, path: &Path) -> std::io::Result<File> {
+fn open_app_dir(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+fn open_beneath(directory: &File, path: &Path, flags: libc::c_int) -> std::io::Result<File> {
     let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: open_how contains only integers, all of which may be zero.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
+    how.flags = (libc::O_PATH | libc::O_CLOEXEC | flags) as u64;
     how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS;
     // SAFETY: the directory and the arguments remain live for the entire call.
     let fd = unsafe {
@@ -626,7 +684,9 @@ pub async fn run_step(step: &CheckedStep, log: &mut BuildLog) -> Result<StepOutc
     if let Some(invocation) = &step.invocation {
         cmd.arg0(invocation);
     }
-    cmd.args(&step.args).current_dir(&step.cwd);
+    let cwd = open_runtime_cwd(&step.app_dir, &step.cwd)?;
+    cmd.args(&step.args)
+        .current_dir(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
     if step.env.clear {
         cmd.env_clear();
     }

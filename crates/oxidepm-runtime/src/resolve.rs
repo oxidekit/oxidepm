@@ -3,8 +3,8 @@
 //! check and the launch cannot disagree.
 
 use oxidepm_core::{AppSpec, Error, Result};
-use std::ffi::OsString;
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 use crate::spawn::ChildEnv;
 
@@ -37,10 +37,22 @@ fn in_base_env(key: &str) -> bool {
     BASE_ENV.contains(&key) || key.starts_with("LC_")
 }
 
-/// Resolve each relative search directory against the working directory of the app.
-pub fn absolute_search_path(path: &std::ffi::OsStr, cwd: &std::path::Path) -> OsString {
-    let dirs = std::env::split_paths(path).map(|dir| cwd.join(dir));
-    std::env::join_paths(dirs).unwrap_or_else(|_| path.to_os_string())
+/// Resolve relative search directories against the canonical app directory.
+pub fn absolute_search_path(path: &OsStr, app_dir: &Path) -> Result<OsString> {
+    let dirs = std::env::split_paths(path).map(|dir| app_dir.join(dir));
+    std::env::join_paths(dirs)
+        .map_err(|e| Error::AdapterInvalid(format!("cannot resolve the runtime search path: {e}")))
+}
+
+/// Keep PATH-based lookups in adapter-launched processes independent of their working directory.
+pub fn anchor_runtime_path(env: &mut ChildEnv, app_dir: &Path) -> Result<()> {
+    if let Some(path) = env.get("PATH") {
+        let absolute = absolute_search_path(&path, app_dir)?
+            .into_string()
+            .map_err(|_| Error::AdapterInvalid("the runtime search path is not UTF-8".into()))?;
+        env.vars.push(("PATH".into(), absolute));
+    }
+    Ok(())
 }
 
 /// The environment an app process gets.

@@ -454,6 +454,61 @@ fn an_absolute_program_can_name_the_resolved_manifest_program() {
 }
 
 #[test]
+fn a_relative_search_path_is_based_on_the_app_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let subdir = dir.path().join("subdir");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&subdir).unwrap();
+    let program = bin.join("tool");
+    std::fs::write(&program, "").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut app = spec(dir.path());
+    app.env.insert("PATH".into(), "bin".into());
+    let rules = rules(&["tool"], &[], &[]);
+    let mut build = step("build", &["tool"]);
+    build.cwd = Some("subdir".into());
+
+    let steps = validate_steps_with(&[build], &app, &rules, &[]).unwrap();
+    assert_eq!(steps[0].program, program);
+    assert_eq!(steps[0].cwd, subdir);
+    assert_eq!(steps[0].env.get("PATH").as_deref(), Some(bin.as_os_str()));
+    let launch = validate_plan_with(&plan("tool", &subdir), &app, &rules, &[]).unwrap();
+    assert_eq!(launch.launch.program, program);
+    assert_eq!(launch.launch.cwd, subdir);
+}
+
+#[test]
+fn working_directories_must_resolve_inside_the_app_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let nested = app.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let local = app.join("local");
+    std::os::unix::fs::symlink(&nested, &local).unwrap();
+    let outside = app.join("outside");
+    std::os::unix::fs::symlink(dir.path(), &outside).unwrap();
+    let spec = spec(&app);
+    let rules = rules(&["true"], &[], &[]);
+    let mut build = step("build", &["true"]);
+
+    build.cwd = Some("local".into());
+    let checked = validate_steps(&[build.clone()], &spec, &rules).unwrap();
+    assert_eq!(checked[0].cwd, nested);
+    let checked = validate_plan(&plan("true", &local), &spec, &rules).unwrap();
+    assert_eq!(checked.launch.cwd, nested);
+
+    build.cwd = Some("outside".into());
+    assert!(
+        is_invalid(validate_steps(&[build], &spec, &rules)).contains("inside the app directory")
+    );
+    assert!(
+        is_invalid(validate_plan(&plan("true", &outside), &spec, &rules))
+            .contains("inside the app directory")
+    );
+}
+
+#[test]
 fn step_timeout_is_capped_by_the_core() {
     let dir = tempfile::tempdir().unwrap();
     let r = rules(&["sh"], &[], &[]);

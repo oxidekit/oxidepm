@@ -215,6 +215,7 @@ enum PipelineMode {
 struct PreparedLaunch {
     plan: LaunchPlan,
     invocation: Option<PathBuf>,
+    adapter: bool,
     pin_owner: Option<Arc<dyn Runner>>,
 }
 
@@ -1398,16 +1399,16 @@ impl ProcessActor {
             self.ctx.paths.log_path(&self.spec.name, "err"),
             RotationConfig::from_spec(&self.spec),
         )?;
-        let env = build_env(&self.spec, &plan.extra_env);
         debug!(
             "Launching {}: {} {:?}",
             self.spec.name,
             plan.program.display(),
             plan.args
         );
-        let mut child = match &launch.invocation {
-            Some(invocation) => spawn_runtime(plan, invocation, &env)?,
-            None => spawn_group(plan, &env)?,
+        let mut child = if launch.adapter {
+            spawn_runtime(plan, launch.invocation.as_deref(), &self.spec)?
+        } else {
+            spawn_group(plan, &build_env(&self.spec, &plan.extra_env))?
         };
         let pid = child.pid();
         let pgid = child.pgid();
@@ -1946,11 +1947,8 @@ async fn run_pipeline(
     };
     info!("Prepare successful for {}", spec.name);
     let warnings = prepared.warnings;
-    let invocation = if runner.mode_name() == "adapter" {
-        prepared.binary_path
-    } else {
-        None
-    };
+    let adapter = runner.mode_name() == "adapter";
+    let invocation = if adapter { prepared.binary_path } else { None };
     let plan = match prepared.plan {
         Some(plan) => plan,
         None => match runner.plan(&spec) {
@@ -1999,6 +1997,7 @@ async fn run_pipeline(
         PreparedLaunch {
             plan,
             invocation,
+            adapter,
             pin_owner,
         },
         Some(slot),
