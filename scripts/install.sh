@@ -195,8 +195,21 @@ install() {
         command "$@" -- "$TEMP_DIR/oxidepm-sandbox" "$INSTALL_DIR/"
     fi
 
-    install_adapters
+    install_adapters "$@"
 }
+
+set_bundle_modes() (
+    chmod 00755 -- "$1"
+    for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+        if [ -L "$entry" ]; then
+            continue
+        elif [ -d "$entry" ]; then
+            set_bundle_modes "$entry"
+        elif [ -f "$entry" ]; then
+            chmod 0644 -- "$entry"
+        fi
+    done
+)
 
 # The adapters a release carries (the runtimes among them) go to share/oxidepm/adapters next to
 # the programs' directory, where "oxidepm adapter import --bundled" looks for them. A release
@@ -209,11 +222,15 @@ install_adapters() {
     fi
     BUNDLE_DIR="$(dirname "$INSTALL_DIR")/share/oxidepm/adapters"
     info "Installing the adapters of this release to $BUNDLE_DIR"
-    if [ -w "$INSTALL_DIR" ]; then
-        rm -rf "$BUNDLE_DIR" && mkdir -p "$BUNDLE_DIR" && cp -R "$BUNDLE_SRC/." "$BUNDLE_DIR/"
+    if [ "$1" = sudo ]; then
+        set -- sudo
     else
-        sudo rm -rf "$BUNDLE_DIR" && sudo mkdir -p "$BUNDLE_DIR" && sudo cp -R "$BUNDLE_SRC/." "$BUNDLE_DIR/"
+        set --
     fi
+    set_bundle_modes "$BUNDLE_SRC"
+    "$@" rm -rf -- "$BUNDLE_DIR"
+    command "$@" install -d -m 0755 -- "$BUNDLE_DIR"
+    "$@" cp -R --preserve=mode --no-preserve=ownership -- "$BUNDLE_SRC/." "$BUNDLE_DIR/"
 }
 
 # The runtimes (node, npm, pnpm, yarn, python, go, rust, cargo) are adapters. One command imports

@@ -29,8 +29,17 @@ for binary in oxidepm oxidepmd oxidepm-sandbox; do
     printf '#!/bin/sh\nprintf "oxidepm 1.0.0\\n"\n' > "$work/files/$binary"
     chmod 700 "$work/files/$binary"
 done
+bundle=share/oxidepm/adapters
+mkdir -p "$work/files/$bundle/nested"
+printf '%s\n' '{}' > "$work/files/$bundle/index.json"
+printf '%s\n' 'checksums' > "$work/files/$bundle/SHA256SUMS"
+printf '%s\n' 'archive' > "$work/files/$bundle/nested/adapter.tar.gz"
+chmod 700 "$work/files/$bundle" "$work/files/$bundle/nested"
+chmod 600 "$work/files/$bundle/index.json" "$work/files/$bundle/SHA256SUMS"
+chmod 700 "$work/files/$bundle/nested/adapter.tar.gz"
 archive=oxidepm-x86_64-unknown-linux-gnu.tar.gz
-tar -czf "$work/release/$archive" -C "$work/files" oxidepm oxidepmd oxidepm-sandbox
+tar --owner=42424 --group=42425 -czf "$work/release/$archive" -C "$work/files" \
+    oxidepm oxidepmd oxidepm-sandbox share
 (cd "$work/release" && sha256sum "$archive" > checksums.txt)
 printf '%s\n' 'untrusted comment: test signature' test 'trusted comment: test' test > "$work/release/checksums.txt.minisig"
 
@@ -72,7 +81,7 @@ MOCK
 cat > "$work/bin/sudo" <<'MOCK'
 #!/bin/sh
 set -eu
-echo sudo >> "$TEST_INSTALL_WORK/install-args"
+printf 'sudo %s %s\n' "$1" "${2-}" >> "$TEST_INSTALL_WORK/install-args"
 chmod u+w "$INSTALL_DIR"
 exec "$@"
 MOCK
@@ -98,9 +107,12 @@ for mode in user root sudo; do
     if [ "$mode" = sudo ]; then chmod 500 "$prefix"; fi
     : > "$work/tar-args"
     : > "$work/install-args"
-    if ! HOME="$work/home" OXIDEPM_HOME="$work/oxidepm" OXIDEPM_VERSION=v1.0.0 \
-        INSTALL_DIR="$prefix" TEST_INSTALL_MODE="$mode" PATH="$work/bin:$prefix:$PATH" \
-        sh "$root/scripts/install.sh" > "$work/install.log" 2>&1; then
+    if ! (
+        umask 077
+        HOME="$work/home" OXIDEPM_HOME="$work/oxidepm" OXIDEPM_VERSION=v1.0.0 \
+            INSTALL_DIR="$prefix" TEST_INSTALL_MODE="$mode" PATH="$work/bin:$prefix:$PATH" \
+            sh "$root/scripts/install.sh"
+    ) > "$work/install.log" 2>&1; then
         cat "$work/install.log" >&2
         exit 1
     fi
@@ -111,6 +123,19 @@ for mode in user root sudo; do
     for binary in oxidepm oxidepmd oxidepm-sandbox; do
         test "$(stat -c %a "$prefix/$binary")" = 755
     done
+    for dir in share share/oxidepm "$bundle" "$bundle/nested"; do
+        test "$(stat -c '%a %u %g' "$work/$mode/$dir")" = "755 $(id -u) $(id -g)" || {
+            printf 'Unexpected permissions or ownership on %s in %s install\n' "$dir" "$mode" >&2
+            exit 1
+        }
+    done
+    for file in index.json SHA256SUMS nested/adapter.tar.gz; do
+        cmp -s "$work/files/$bundle/$file" "$work/$mode/$bundle/$file"
+        test "$(stat -c '%a %u %g' "$work/$mode/$bundle/$file")" = "644 $(id -u) $(id -g)" || {
+            printf 'Unexpected permissions or ownership on %s in %s install\n' "$file" "$mode" >&2
+            exit 1
+        }
+    done
     if [ "$mode" = user ] && [ "$(id -u)" -ne 0 ]; then
         test "$(stat -c %u "$prefix/oxidepm")" = "$(id -u)"
         test "$(grep -c '^-m 0755 -- ' "$work/install-args")" -eq 2
@@ -118,7 +143,8 @@ for mode in user root sudo; do
         test "$(grep -c '^-m 0755 -o root -g root -- ' "$work/install-args")" -eq 2
     fi
     if [ "$mode" = sudo ]; then
-        test "$(grep -c '^sudo$' "$work/install-args")" -eq 2
+        test "$(grep -c '^sudo install -m$' "$work/install-args")" -eq 2
+        test "$(grep -c '^sudo cp -R$' "$work/install-args")" -eq 1
     fi
-    printf 'ok - installs executable binaries as %s\n' "$mode"
+    printf 'ok - installs executable binaries and readable adapters as %s\n' "$mode"
 done

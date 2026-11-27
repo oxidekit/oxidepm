@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::fs;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -343,7 +344,6 @@ async fn lock_installation(dir: &Path) -> Result<InstallationLock> {
 /// A private (0700) temporary directory, deleted when dropped. (`tempfile` leaves the mode to
 /// the umask.)
 fn private_tempdir() -> Result<tempfile::TempDir> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::Builder::new()
         .prefix("oxidepm-update-")
         .tempdir()?;
@@ -645,8 +645,11 @@ impl StagedBundle {
         let share = parent.parent().context("Missing share directory")?;
         let mut created = CreatedDirs::default();
         for path in [share, parent] {
-            match fs::create_dir(path) {
-                Ok(()) => created.0.push(path.to_path_buf()),
+            match fs::DirBuilder::new().mode(0o755).create(path) {
+                Ok(()) => {
+                    created.0.push(path.to_path_buf());
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+                }
                 Err(error)
                     if error.kind() == std::io::ErrorKind::AlreadyExists
                         && fs::symlink_metadata(path)?.is_dir() => {}
@@ -658,7 +661,9 @@ impl StagedBundle {
         }
         let work = tempfile::Builder::new()
             .prefix(".oxidepm-bundle-")
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(parent)?;
+        fs::set_permissions(work.path(), fs::Permissions::from_mode(0o700))?;
         copy_bundle(source, &work.path().join("adapters"))
             .with_context(|| format!("Could not stage {}", destination.display()))?;
         Ok(Self {
@@ -691,6 +696,7 @@ impl StagedBundle {
 
 fn copy_bundle(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir(destination)?;
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o755))?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let target = destination.join(entry.file_name());
@@ -698,6 +704,7 @@ fn copy_bundle(source: &Path, destination: &Path) -> std::io::Result<()> {
             copy_bundle(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), &target)?;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
             fs::File::open(target)?.sync_all()?;
         }
     }
@@ -839,7 +846,7 @@ mod tests {
     use oxidepm_adapter_proto::signing::testkeys::TestKey;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::MetadataExt;
     use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1764,6 +1771,61 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o755);
+    }
+
+    #[tokio::test]
+    async fn update_installs_a_bundle_readable_by_all_users() {
+        const CHILD: &str = "OXIDEPM_TEST_BUNDLE_UMASK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new("sh")
+                .args(["-c", "umask 077; exec \"$@\"", "sh"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::update::tests::update_installs_a_bundle_readable_by_all_users",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}{stderr}"
+            );
+            return;
+        }
+
+        let fx = Fixture::new();
+        let server = Server::start().await;
+        let cli = script(NEW_VERSION, None);
+        let tarball = archive(&[
+            ("oxidepm", &cli),
+            ("share/oxidepm/adapters/SHA256SUMS", b"checksums"),
+            ("share/oxidepm/adapters/nested/adapter.tar.gz", b"archive"),
+        ]);
+        server.publish(
+            &format!("v{NEW_VERSION}"),
+            &[(asset_name(), tarball)],
+            Checksums::Honest,
+        );
+        execute_at(&fx.env(&server), None, false, false)
+            .await
+            .unwrap();
+
+        let owner = fs::metadata(&fx.bin).unwrap().uid();
+        for (path, mode) in [
+            ("share/oxidepm/adapters/SHA256SUMS", 0o644),
+            ("share/oxidepm/adapters/nested/adapter.tar.gz", 0o644),
+            ("share/oxidepm/adapters/nested", 0o755),
+            ("share/oxidepm/adapters", 0o755),
+            ("share/oxidepm", 0o755),
+            ("share", 0o755),
+        ] {
+            let metadata = fs::metadata(fx.dir.path().join(path)).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, mode, "{path}");
+            assert_eq!(metadata.uid(), owner, "{path}");
+        }
     }
 
     #[tokio::test]
