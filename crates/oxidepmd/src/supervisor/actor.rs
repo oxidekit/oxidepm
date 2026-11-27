@@ -20,7 +20,7 @@ use super::pids::{self, PidGuard, PidRecord, PidTable};
 use super::registry::Registry;
 use super::stats::{Counted, Kind, Stats};
 use super::store::AppStore;
-use crate::adapters::runtime::spawn_runtime;
+use crate::adapters::runtime::{spawn_runtime, uses_pinned_binary};
 use chrono::{DateTime, Utc};
 use nix::sys::signal::Signal;
 use oxidepm_core::restart::{CrashTracker, Decision, ExitCause};
@@ -30,7 +30,7 @@ use oxidepm_health::ScriptContext;
 use oxidepm_logs::{LogCapture, LogControl, RotationConfig};
 use oxidepm_runtime::{
     build_env, group_exists, kill_group, script_env, spawn_group, terminate_group, BuiltinRuntimes,
-    GroupChild, LaunchPlan, Origin, RuntimeSource, Terminated,
+    GroupChild, LaunchPlan, Origin, Runner, RuntimeSource, Terminated,
 };
 #[cfg(feature = "test-hooks")]
 use parking_lot::Mutex;
@@ -215,6 +215,7 @@ enum PipelineMode {
 struct PreparedLaunch {
     plan: LaunchPlan,
     invocation: Option<PathBuf>,
+    pin_owner: Option<Arc<dyn Runner>>,
 }
 
 enum PipelineResult {
@@ -263,6 +264,8 @@ pub struct ProcessActor {
     child: Option<GroupChild>,
     capture: Option<Capture>,
     plan: Option<PreparedLaunch>,
+    /// Owns the verified executable for as long as the child may reopen it.
+    running_pin: Option<Arc<dyn Runner>>,
     /// Cancelled when the child goes away; the health task is tied to it.
     launch_token: Option<CancellationToken>,
     health: Option<AbortOnDrop>,
@@ -341,6 +344,7 @@ pub fn spawn_process_actor(ctx: &Arc<ActorCtx>, init: ActorInit) -> ProcessHandl
         child: None,
         capture: None,
         plan: None,
+        running_pin: None,
         launch_token: None,
         health: None,
         gen: 0,
@@ -1234,7 +1238,7 @@ impl ProcessActor {
         self.pipeline = None;
         match result {
             PipelineResult::Ready(plan, slot, warnings) => {
-                self.plan = Some(plan.clone());
+                self.plan = plan.pin_owner.is_none().then(|| plan.clone());
                 self.launch_warnings = warnings;
                 let launched = self.launch(&plan).await;
                 // the slot is free as soon as the launch is over, whatever came of it
@@ -1428,6 +1432,7 @@ impl ProcessActor {
         }
         // from here the actor owns the child; a drop kills its group
         self.child = Some(child);
+        self.running_pin = launch.pin_owner.clone();
         self.capture = Some(Capture {
             handles,
             control: tasks.control,
@@ -1458,6 +1463,7 @@ impl ProcessActor {
             if let Some(mut child) = self.child.take() {
                 child.kill_and_wait().await;
             }
+            self.running_pin = None;
             self.pid_record = None;
             self.join_capture().await;
             return Err(Error::ShuttingDown);
@@ -1585,6 +1591,7 @@ impl ProcessActor {
             child.disarm();
         }
         self.child = None;
+        self.running_pin = None;
         self.pid_record = None;
         self.join_capture().await;
         self.last_exit_code = code;
@@ -1729,6 +1736,7 @@ impl ProcessActor {
         self.live.set_proc(None);
         self.uptime_deadline = None;
         self.child = None;
+        self.running_pin = None;
         self.pid_record = None;
         self.join_capture().await;
     }
@@ -1986,7 +1994,16 @@ async fn run_pipeline(
             }
         }
     }
-    PipelineResult::Ready(PreparedLaunch { plan, invocation }, Some(slot), warnings)
+    let pin_owner = (invocation.is_some() && uses_pinned_binary(&plan)).then(|| Arc::from(runner));
+    PipelineResult::Ready(
+        PreparedLaunch {
+            plan,
+            invocation,
+            pin_owner,
+        },
+        Some(slot),
+        warnings,
+    )
 }
 
 /// The dependency wait of a pipeline: `Ok(true)` when every dependency is running, `Ok(false)`

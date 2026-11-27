@@ -1213,6 +1213,42 @@ fn reboot_with_adapter_down_uses_the_persisted_plan_for_an_unchanged_spec() {
 }
 
 #[test]
+fn the_built_program_runs_and_can_be_reused_after_boot() {
+    let m = marker();
+    let mut rig = runtime_rig(
+        |work| {
+            let artifact = work.join("app");
+            let build = format!(
+                "printf '#!/bin/sh\\nexec sleep \"$@\"\\n' > '{0}' && chmod 700 '{0}'",
+                artifact.display()
+            );
+            let plan = json!({
+                "program": artifact,
+                "args": [m],
+                "cwd": work,
+                "binary_path": artifact,
+            });
+            script(json!([step("build", json!(["sh", "-c", build]), 30)]), plan)
+        },
+        &["sh"],
+        &[],
+        &[FAST],
+    );
+    let name = "pinned-app";
+    assert_eq!(rig.start(name, json!({}))["type"], "started");
+    let pid = rig.pid_of(name).expect("a pid");
+    assert!(wait_for(10, || cmdline_of(pid).contains(&m)));
+    rig.set_script(hanging());
+    rig.reboot();
+
+    assert!(wait_running(&rig, name), "{}", last_error(&rig, name));
+    let pid = rig.pid_of(name).expect("a pid after reboot");
+    assert!(wait_for(10, || cmdline_of(pid).contains(&m)));
+    assert!(rig.audit_text().contains("stored_plan_used"));
+    assert_eq!(rig.stop(name)["type"], "stopped");
+}
+
+#[test]
 fn changed_spec_never_uses_the_persisted_plan() {
     let m = marker();
     let mut rig = runtime_rig(

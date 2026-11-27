@@ -14,8 +14,13 @@ use oxidepm_adapter_proto::messages::{Capture, PlanResult, Step};
 use oxidepm_adapter_proto::text::{env_key_denied, is_env_name};
 use oxidepm_adapter_proto::{Limits, Manifest};
 use oxidepm_core::{AppSpec, Error, Result};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
@@ -334,6 +339,8 @@ pub struct CheckedPlan {
     /// The invocation path for a program executed via its canonical path.
     pub invocation: Option<PathBuf>,
     pub binary_path: Option<PathBuf>,
+    /// The open source file when the plan runs the build's executable.
+    pub built_binary: Option<Arc<File>>,
     /// Keys of `extra_env` left out because the app's own `env` sets them.
     pub dropped_env: Vec<String>,
 }
@@ -372,8 +379,7 @@ pub fn validate_plan_with(
     if plan.args.iter().any(|a| has_nul(a)) {
         return invalid("plan: an argument contains a NUL byte");
     }
-    // The one program that is not on the manifest's list is the binary the adapter's own build
-    // made: `program` is then its `binary_path`, and it must be a file the daemon's user owns.
+    // A build's executable can be named by setting program and binary_path to the same path.
     let built = plan
         .binary_path
         .as_deref()
@@ -386,18 +392,19 @@ pub fn validate_plan_with(
         return invalid(format!("plan: cwd '{}' is not a directory", plan.cwd));
     }
     let (extra, dropped_env) = check_env(&plan.extra_env, spec, rules, what)?;
-    let (program, invocation) = if built {
-        check_built_binary(&plan.program)?;
-        (PathBuf::from(&plan.program), None)
+    let (program, invocation, built_binary) = if built {
+        let (path, source) = check_built_binary(&plan.program, &spec.cwd)?;
+        (path, None, Some(Arc::new(source)))
     } else {
-        resolve_program(
+        let (program, invocation) = resolve_program(
             &plan.program,
             &cwd,
             program_search_path(spec, daemon_env),
             rules,
             false,
             what,
-        )?
+        )?;
+        (program, invocation, None)
     };
     let binary_path = match &plan.binary_path {
         Some(p) if !Path::new(p).is_absolute() => {
@@ -415,36 +422,87 @@ pub fn validate_plan_with(
         },
         invocation,
         binary_path,
+        built_binary,
         dropped_env,
     })
 }
 
-/// A binary that a build made and the plan names as the program: an absolute path to a regular
-/// file (not a link, which could lead anywhere) that the daemon's own user owns and may execute.
-/// A system program, owned by someone else, is therefore never accepted this way.
-fn check_built_binary(program: &str) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+/// Open the app's executable without following links below the app directory.
+fn check_built_binary(program: &str, app_dir: &Path) -> Result<(PathBuf, File)> {
     let path = Path::new(program);
     if !path.is_absolute() {
         return invalid(format!("plan: binary_path '{program}' is not absolute"));
     }
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(_) => {
-            return invalid(format!(
-                "plan: the binary '{program}' that the build should have made is not there"
-            ))
-        }
+    let root = app_dir.canonicalize().map_err(|e| {
+        Error::AdapterInvalid(format!("plan: cannot resolve the app directory: {e}"))
+    })?;
+    let outside = || {
+        Error::AdapterInvalid(format!(
+            "plan: the binary '{program}' must be inside the app directory"
+        ))
     };
-    if !meta.is_file() || meta.permissions().mode() & 0o100 == 0 {
-        return invalid(format!("plan: '{program}' is not an executable file"));
+    let actual = path.canonicalize().map_err(|e| {
+        Error::AdapterInvalid(format!(
+            "plan: the binary '{program}' that the build should have made is not there: {e}"
+        ))
+    })?;
+    if !actual.starts_with(&root) {
+        return Err(outside());
+    }
+    let relative = path
+        .strip_prefix(&root)
+        .or_else(|_| path.strip_prefix(app_dir))
+        .map_err(|_| outside())?;
+    let not_executable =
+        || Error::AdapterInvalid(format!("plan: '{program}' is not an executable file"));
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(&root)?;
+    let handle = open_beneath(&directory, relative).map_err(|_| not_executable())?;
+    let meta = handle.metadata()?;
+    if !meta.is_file() || meta.mode() & 0o100 == 0 {
+        return Err(not_executable());
     }
     if meta.uid() != nix::unistd::geteuid().as_raw() {
         return invalid(format!(
             "plan: '{program}' is not owned by the user the daemon runs as"
         ));
     }
-    Ok(())
+    use nix::sys::statvfs::{fstatvfs, FsFlags};
+    if fstatvfs(&handle)
+        .map_err(std::io::Error::from)?
+        .flags()
+        .contains(FsFlags::ST_NOEXEC)
+    {
+        return Err(not_executable());
+    }
+    // Reopen the handle for reading after verifying the file type and owner.
+    let source = File::open(format!("/proc/self/fd/{}", handle.as_raw_fd()))?;
+    Ok((actual, source))
+}
+
+fn open_beneath(directory: &File, path: &Path) -> std::io::Result<File> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: open_how contains only integers, all of which may be zero.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
+    how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS;
+    // SAFETY: the directory and the arguments remain live for the entire call.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            directory.as_raw_fd(),
+            path.as_ptr(),
+            &how,
+            std::mem::size_of_val(&how),
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat2 returned a new, owned descriptor.
+    Ok(unsafe { File::from_raw_fd(fd as _) })
 }
 
 /// Where the output of the steps of one build goes: the first [`BUILD_LOG_BYTES`] of it, to
@@ -462,7 +520,6 @@ impl BuildLog {
     }
 
     pub fn create_capped(path: &Path, cap: u64) -> std::io::Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)

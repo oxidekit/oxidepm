@@ -9,10 +9,17 @@
 //! ([`AdapterRunner::consult`]), so a hung adapter holds up the apps of its runtime and no
 //! other; the circuit breaker of the entry makes every later call fail at once.
 
+use std::fs::File;
+use std::io::{self, Read, Seek};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use nix::fcntl::{fcntl, FcntlArg, SealFlag};
+use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use oxidepm_adapter_proto::messages::{
     method, Phase, PlanParams, PlanResult, PrepareParams, PrepareResult as PrepareReply, SpecView,
     StepDone,
@@ -27,6 +34,7 @@ use oxidepm_runtime::{
     Runner, RuntimeSource,
 };
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use super::entry::AdapterEntry;
@@ -176,6 +184,7 @@ impl RuntimeSource for DaemonRuntimes {
                     origin,
                     reuse_plan: self.reuse_plan,
                     state: Mutex::new(Consulted::default()),
+                    pinned: Mutex::new(None),
                 }));
             }
         }
@@ -233,6 +242,7 @@ pub struct AdapterRunner {
     origin: Origin,
     reuse_plan: bool,
     state: Mutex<Consulted>,
+    pinned: Mutex<Option<PinnedBinary>>,
 }
 
 /// What `consult` found out, for `prepare`.
@@ -248,24 +258,80 @@ struct Consulted {
     warnings: Vec<String>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SavedPlan {
+    #[serde(flatten)]
+    reply: PlanResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    built_sha256: Option<[u8; 32]>,
+}
+
 /// A stored plan that passed the reuse checks.
 struct Stored {
     plan: CheckedPlan,
+    pinned: Option<PinnedBinary>,
     had_steps: bool,
 }
 
-/// Pass the invocation path alongside an adapter's launch plan so aliases retain their argv[0].
-fn prepared_plan(plan: CheckedPlan, warnings: Vec<String>) -> PrepareResult {
-    let mut result = PrepareResult::success("");
-    result.binary_path = plan.invocation;
-    result.plan = Some(plan.launch);
-    result.warnings = warnings;
-    result
+/// A sealed copy keeps the executable's verified contents stable until the child runs.
+struct PinnedBinary {
+    file: File,
+    digest: [u8; 32],
+}
+
+impl PinnedBinary {
+    fn new(mut source: &File) -> io::Result<Self> {
+        let before = source.metadata()?;
+        let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
+        let mut file = File::from(memfd_create(c"oxidepm-app", flags)?);
+        file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
+        let copied = io::copy(&mut source.by_ref().take(before.len()), &mut file)?;
+        let after = source.metadata()?;
+        if copied != before.len()
+            || (before.ctime(), before.ctime_nsec()) != (after.ctime(), after.ctime_nsec())
+        {
+            return Err(io::Error::other(
+                "the built executable changed while being read",
+            ));
+        }
+        fcntl(
+            file.as_raw_fd(),
+            FcntlArg::F_ADD_SEALS(
+                SealFlag::F_SEAL_WRITE
+                    | SealFlag::F_SEAL_GROW
+                    | SealFlag::F_SEAL_SHRINK
+                    | SealFlag::F_SEAL_SEAL,
+            ),
+        )?;
+        file.rewind()?;
+        let mut digest = Sha256::new();
+        io::copy(&mut file, &mut digest)?;
+        Ok(Self {
+            file,
+            digest: digest.finalize().into(),
+        })
+    }
+
+    fn path(&self) -> PathBuf {
+        pinned_directory().join(self.file.as_raw_fd().to_string())
+    }
+}
+
+fn pinned_directory() -> PathBuf {
+    PathBuf::from(format!("/proc/{}/fd", std::process::id()))
+}
+
+/// A launch through a daemon-owned descriptor needs its runner to stay alive while the child uses
+/// the executable. This also keeps scripts readable after the kernel starts their interpreter.
+pub(crate) fn uses_pinned_binary(plan: &LaunchPlan) -> bool {
+    plan.program
+        .parent()
+        .is_some_and(|dir| dir == pinned_directory())
 }
 
 pub(crate) fn spawn_runtime(
     plan: &LaunchPlan,
-    invocation: &std::path::Path,
+    invocation: &Path,
     env: &ChildEnv,
 ) -> Result<GroupChild> {
     let mut cmd = group_command(&plan.program);
@@ -294,7 +360,6 @@ fn is_outage(e: &Error) -> bool {
 /// A digest of what the adapter is shown of the app: a plan is the answer to this view, so it
 /// is reused only for the same view.
 fn spec_digest(view: &SpecView) -> String {
-    use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(view).unwrap_or_default();
     Sha256::digest(&bytes)
         .iter()
@@ -359,22 +424,21 @@ impl AdapterRunner {
         {
             return None;
         }
-        let reply: PlanResult = serde_json::from_str(&row.plan_json).ok()?;
-        let plan = validate_plan(&reply, spec, &self.rules).ok()?;
+        let saved: SavedPlan = serde_json::from_str(&row.plan_json).ok()?;
+        let plan = validate_plan(&saved.reply, spec, &self.rules).ok()?;
+        let pinned = Self::pin_binary(&plan).ok()?;
+        if pinned.as_ref().map(|binary| binary.digest) != saved.built_sha256 {
+            return None;
+        }
         Some(Stored {
             plan,
+            pinned,
             had_steps: row.had_steps,
         })
     }
 
-    /// Remember the plan this launch ran on, for the next boot.
-    async fn store_plan(
-        &self,
-        spec: &AppSpec,
-        digest: String,
-        reply: &PlanResult,
-        had_steps: bool,
-    ) {
+    /// Remember the plan and the digest of any build executable it uses.
+    async fn store_plan(&self, spec: &AppSpec, digest: String, saved: &SavedPlan, had_steps: bool) {
         let Some(store) = self.host.store.lock().clone() else {
             return;
         };
@@ -384,12 +448,46 @@ impl AdapterRunner {
             adapter: self.entry.name().to_string(),
             exe_sha256: self.entry.exe_sha256().to_string(),
             had_steps,
-            plan_json: serde_json::to_string(reply).unwrap_or_default(),
+            plan_json: serde_json::to_string(saved).unwrap_or_default(),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         if let Err(e) = store.repo().put_plan(&row).await {
             warn!("Could not store the launch plan of {}: {e}", spec.name);
         }
+    }
+
+    fn pin_binary(plan: &CheckedPlan) -> Result<Option<PinnedBinary>> {
+        plan.built_binary
+            .as_deref()
+            .map(PinnedBinary::new)
+            .transpose()
+            .map_err(|e| {
+                Error::AdapterInvalid(format!(
+                    "plan: cannot pin the built executable '{}': {e}",
+                    plan.launch.program.display()
+                ))
+            })
+    }
+
+    /// An adapter hands the actor the launch path and the invocation path together.
+    fn prepared_plan(
+        &self,
+        plan: CheckedPlan,
+        pinned: Option<PinnedBinary>,
+        warnings: Vec<String>,
+    ) -> PrepareResult {
+        let mut result = PrepareResult::success("");
+        let mut launch = plan.launch;
+        result.binary_path = if let Some(pinned) = pinned {
+            let invocation = std::mem::replace(&mut launch.program, pinned.path());
+            *self.pinned.lock() = Some(pinned);
+            Some(invocation)
+        } else {
+            plan.invocation
+        };
+        result.plan = Some(launch);
+        result.warnings = warnings;
+        result
     }
 
     /// The warning for a launch that went on a stored plan, also written to the audit log.
@@ -441,17 +539,14 @@ impl Runner for AdapterRunner {
     async fn consult(&self, spec: &AppSpec) -> Result<()> {
         let view = spec_view(spec, self.entry.name());
         let stored = self.load_stored(spec, &spec_digest(&view)).await;
-        if let Some(stored) = stored.as_ref().filter(|s| !s.had_steps) {
+        if stored.as_ref().is_some_and(|s| !s.had_steps) {
             info!(
                 "{} starts from its stored launch plan; the adapter is not asked",
                 spec.name
             );
             let mut state = self.state.lock();
             state.use_stored = true;
-            state.stored = Some(Stored {
-                plan: stored.plan.clone(),
-                had_steps: false,
-            });
+            state.stored = stored;
             return Ok(());
         }
         // The adapter runs in its own working directory. Resolve relative PATH entries against
@@ -514,7 +609,7 @@ impl Runner for AdapterRunner {
         };
         if use_stored {
             let stored = stored.expect("a stored plan was chosen");
-            return Ok(prepared_plan(stored.plan, warnings));
+            return Ok(self.prepared_plan(stored.plan, stored.pinned, warnings));
         }
         let had_steps = !steps.is_empty();
         let log_path = self
@@ -526,9 +621,11 @@ impl Runner for AdapterRunner {
             .and_then(|p| BuildLog::create(&p).ok())
             .unwrap_or_else(BuildLog::none);
         let mut done = Vec::with_capacity(steps.len());
+        let mut built = false;
         for step in &steps {
             info!("Step '{}' of {}: {}", step.id, spec.name, step.description);
             let out = run_step(step, &mut log).await?;
+            built |= out.success();
             if !out.success() && !step.optional {
                 let why = if out.timed_out {
                     format!("was killed after {} s", step.timeout.as_secs())
@@ -564,11 +661,20 @@ impl Runner for AdapterRunner {
             Err(e) if is_outage(&e) && stored.is_some() => {
                 let stored = stored.expect("checked");
                 warnings.push(self.stored_warning(&e, false));
-                return Ok(prepared_plan(stored.plan, warnings));
+                return Ok(self.prepared_plan(stored.plan, stored.pinned, warnings));
             }
             Err(e) => return Err(e),
         };
-        let checked = match validate_plan(&reply, spec, &self.rules) {
+        let checked = validate_plan(&reply, spec, &self.rules).and_then(|checked| {
+            if checked.built_binary.is_some() && !built {
+                return Err(Error::AdapterInvalid(
+                    "plan: a built executable requires a successful build step".into(),
+                ));
+            }
+            let pinned = Self::pin_binary(&checked)?;
+            Ok((checked, pinned))
+        });
+        let (checked, pinned) = match checked {
             Ok(checked) => checked,
             Err(e) => {
                 self.refused("plan_refused", &e);
@@ -582,8 +688,12 @@ impl Runner for AdapterRunner {
                 &checked.launch.args,
             );
         }
-        self.store_plan(spec, digest, &reply, had_steps).await;
-        Ok(prepared_plan(checked, warnings))
+        let saved = SavedPlan {
+            reply,
+            built_sha256: pinned.as_ref().map(|binary| binary.digest),
+        };
+        self.store_plan(spec, digest, &saved, had_steps).await;
+        Ok(self.prepared_plan(checked, pinned, warnings))
     }
 
     /// The plan comes from `prepare` for a runtime adapter.
@@ -606,6 +716,22 @@ impl Runner for AdapterRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinned_binary_keeps_the_bytes_it_digested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifact");
+        std::fs::write(&path, b"first build").unwrap();
+        let pinned = PinnedBinary::new(&File::open(&path).unwrap()).unwrap();
+        std::fs::write(&path, b"second build").unwrap();
+
+        assert_eq!(
+            pinned.digest,
+            <[u8; 32]>::from(Sha256::digest(b"first build"))
+        );
+        assert_eq!(std::fs::read(pinned.path()).unwrap(), b"first build");
+        assert!(pinned.file.set_len(0).is_err());
+    }
 
     #[test]
     fn only_an_adapter_that_could_not_be_asked_lets_a_stored_plan_stand_in() {

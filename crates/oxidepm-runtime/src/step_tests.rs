@@ -484,21 +484,32 @@ fn plan_may_run_the_binary_its_build_made() {
 }
 
 #[test]
+fn a_built_binary_must_be_in_the_app_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let artifact = dir.path().join("artifact");
+    std::fs::write(&artifact, "").unwrap();
+    std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(is_invalid(validate_plan(
+        &built_plan(&artifact, &app),
+        &spec(&app),
+        &rules(&[], &[], &[]),
+    ))
+    .contains("inside the app directory"));
+}
+
+#[test]
 fn plan_cannot_name_a_system_program_as_the_binary_it_built() {
-    if nix::unistd::geteuid().is_root() {
-        eprintln!("skipping: the system shell may be owned by the test user (root)");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let r = rules(&["cargo"], &[], &[]);
-    // Resolve the shell so the ownership check is reached even when /bin/sh is a symlink.
     let sh = std::fs::canonicalize("/bin/sh").expect("resolve the system shell");
     let msg = is_invalid(validate_plan(
         &built_plan(&sh, dir.path()),
         &spec(dir.path()),
         &r,
     ));
-    assert!(msg.contains("not owned"), "{msg}");
+    assert!(msg.contains("inside the app directory"), "{msg}");
     // naming the program without saying it was built is the program list's business as before
     let mut p = plan(&sh.to_string_lossy(), dir.path());
     p.binary_path = None;
@@ -530,7 +541,10 @@ fn the_binary_a_build_made_must_be_a_regular_executable_file_that_is_there() {
     );
     // a link, even to something executable
     let link = dir.path().join("link");
-    std::os::unix::fs::symlink(which::which("sh").unwrap(), &link).unwrap();
+    let executable = dir.path().join("executable");
+    std::fs::write(&executable, "").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(executable, &link).unwrap();
     assert!(
         is_invalid(validate_plan(&built_plan(&link, dir.path()), &sp, &r))
             .contains("not an executable file")
