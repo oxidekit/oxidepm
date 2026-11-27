@@ -117,20 +117,45 @@ fn socket_parent(path: &Path) -> &Path {
         .unwrap_or(Path::new("."))
 }
 
+const SOCKET_DIR_LOCK_FLAGS: libc::c_int = libc::LOCK_EX | libc::LOCK_NB;
+const SOCKET_DIR_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const SOCKET_DIR_LOCK_RETRY: Duration = Duration::from_millis(20);
+
 // Serialize publication and stale-file cleanup by cooperating listeners in this directory.
 // The lock is held for filesystem operations only, never across an await.
-fn lock_socket_dir(path: &Path) -> io::Result<File> {
-    let dir = File::open(socket_parent(path))?;
-    loop {
-        // SAFETY: dir owns the open descriptor throughout the flock.
-        if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            return Ok(dir);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+fn try_lock_socket_dir(dir: &File) -> io::Result<bool> {
+    // SAFETY: dir owns the open descriptor throughout the flock.
+    if unsafe { libc::flock(dir.as_raw_fd(), SOCKET_DIR_LOCK_FLAGS) } == 0 {
+        return Ok(true);
     }
+    let error = io::Error::last_os_error();
+    match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(false),
+        _ => Err(error),
+    }
+}
+
+async fn lock_socket_dir(path: &Path) -> io::Result<File> {
+    let parent = socket_parent(path);
+    let dir = File::open(parent)?;
+    tokio::time::timeout(SOCKET_DIR_LOCK_TIMEOUT, async {
+        loop {
+            if try_lock_socket_dir(&dir)? {
+                return Ok(dir);
+            }
+            tokio::time::sleep(SOCKET_DIR_LOCK_RETRY).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "timed out waiting for the socket directory lock at {}",
+                parent.display()
+            ),
+        )
+    })?
 }
 
 async fn probe(path: &Path) -> Result<PathState> {
@@ -225,7 +250,7 @@ impl IpcServer {
 
         let (listener, socket_file) = loop {
             let state = probe(socket_path).await?;
-            let _lock = lock_socket_dir(socket_path)?;
+            let _lock = lock_socket_dir(socket_path).await?;
             match state {
                 PathState::Live => return Err(Error::DaemonAlreadyRunning),
                 PathState::Stale(file) if file.matches(socket_path) => {
@@ -293,9 +318,13 @@ impl IpcServer {
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
-        let Ok(_lock) = lock_socket_dir(&self.socket_path) else {
+        let Ok(dir) = File::open(socket_parent(&self.socket_path)) else {
             return;
         };
+        // A subsequent bind can clean up the stale socket if the directory is busy here.
+        if !matches!(try_lock_socket_dir(&dir), Ok(true)) {
+            return;
+        }
         if self.socket_file.matches(&self.socket_path) {
             if let Err(e) = fs::remove_file(&self.socket_path) {
                 error!("Failed to remove socket file: {}", e);
@@ -636,6 +665,11 @@ async fn write_line(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn socket_directory_lock_is_exclusive_and_nonblocking() {
+        assert_eq!(SOCKET_DIR_LOCK_FLAGS, libc::LOCK_EX | libc::LOCK_NB);
+    }
 
     #[tokio::test]
     async fn a_bind_cannot_replace_an_entry_created_before_publication() {
