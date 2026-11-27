@@ -25,17 +25,22 @@ use oxidepm_adapter_proto::codes::{self, rpc};
 use oxidepm_adapter_proto::messages::{
     method, AuditNoteParams, HostRequestParams, HostRequestResult,
 };
+use oxidepm_adapter_proto::permissions::HostLevel;
 use oxidepm_adapter_proto::{to_params, ErrorObject, Params};
 use oxidepm_core::actor::Via;
 use oxidepm_core::{ErrorCode, Tier};
 use oxidepm_ipc::{Request, Response};
 use parking_lot::Mutex;
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::conn::{Inbound, StrikeHandle};
 use crate::audit::{ActorView, Audit};
-use crate::policy::{classify, AdapterGrant, ReqCtx};
+use crate::policy::{AdapterGrant, ReqCtx};
+
+tokio::task_local! {
+    // Set by the dry-run channel for the lifetime of each forwarded request.
+    static READ_ONLY_HOST: ();
+}
 
 /// Rate-limited answers that, inside [`OVER_RATE_WINDOW`], are a protocol violation.
 pub const OVER_RATE_STRIKE: usize = 20;
@@ -175,9 +180,13 @@ impl HostApi {
             ));
         };
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let mut grant = self.grant;
+        if READ_ONLY_HOST.try_with(|_| ()).is_ok() {
+            grant.level = HostLevel::Read;
+        }
         let ctx = ReqCtx::for_adapter(
             &self.name,
-            self.grant,
+            grant,
             self.via,
             format!("{}#{n}", self.name),
             parsed.dry_run,
@@ -266,26 +275,87 @@ impl Inbound for ReadOnlyHost {
     }
 
     async fn request(&self, name: &str, params: Params) -> Result<Params, ErrorObject> {
-        if name == method::HOST_REQUEST {
-            // Let the normal handler report malformed requests.
-            let request = params
-                .get("request")
-                .and_then(|value| Request::deserialize(value).ok());
-            if request.is_some_and(|request| classify(&request, false).mutates) {
-                return to_params(&HostRequestResult {
-                    response: serde_json::json!({
-                        "type": "error",
-                        "code": ErrorCode::PolicyDenied.as_str(),
-                        "message": "The adapter's dry-run grant only allows reads",
-                    }),
-                })
-                .map_err(|e| ErrorObject::new(rpc::INTERNAL_ERROR, e.to_string()));
-            }
-        }
-        self.0.request(name, params).await
+        READ_ONLY_HOST.scope((), self.0.request(name, params)).await
     }
 
     fn notification(&self, name: &str, params: Params) {
         self.0.notification(name, params);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::{AuditConfig, Phase, Record};
+    use crate::handlers::RequestHandler;
+    use crate::supervisor::Supervisor;
+    use oxidepm_adapter_proto::permissions::HostScope;
+    use oxidepm_core::{Paths, Selector};
+    use oxidepm_db::Database;
+
+    struct DispatchToHandler(RequestHandler);
+
+    #[async_trait]
+    impl Dispatch for DispatchToHandler {
+        async fn dispatch(&self, ctx: &ReqCtx, request: Request) -> Response {
+            self.0
+                .guarded(ctx, request)
+                .await
+                .unwrap_or_else(|err| Response::from_error(&err))
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_host_denials_are_audited_and_rate_limited() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Arc::new(Paths::new(home.path()));
+        paths.ensure_dirs().unwrap();
+        let database = Database::new(&paths.db()).await.unwrap();
+        let supervisor = Arc::new(Supervisor::new(database, Arc::clone(&paths)).await.unwrap());
+        let mut config = AuditConfig::new(&paths);
+        config.rates.caution_burst = 1.0;
+        config.rates.caution_per_min = 0.0;
+        let audit = Arc::new(Audit::with_config(config));
+        let handler = RequestHandler::with_audit(supervisor, Arc::clone(&audit));
+        let link = HostLink::new();
+        link.bind(Arc::new(DispatchToHandler(handler)));
+        let host = ReadOnlyHost(HostApi::new(
+            "tools",
+            AdapterGrant {
+                level: HostLevel::Lifecycle,
+                scope: HostScope::All,
+            },
+            link,
+            Some(Arc::clone(&audit)),
+        ));
+        let params = to_params(&HostRequestParams {
+            request: serde_json::to_value(Request::Stop {
+                selector: Selector::ByName("app".to_string()),
+            })
+            .unwrap(),
+            dry_run: false,
+            end_user: None,
+        })
+        .unwrap();
+
+        let denied = host.request(method::HOST_REQUEST, params.clone()).await;
+        let limited = host.request(method::HOST_REQUEST, params).await;
+        audit.close(crate::audit::DRAIN_BUDGET).await;
+
+        assert_eq!(denied.unwrap()["response"]["code"], "E_POLICY_DENIED");
+        let log = std::fs::read_to_string(paths.audit_security_log())
+            .expect("the denied request should create a security audit record");
+        let found = log.lines().any(|line| {
+            let record: Record = serde_json::from_str(line).unwrap();
+            record.phase == Phase::Decision
+                && record.op.as_deref() == Some("stop")
+                && record.decision.as_deref() == Some("deny")
+                && record.actor.is_some_and(|actor| actor.label == "tools")
+                && record
+                    .deny
+                    .is_some_and(|deny| deny.code == "E_POLICY_DENIED")
+        });
+        assert!(found, "{log}");
+        assert_eq!(limited.unwrap()["response"]["code"], "E_RATE_LIMITED");
     }
 }
