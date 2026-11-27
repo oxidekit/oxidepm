@@ -62,6 +62,11 @@ pub const SECURITY_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// Files kept per log, the live one included.
 pub const MAX_FILES: usize = 10;
 
+/// Security records for non-human refusals share a burst and a refill, independent
+/// of the request limiter and of the records for allowed actions.
+const REFUSAL_BURST: f64 = 10.0;
+const REFUSALS_PER_SECOND: f64 = 1.0 / 60.0;
+
 /// Targets named in one record; beyond that only the count.
 pub const MAX_TARGETS: usize = 50;
 /// Characters of a denial's reason.
@@ -1205,6 +1210,7 @@ pub struct Audit {
     ack_timeout: Duration,
     next_req: AtomicU64,
     limiter: Mutex<RateLimiter>,
+    refusal_budget: Mutex<Bucket>,
     folded: Arc<Mutex<Folded>>,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
@@ -1232,6 +1238,7 @@ impl Audit {
             // request numbers continue after a restart, so one never repeats an older one
             next_req: AtomicU64::new(main_seq + 1),
             limiter: Mutex::new(RateLimiter::new(config.rates)),
+            refusal_budget: Mutex::new(Bucket::full(REFUSAL_BURST, (config.clock)())),
             folded,
             clock: config.clock,
         }
@@ -1328,6 +1335,27 @@ impl Audit {
         if lanes.security {
             self.security.enqueue(record);
         }
+    }
+
+    /// Keep each refusal in the main file. Non-human refusals share one budget for
+    /// the security file so changing peers, operations or targets cannot increase it.
+    pub(crate) fn refusal(&self, mut record: Record, class: ActorClass, tier: Tier, error: &Error) {
+        record.decision = Some("deny".to_string());
+        record.deny = Some(Deny {
+            code: error.code().as_str().to_string(),
+            why: error.to_string(),
+        });
+        record.clip_text();
+        let mut lanes = lanes_for(class, tier, true).expect("refusals always have audit lanes");
+        if !matches!(class, ActorClass::Human | ActorClass::System) {
+            let mut budget = self.refusal_budget.lock();
+            budget.refill(REFUSALS_PER_SECOND, REFUSAL_BURST, self.now());
+            lanes.security = budget.tokens >= 1.0;
+            if lanes.security {
+                budget.tokens -= 1.0;
+            }
+        }
+        self.queue(record, lanes);
     }
 
     /// A line in an adapter's life: imported, enabled, started, killed...

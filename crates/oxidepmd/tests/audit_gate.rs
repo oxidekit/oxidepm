@@ -382,6 +382,44 @@ async fn denials_are_recorded_for_every_actor() {
     assert_eq!(h.state("target").await.status, AppStatus::Running);
 }
 
+#[test]
+fn repeated_refused_verb_or_session_requests_have_a_security_audit_budget() {
+    use common::daemon::DaemonProc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let mut daemon = DaemonProc::spawn(&home);
+    daemon.wait_for_boot();
+    for n in 0..24 {
+        let op = if n % 2 == 0 { "invoke" } else { "session_open" };
+        let reply = daemon.rpc_on(
+            &daemon.socket(),
+            "lookup",
+            Some("ai:lookup"),
+            json!({ "type": "adapter", "op": op, "verb": "missing", "cwd": dir.path() }),
+        );
+        assert_eq!(reply["response"]["type"], "error", "{reply}");
+        assert_ne!(reply["response"]["code"], "E_RATE_LIMITED", "{reply}");
+    }
+    assert_eq!(daemon.rpc(json!({ "type": "kill" }))["type"], "ok");
+    assert!(daemon.wait_exit().success());
+
+    let dir = home.join("audit");
+    let main = lines(&dir, "audit.jsonl");
+    let security = lines(&dir, "audit-security.jsonl");
+    let refusals = |records: &[Value]| {
+        records
+            .iter()
+            .filter(|line| line["decision"] == "deny")
+            .count()
+    };
+    assert_eq!(refusals(&main), 24);
+    assert_eq!(refusals(&security), 10);
+    for op in ["adapter invoke", "adapter session", "kill"] {
+        assert!(security.iter().any(|line| line["op"] == op), "{op}");
+    }
+}
+
 #[tokio::test]
 async fn adapter_status_polling_is_coalesced_into_one_line_per_minute() {
     let h = Harness::new().await;

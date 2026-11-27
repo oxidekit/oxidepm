@@ -26,7 +26,7 @@ use crate::adapters::conn::Output;
 use crate::adapters::host::AdapterHost;
 use crate::adapters::invoke::{InvokeRun, ResolvedVerb};
 use crate::adapters::session::SessionRun;
-use crate::audit::{self, ActorView, Audit, Deny, Lanes, Phase, Record, Target};
+use crate::audit::{self, ActorView, Audit, Lanes, Phase, Record, Target};
 use crate::policy::{self, log_field, Authorized, ReqCtx, RestartLimiter};
 use crate::supervisor::Supervisor;
 
@@ -263,16 +263,7 @@ impl RequestHandler {
                 ))
             }
             Err(e) if is_refusal(&e) => {
-                record.decision = Some("deny".to_string());
-                record.deny = Some(Deny {
-                    code: e.code().as_str().to_string(),
-                    why: e.to_string(),
-                });
-                let lanes = audit::lanes_for(class, classified.tier, true).unwrap_or(Lanes {
-                    main: true,
-                    security: true,
-                });
-                self.audit.queue(record, lanes);
+                self.audit.refusal(record, class, classified.tier, &e);
                 Err(e)
             }
             Err(e) => {
@@ -698,7 +689,7 @@ impl RequestHandler {
                     log_field(&ctx.request_id),
                     log_field(&e)
                 );
-                let mut record = decision_record(
+                let record = decision_record(
                     self.audit.next_req(),
                     ctx,
                     request,
@@ -706,16 +697,7 @@ impl RequestHandler {
                     view,
                     false,
                 );
-                record.decision = Some("deny".to_string());
-                record.deny = Some(Deny {
-                    code: e.code().as_str().to_string(),
-                    why: e.to_string(),
-                });
-                let lanes = audit::lanes_for(class, Tier::Safe, true).unwrap_or(Lanes {
-                    main: true,
-                    security: true,
-                });
-                self.audit.queue(record, lanes);
+                self.audit.refusal(record, class, Tier::Safe, &e);
                 return Err(e);
             }
         };
@@ -920,7 +902,7 @@ impl RequestHandler {
                         log_field(&ctx.request_id),
                         log_field(&e)
                     );
-                    let mut record = decision_record(
+                    let record = decision_record(
                         self.audit.next_req(),
                         ctx,
                         request,
@@ -928,16 +910,7 @@ impl RequestHandler {
                         view,
                         false,
                     );
-                    record.decision = Some("deny".to_string());
-                    record.deny = Some(Deny {
-                        code: e.code().as_str().to_string(),
-                        why: e.to_string(),
-                    });
-                    let lanes = audit::lanes_for(class, Tier::Safe, true).unwrap_or(Lanes {
-                        main: true,
-                        security: true,
-                    });
-                    self.audit.queue(record, lanes);
+                    self.audit.refusal(record, class, Tier::Safe, &e);
                     return Err(e);
                 }
             };
