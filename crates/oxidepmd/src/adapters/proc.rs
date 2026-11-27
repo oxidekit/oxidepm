@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,12 +20,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nix::fcntl::{openat, renameat, AtFlags, Flock, FlockArg, OFlag};
-use nix::sys::signal::Signal;
+use nix::sys::signal::{kill, Signal};
 use nix::sys::stat::{fstatat, mkdirat, Mode, SFlag};
+use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
+use nix::unistd::Pid;
 use oxidepm_adapter_proto::SUPPORTED_PROTOCOLS;
-use oxidepm_runtime::{
-    group_exists, kill_group, spawn_adapter, AdapterLaunch, GroupChild, SandboxLaunch,
-};
+use oxidepm_runtime::{kill_group, spawn_adapter, AdapterLaunch, GroupChild, SandboxLaunch};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -48,7 +49,6 @@ pub const STDERR_TAIL_LINES: usize = 20;
 const WALK_MAX: usize = 256;
 /// How long the leader may take to be reaped after the SIGKILL.
 const REAP_WAIT: Duration = Duration::from_secs(5);
-const POLL: Duration = Duration::from_millis(25);
 
 /// Why an adapter process could not be started.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,7 +288,7 @@ pub struct SessionLaunch {
 pub struct AdapterProc {
     child: GroupChild,
     pub conn: Arc<AdapterConn>,
-    pid: u32,
+    identity: Arc<ProcessIdentity>,
     pub started: Instant,
     /// The last lines of stderr, not yet scrubbed (they are scrubbed when shown).
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
@@ -296,6 +296,38 @@ pub struct AdapterProc {
     pub stderr_dropped: Arc<AtomicU64>,
     stderr_task: JoinHandle<()>,
     _pid_guard: PidGuard,
+}
+
+/// The leader's identity stays available for signaling until cleanup starts reaping it.
+/// The lock also orders an immediate shutdown signal against that cleanup.
+pub(super) struct ProcessIdentity {
+    pid: u32,
+    pgid: i32,
+    ticks: Mutex<Option<u64>>,
+}
+
+impl ProcessIdentity {
+    pub(super) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn matches(&self, expected: u64) -> bool {
+        expected != 0 && start_ticks(self.pid) == expected
+    }
+
+    fn signal_group(&self, signal: Signal) {
+        let ticks = self.ticks.lock();
+        if ticks.is_some_and(|expected| self.matches(expected)) {
+            let _ = kill_group(self.pgid, signal);
+        }
+    }
+
+    pub(super) fn kill(&self) {
+        let mut ticks = self.ticks.lock();
+        if ticks.take().is_some_and(|expected| self.matches(expected)) {
+            kill_walk(self.pid as i32, self.pgid);
+        }
+    }
 }
 
 impl AdapterProc {
@@ -402,16 +434,25 @@ impl AdapterProc {
         drop(exe);
 
         let pid = child.pid();
+        let ticks = start_ticks(pid);
+        let identity = Arc::new(ProcessIdentity {
+            pid,
+            pgid: child.pgid(),
+            ticks: Mutex::new(Some(ticks)),
+        });
+        // From here on all signals go through the leader identity.
+        child.disarm();
         let pid_guard = pids.add(PidRecord {
             app_id: slot,
             name: launch.name.clone(),
             pid,
             pgid: child.pgid(),
-            start_ticks: start_ticks(pid),
+            start_ticks: ticks,
         });
         if let Some(session) = session {
             let Some(stderr) = child.take_stderr() else {
-                child.kill_and_wait().await;
+                identity.kill();
+                let _ = tokio::time::timeout(REAP_WAIT, child.wait()).await;
                 return Err(ProcError::Spawn("the adapter's pipes are missing".into()));
             };
             // the terminal descriptors were duplicated into the child; ours can go
@@ -419,25 +460,26 @@ impl AdapterProc {
             drop(session.terminal);
             let conn = AdapterConn::start_handshaking(reader, writer, cfg, inbound);
             return Ok(Self::finish_start(
-                child, conn, pid, stderr, launch, log_name, pid_guard,
+                child, conn, identity, stderr, launch, log_name, pid_guard,
             ));
         }
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.take_stdout(), child.take_stderr())
         else {
-            child.kill_and_wait().await;
+            identity.kill();
+            let _ = tokio::time::timeout(REAP_WAIT, child.wait()).await;
             return Err(ProcError::Spawn("the adapter's pipes are missing".into()));
         };
         let conn = AdapterConn::start_handshaking(stdout, stdin, cfg, inbound);
         Ok(Self::finish_start(
-            child, conn, pid, stderr, launch, log_name, pid_guard,
+            child, conn, identity, stderr, launch, log_name, pid_guard,
         ))
     }
 
     fn finish_start(
         child: GroupChild,
         conn: Arc<AdapterConn>,
-        pid: u32,
+        identity: Arc<ProcessIdentity>,
         stderr: tokio::process::ChildStderr,
         launch: &Launch,
         log_name: &str,
@@ -454,7 +496,7 @@ impl AdapterProc {
         AdapterProc {
             child,
             conn,
-            pid,
+            identity,
             started: Instant::now(),
             stderr_tail: tail,
             stderr_dropped: dropped,
@@ -464,26 +506,36 @@ impl AdapterProc {
     }
 
     pub fn pid(&self) -> u32 {
-        self.pid
+        self.identity.pid
     }
 
     pub fn pgid(&self) -> i32 {
-        self.child.pgid()
+        self.identity.pgid
     }
 
-    /// The exit status if the leader has exited, without waiting.
-    pub fn try_exit(&mut self) -> Option<ExitStatus> {
-        self.child.try_wait().ok().flatten()
+    pub(super) fn identity(&self) -> Arc<ProcessIdentity> {
+        Arc::clone(&self.identity)
     }
 
-    /// Wait for the leader to exit. Cancel safe.
+    pub(super) fn window_changed(&self) {
+        self.identity.signal_group(Signal::SIGWINCH);
+    }
+
+    /// Wait for the leader to exit, leaving it unreaped. Cancel safe.
     pub async fn wait_exit(&mut self) -> Option<ExitStatus> {
-        self.child.wait().await.ok()
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut exits = signal(SignalKind::child()).ok()?;
+        loop {
+            if let Some(status) = leader_exit(&self.child).ok()? {
+                return Some(status);
+            }
+            exits.recv().await?;
+        }
     }
 
     /// The polite end, within `t.total()`: `shutdown`, then stdin closed, then SIGTERM to
-    /// the group, then the kill walk. Whatever the adapter does, every process of its group is
-    /// gone when this returns.
+    /// the group, then the kill walk. Clean up any remaining group members before reaping.
     pub async fn shutdown(&mut self, t: ShutdownTimings) -> ShutdownEnd {
         let phase1 = Instant::now() + t.stdin_phase;
         // the request is a courtesy: the answer, the silence and a refusal all end the same way
@@ -492,13 +544,13 @@ impl AdapterProc {
             .call("shutdown", &serde_json::json!({}), t.stdin_phase)
             .await;
         self.conn.close_input();
-        if self.wait_gone(phase1).await {
+        if self.wait_until_exit(phase1).await {
             self.finish().await;
             return ShutdownEnd::Graceful;
         }
 
-        let _ = kill_group(self.child.pgid(), Signal::SIGTERM);
-        if self.wait_gone(phase1 + t.term_phase).await {
+        self.identity.signal_group(Signal::SIGTERM);
+        if self.wait_until_exit(phase1 + t.term_phase).await {
             self.finish().await;
             return ShutdownEnd::Terminated;
         }
@@ -506,18 +558,10 @@ impl AdapterProc {
         ShutdownEnd::Killed
     }
 
-    /// Wait until the leader has exited and the group is empty, or `until`.
-    async fn wait_gone(&mut self, until: Instant) -> bool {
-        loop {
-            let exited = self.child.try_wait().ok().flatten().is_some();
-            if exited && !group_exists(self.child.pgid()) {
-                return true;
-            }
-            if Instant::now() >= until {
-                return false;
-            }
-            tokio::time::sleep(POLL).await;
-        }
+    async fn wait_until_exit(&mut self, until: Instant) -> bool {
+        tokio::time::timeout_at(until.into(), self.wait_exit())
+            .await
+            .is_ok_and(|status| status.is_some())
     }
 
     /// Wait (at most `max`) until the stderr reader has seen the end of the stream, so the last
@@ -529,8 +573,6 @@ impl AdapterProc {
     /// Kill at once, without grace (a violation, a missed ping, a tool at shutdown): kill descendants,
     /// kill the process group, then reap the leader.
     pub async fn kill(&mut self) {
-        let pid = self.child.pid() as i32;
-        kill_walk(pid, self.child.pgid());
         self.conn.close();
         self.finish().await;
     }
@@ -538,21 +580,32 @@ impl AdapterProc {
     /// Reap the leader, make sure nothing of the group is left and close the books.
     async fn finish(&mut self) {
         self.conn.close();
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = tokio::time::timeout(REAP_WAIT, self.child.wait()).await;
-        }
-        // members that outlived the leader (a grandchild in the group)
-        if group_exists(self.child.pgid()) {
-            let _ = kill_group(self.child.pgid(), Signal::SIGKILL);
-        }
-        self.child.disarm();
+        self.identity.kill();
+        let _ = tokio::time::timeout(REAP_WAIT, self.child.wait()).await;
         self.stderr_task.abort();
     }
 }
 
+fn leader_exit(child: &GroupChild) -> io::Result<Option<ExitStatus>> {
+    let Some(pid) = child.id() else {
+        return Ok(None);
+    };
+    // WNOWAIT keeps the leader's number reserved through the last group signal.
+    let status = waitid(
+        Id::Pid(Pid::from_raw(pid as i32)),
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+    )?;
+    let raw = match status {
+        WaitStatus::Exited(_, code) => code << 8,
+        WaitStatus::Signaled(_, signal, dumped) => signal as i32 | (i32::from(dumped) << 7),
+        _ => return Ok(None),
+    };
+    Ok(Some(ExitStatus::from_raw(raw)))
+}
+
 impl Drop for AdapterProc {
     fn drop(&mut self) {
-        // GroupChild kills the group while armed; the connection and the log reader go with us
+        self.identity.kill();
         self.conn.close();
         self.stderr_task.abort();
     }
@@ -596,9 +649,8 @@ fn ensure_state_dir(dir: &Path) -> std::io::Result<()> {
 // The kill walk
 // ---------------------------------------------------------------------------------------------
 
-/// `(pid, ppid)` of every process, from `/proc`. A process that vanishes while the directory is
-/// read is skipped.
-fn process_parents() -> Vec<(i32, i32)> {
+/// `(pid, ppid, start ticks)` of every process, from `/proc`.
+fn process_parents() -> Vec<(i32, i32, u64)> {
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -611,21 +663,22 @@ fn process_parents() -> Vec<(i32, i32)> {
             let mut fields = rest.split_whitespace();
             let _state = fields.next()?;
             let ppid = fields.next()?.parse().ok()?;
-            Some((pid, ppid))
+            let ticks = fields.nth(17)?.parse().ok()?; // field 22
+            Some((pid, ppid, ticks))
         })
         .collect()
 }
 
 /// The descendants of `root` by parent pid (at most [`WALK_MAX`]).
-fn descendants(root: i32) -> Vec<i32> {
+fn descendants(root: i32) -> Vec<(i32, u64)> {
     let table = process_parents();
-    let mut found: Vec<i32> = Vec::new();
+    let mut found = Vec::new();
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
-        for (pid, ppid) in &table {
-            if *ppid == parent && *pid != root && !found.contains(pid) {
-                found.push(*pid);
-                frontier.push(*pid);
+        for &(pid, ppid, ticks) in &table {
+            if ppid == parent && pid != root && !found.contains(&(pid, ticks)) {
+                found.push((pid, ticks));
+                frontier.push(pid);
                 if found.len() >= WALK_MAX {
                     return found;
                 }
@@ -639,19 +692,19 @@ fn descendants(root: i32) -> Vec<i32> {
 /// more, SIGKILL each descendant found by parent pid (this reaches helpers that left the process
 /// group with `setsid` while their parent is alive), then SIGKILL the group. Helpers that were
 /// already orphaned cannot be found through the leader.
-pub fn kill_walk(pid: i32, pgid: i32) {
+fn kill_walk(pid: i32, pgid: i32) {
     if pid <= 1 {
         return;
     }
-    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), Signal::SIGSTOP);
-    for d in descendants(pid) {
-        if d > 1 {
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(d), Signal::SIGKILL);
+    let _ = kill(Pid::from_raw(pid), Signal::SIGSTOP);
+    for (d, ticks) in descendants(pid) {
+        if d > 1 && ticks != 0 && start_ticks(d as u32) == ticks {
+            let _ = kill(Pid::from_raw(d), Signal::SIGKILL);
         }
     }
     let _ = kill_group(pgid, Signal::SIGKILL);
     // a stopped leader still dies of SIGKILL, but make sure the stop does not hold it
-    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL);
+    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -843,6 +896,29 @@ fn write_log_line(dir: &File, name: &std::ffi::OsStr, line: &str) -> io::Result<
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn observing_an_exit_keeps_the_leader_until_cleanup() {
+        let mut command = tokio::process::Command::new("/bin/true");
+        command.process_group(0);
+        let mut child = GroupChild::spawn(&mut command).unwrap();
+        child.disarm();
+        let pid = child.pid();
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = leader_exit(&child).unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let before_reap = child.id();
+        assert!(child.wait().await.unwrap().success());
+        assert!(status.success());
+        assert_eq!(before_reap, Some(pid));
+    }
+
     #[test]
     fn stderr_log_rejects_symlinks() {
         use std::os::unix::fs::symlink;
@@ -975,10 +1051,15 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(!found.is_empty() && !found.contains(&pid), "{found:?}");
+        assert!(
+            !found.is_empty() && found.iter().all(|&(child, _)| child != pid),
+            "{found:?}"
+        );
         // the children were started by us: kill exactly what the walk found, then the shell
-        for d in &found {
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(*d), Signal::SIGKILL);
+        for (d, ticks) in found {
+            if start_ticks(d as u32) == ticks {
+                let _ = kill(Pid::from_raw(d), Signal::SIGKILL);
+            }
         }
         let _ = sh.kill();
         let _ = sh.wait();

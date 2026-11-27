@@ -35,7 +35,7 @@ use tracing::{info, warn};
 
 use super::conn::{AdapterConn, CallError, CloseReason, ConnConfig, Inbound, Output};
 use super::events::{EventHub, ServiceQueue, FLUSH_WAIT};
-use super::proc::{dir_usage, AdapterProc, Launch, ProcError, ShutdownTimings};
+use super::proc::{dir_usage, AdapterProc, Launch, ProcError, ProcessIdentity, ShutdownTimings};
 use crate::audit::{AdapterLine, Audit};
 use crate::supervisor::{group_usage, PidTable};
 
@@ -350,7 +350,7 @@ struct Inner {
     state: EntryState,
     note: Option<String>,
     conn: Option<Arc<super::conn::AdapterConn>>,
-    pid: Option<u32>,
+    process: Option<Arc<ProcessIdentity>>,
     tracker: CrashTracker,
     crashes: u32,
     breaker: Breaker,
@@ -431,7 +431,7 @@ impl AdapterEntry {
             state,
             note: None,
             conn: None,
-            pid: None,
+            process: None,
             tracker: CrashTracker::new(cfg.restart.clone()),
             crashes: 0,
             breaker: Breaker::new(cfg.breaker_threshold, cfg.breaker_open),
@@ -512,7 +512,7 @@ impl AdapterEntry {
             kind: self.spec.kind,
             state: Self::visible_state(&inner),
             note: inner.note.clone(),
-            pid: inner.pid,
+            pid: inner.process.as_ref().map(|process| process.pid()),
             crashes: inner.crashes,
             strikes: inner
                 .conn
@@ -597,7 +597,7 @@ impl AdapterEntry {
         let mut inner = self.inner.lock();
         inner.note = Some(note);
         inner.conn = None;
-        inner.pid = None;
+        inner.process = None;
         inner.stop_tx = None;
         if self.spec.kind == Kind::Tool && reason.retryable() && !inner.retry_used {
             inner.retry_at = Some(Instant::now() + self.cfg.failed_tool_retry);
@@ -691,7 +691,7 @@ impl AdapterEntry {
                 task.abort();
                 let mut inner = self.inner.lock();
                 inner.conn = None;
-                inner.pid = None;
+                inner.process = None;
                 self.set_state(&mut inner, EntryState::Stopped);
             }
         }
@@ -712,15 +712,15 @@ impl AdapterEntry {
     /// shutdown. The supervision, if it is running, sees the order and ends.
     pub fn kill_signal(&self) {
         self.cancel_oneshots();
-        let (stop_tx, pid) = {
+        let (stop_tx, process) = {
             let inner = self.inner.lock();
-            (inner.stop_tx.clone(), inner.pid)
+            (inner.stop_tx.clone(), inner.process.clone())
         };
         if let Some(tx) = stop_tx {
             tx.send_replace(Stop::Now);
         }
-        if let Some(pid) = pid {
-            super::proc::kill_walk(pid as i32, pid as i32);
+        if let Some(process) = process {
+            process.kill();
         }
     }
 
@@ -759,7 +759,7 @@ impl AdapterEntry {
                     let decision = {
                         let mut inner = self.inner.lock();
                         inner.crashes = inner.crashes.saturating_add(1);
-                        inner.pid = None;
+                        inner.process = None;
                         inner.conn = None;
                         inner.tracker.record_exit(
                             Instant::now(),
@@ -848,7 +848,7 @@ impl AdapterEntry {
         };
         {
             let mut inner = self.inner.lock();
-            inner.pid = Some(proc.pid());
+            inner.process = Some(proc.identity());
             inner.stderr_tail = Some(Arc::clone(&proc.stderr_tail));
             inner.stderr_dropped = Some(Arc::clone(&proc.stderr_dropped));
         }
@@ -864,7 +864,7 @@ impl AdapterEntry {
             // it has not said it is ready: there is nothing for it to flush
             proc.kill().await;
             let mut inner = self.inner.lock();
-            inner.pid = None;
+            inner.process = None;
             self.set_state(&mut inner, EntryState::Stopped);
             return Life::Planned;
         };
@@ -954,7 +954,7 @@ impl AdapterEntry {
                 }
                 self.end_politely(&mut proc, stop_rx).await;
                 let mut inner = self.inner.lock();
-                inner.pid = None;
+                inner.process = None;
                 self.set_state(&mut inner, EntryState::Stopped);
                 Life::Planned
             }
@@ -1005,7 +1005,7 @@ impl AdapterEntry {
                 }
                 self.end_politely(&mut proc, stop_rx).await;
                 let mut inner = self.inner.lock();
-                inner.pid = None;
+                inner.process = None;
                 inner.note = Some(why);
                 self.set_state(&mut inner, EntryState::Disabled);
                 Life::Planned
@@ -1597,7 +1597,7 @@ impl AdapterEntry {
             tokio::select! {
                 r = &mut drive => break r,
                 Some(()) = session.winch.recv() => {
-                    let _ = oxidepm_runtime::kill_group(pgid, nix::sys::signal::Signal::SIGWINCH);
+                    proc.window_changed();
                 }
                 _ = ended.cancelled() => break Err(Error::Cancelled("the adapter was stopped".to_string())),
                 over = &mut monitor => {
