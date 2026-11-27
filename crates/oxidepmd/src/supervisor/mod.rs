@@ -46,6 +46,7 @@ use self::stats::Stats;
 use self::store::AppStore;
 use nix::sys::signal::Signal;
 use oxidepm_core::graph::{topo_layers, Node};
+use oxidepm_core::redact::{env_value_lines, scrub_ranges, REDACTED};
 use oxidepm_core::{AppInfo, AppSpec, AppStatus, Desired, Error, Paths, Result, Runtime, Selector};
 use oxidepm_db::{AppRecord, Database};
 use oxidepm_logs::LogReader;
@@ -72,6 +73,9 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Floor of the per-layer kill cap, however little of the budget is left.
 const MIN_KILL_CAP: Duration = Duration::from_secs(2);
+
+/// Capture and tail both split lines at this size in oxidepm-logs.
+const LOG_LINE_BYTES: usize = 64 * 1024;
 
 /// Settings of the supervisor itself (the daemon fills them from `daemon.toml`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1239,9 +1243,8 @@ impl Supervisor {
     }
 
     /// The log lines of an app, read on the calling thread (a caller that must not hold an
-    /// async worker runs it on a blocking one). With `scrub_from` every environment value of the
-    /// app that is at least that many bytes long is replaced by `<redacted>`, longest first: an
-    /// exact-match filter, for readers that are not a person.
+    /// async worker runs it on a blocking one). With `scrub_from`, matching lines of environment
+    /// values at least that many bytes long are replaced by `<redacted>`.
     pub fn read_logs(
         &self,
         selector: &Selector,
@@ -1259,52 +1262,75 @@ impl Supervisor {
             .into_iter()
             .next()
             .ok_or_else(|| Error::AppNotFound(selector.to_string()))?;
-        let name = handle.snapshot().spec.name.clone();
+        let snapshot = handle.snapshot();
+        let name = &snapshot.spec.name;
 
         // Bound retained data before serialization, including requests for large histories.
         const MAX_LINES: usize = 10_000;
         const MAX_STREAM_BYTES: usize = 1024 * 1024;
         let lines = lines.min(MAX_LINES);
+        if lines == 0 {
+            return Ok(Vec::new());
+        }
+        let values: Vec<_> = scrub_from
+            .into_iter()
+            .flat_map(|min| env_value_lines(&snapshot.spec, min))
+            .collect();
+        let max_value = values.iter().map(|value| value.len()).max().unwrap_or(0);
 
         let mut all_lines = Vec::new();
-
-        if stdout || !stderr {
-            let reader = LogReader::new(self.paths.log_path(&name, "out"));
-            all_lines.extend(reader.tail_bounded(lines, MAX_STREAM_BYTES)?);
-        }
-
-        if stderr || !stdout {
-            let reader = LogReader::new(self.paths.log_path(&name, "err"));
-            all_lines.extend(reader.tail_bounded(lines, MAX_STREAM_BYTES)?);
+        for (read, stream) in [(stdout || !stderr, "out"), (stderr || !stdout, "err")] {
+            if !read {
+                continue;
+            }
+            let reader = LogReader::new(self.paths.log_path(name, stream));
+            if values.is_empty() {
+                all_lines.extend(
+                    reader
+                        .tail_bounded(lines, MAX_STREAM_BYTES)?
+                        .into_iter()
+                        .map(|line| (line, None)),
+                );
+                continue;
+            }
+            // Keep enough preceding fragments to match a value even when the requested tail
+            // starts in its middle. Each captured record can produce two reader fragments.
+            let context_lines = 2 * (max_value.div_ceil(LOG_LINE_BYTES) + 1);
+            let context_bytes = context_lines.saturating_mul(LOG_LINE_BYTES + 1);
+            let mut tail: Vec<_> = reader
+                .tail_bounded(
+                    lines.saturating_add(context_lines),
+                    MAX_STREAM_BYTES.saturating_add(context_bytes),
+                )?
+                .into_iter()
+                .map(|line| (line, None))
+                .collect();
+            let mut bytes = 0;
+            let keep = tail
+                .iter()
+                .rev()
+                .take(lines)
+                .take_while(|(line, _)| {
+                    bytes += line.len() + 1;
+                    bytes <= MAX_STREAM_BYTES
+                })
+                .count();
+            scrub_log_stream(&mut tail, &values);
+            let skip = tail.len() - keep;
+            all_lines.extend(tail.into_iter().skip(skip));
         }
 
         // Sort by timestamp if we have both
         if stdout && stderr {
-            all_lines.sort();
+            all_lines.sort_by(|a, b| a.0.cmp(&b.0));
         }
 
-        // Limit to requested lines
-        if all_lines.len() > lines {
-            let skip_count = all_lines.len() - lines;
-            all_lines = all_lines.into_iter().skip(skip_count).collect();
-        }
-
-        if let Some(min) = scrub_from {
-            let spec = handle.snapshot().spec.clone();
-            let values: Vec<&str> = spec
-                .env
-                .values()
-                .map(String::as_str)
-                .filter(|v| v.len() >= min)
-                .collect();
-            if !values.is_empty() {
-                for line in &mut all_lines {
-                    *line = oxidepm_core::scrub_message(line, &values);
-                }
-            }
-        }
-
-        Ok(all_lines)
+        let skip = all_lines.len().saturating_sub(lines);
+        Ok(all_lines
+            .into_iter()
+            .skip(skip)
+            .map(|(line, scrubbed)| scrubbed.unwrap_or(line))
+            .collect())
     }
 
     /// Resolve selector to app IDs, from the registry (an instance whose cluster is in the set too is dropped). A selector that names nothing is
@@ -1927,6 +1953,105 @@ impl Supervisor {
     /// so no hook outlives the daemon. The shutdown calls this after every app is stopped.
     pub async fn drain_hooks(&self) {
         self.hooks.drain(self.hooks.drain_grace()).await;
+    }
+}
+
+/// Length of the timestamp and its separators in a captured log record.
+fn log_prefix_len(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    for shape in [
+        b"[0000-00-00 00:00:00.000] ".as_slice(),
+        b"[0000-00-00 00:00:00] ",
+    ] {
+        if let Some(prefix) = bytes.get(..shape.len()) {
+            if prefix.iter().zip(shape).all(|(byte, expected)| {
+                if *expected == b'0' {
+                    byte.is_ascii_digit()
+                } else {
+                    byte == expected
+                }
+            }) {
+                return shape.len();
+            }
+        }
+    }
+    0
+}
+
+/// Match adjacent fragments in file order, before merging streams or clipping the reply.
+fn scrub_log_stream(lines: &mut [(String, Option<String>)], values: &[&str]) {
+    let mut start = 0;
+    let mut prefixes = Vec::new();
+    let mut previous_len = 0;
+    let mut record_len = 0;
+    for index in 0..lines.len() {
+        let line = &lines[index].0;
+        let len = line.len();
+        let prefix = log_prefix_len(line);
+        // Tail reading can split a timestamped record again. Its continuation has no prefix.
+        let reader_split = previous_len >= LOG_LINE_BYTES && (prefix == 0 || prefix == len);
+        // A full capture record may continue in a new record, with a fresh timestamp.
+        let capture_split = prefix != 0 && record_len >= LOG_LINE_BYTES;
+        if !reader_split && !capture_split {
+            scrub_log_group(&mut lines[start..index], &prefixes, values);
+            start = index;
+            prefixes.clear();
+        }
+        if reader_split {
+            record_len += len;
+            prefixes.push(0);
+        } else {
+            record_len = len - prefix;
+            prefixes.push(prefix);
+        }
+        previous_len = len;
+    }
+    scrub_log_group(&mut lines[start..], &prefixes, values);
+}
+
+fn scrub_log_group(lines: &mut [(String, Option<String>)], prefixes: &[usize], values: &[&str]) {
+    if let [(line, scrubbed)] = lines {
+        let clean = oxidepm_core::scrub_message(line, values);
+        *scrubbed = (clean != *line).then_some(clean);
+        return;
+    }
+
+    let mut text = String::new();
+    let mut lossy_split = false;
+    for ((line, _), &prefix) in lines.iter().zip(prefixes) {
+        let part = &line[prefix..];
+        lossy_split |= text.ends_with('\u{fffd}') && part.starts_with('\u{fffd}');
+        text.push_str(part);
+    }
+    // A split UTF-8 character is decoded on both sides before redaction can see it.
+    // Hide its joined line when the original character cannot be recovered.
+    if lossy_split {
+        for ((line, scrubbed), &prefix) in lines.iter_mut().zip(prefixes) {
+            *scrubbed = Some(format!("{}{REDACTED}", &line[..prefix]));
+        }
+        return;
+    }
+
+    let mut matches = scrub_ranges(&text, values).into_iter().peekable();
+    let mut offset = 0;
+    for ((line, scrubbed), &prefix) in lines.iter_mut().zip(prefixes) {
+        let end = offset + line.len() - prefix;
+        if matches.peek().is_some_and(|hit| hit.start < end) {
+            let mut clean = line[..prefix].to_string();
+            let mut cursor = offset;
+            while let Some(hit) = matches.peek().filter(|hit| hit.start < end) {
+                clean.push_str(&text[cursor..hit.start.max(cursor)]);
+                clean.push_str(REDACTED);
+                cursor = hit.end.min(end);
+                if hit.end > end {
+                    break;
+                }
+                matches.next();
+            }
+            clean.push_str(&text[cursor..end]);
+            *scrubbed = Some(clean);
+        }
+        offset = end;
     }
 }
 

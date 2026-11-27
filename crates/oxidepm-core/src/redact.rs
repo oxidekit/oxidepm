@@ -8,6 +8,7 @@
 //! other argument.
 
 use crate::types::AppSpec;
+use std::ops::Range;
 
 /// Shown instead of every environment value.
 pub const REDACTED: &str = "<redacted>";
@@ -64,44 +65,65 @@ fn redact_options(options: &mut serde_json::Value) {
 /// `1` or `on` would wreck every sentence it is found in, and protects nothing.
 pub const MIN_SCRUBBED_VALUE_LEN: usize = 4;
 
+/// The individual lines of environment values that are long enough to scrub.
+pub fn env_value_lines(spec: &AppSpec, min: usize) -> impl Iterator<Item = &str> {
+    spec.env
+        .values()
+        .flat_map(|value| value.lines())
+        .filter(move |line| !line.is_empty() && line.len() >= min)
+}
+
 /// Replace occurrences in the original text, merging overlapping matches.
 pub fn scrub_message(text: &str, values: &[&str]) -> String {
+    let mut out = String::new();
+    let mut end = 0;
+    for range in scrub_ranges(text, values) {
+        out.push_str(&text[end..range.start]);
+        out.push_str(REDACTED);
+        end = range.end;
+    }
+    out.push_str(&text[end..]);
+    out
+}
+
+/// Byte ranges of occurrences in the original text, merging overlapping matches.
+pub fn scrub_ranges(text: &str, values: &[&str]) -> Vec<Range<usize>> {
     let mut values: Vec<&str> = values
         .iter()
         .copied()
         .filter(|value| !value.is_empty())
         .collect();
     if values.is_empty() {
-        return text.to_owned();
+        return Vec::new();
     }
     values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
 
-    let mut out = String::new();
-    let mut end = 0;
+    let mut ranges: Vec<Range<usize>> = Vec::new();
     for (start, _) in text.char_indices() {
         if let Some(value) = values
             .iter()
             .find(|value| text[start..].starts_with(**value))
         {
-            if start >= end {
-                out.push_str(&text[end..start]);
-                out.push_str(REDACTED);
+            let end = start + value.len();
+            if let Some(last) = ranges.last_mut().filter(|last| start < last.end) {
+                last.end = last.end.max(end);
+            } else {
+                ranges.push(start..end);
             }
-            end = end.max(start + value.len());
         }
     }
-    out.push_str(&text[end..]);
-    out
+    ranges
 }
 
-/// `text` without the environment values of `spec` (values under [`MIN_SCRUBBED_VALUE_LEN`]
-/// bytes are left alone). For free text that is about this app and came from somewhere else.
+/// Scrub whole environment values and their individual lines from free text about this app.
+/// Matches must be at least [`MIN_SCRUBBED_VALUE_LEN`] bytes long.
 pub fn scrub_text(text: &str, spec: &AppSpec) -> String {
     let values: Vec<&str> = spec
         .env
         .values()
         .map(String::as_str)
-        .filter(|v| v.len() >= MIN_SCRUBBED_VALUE_LEN)
+        .filter(|v| v.len() >= MIN_SCRUBBED_VALUE_LEN && v.contains('\n'))
+        .chain(env_value_lines(spec, MIN_SCRUBBED_VALUE_LEN))
         .collect();
     scrub_message(text, &values)
 }
@@ -267,6 +289,19 @@ mod tests {
         assert_eq!(
             out, "failed with <redacted> for <redacted> and on",
             "short values stay"
+        );
+    }
+
+    #[test]
+    fn scrub_text_redacts_individual_lines_of_environment_values() {
+        let mut spec = spec_with_secrets();
+        spec.env.insert(
+            "BUILD_LABELS".to_string(),
+            "first-label\r\non\nsecond-label\n".to_string(),
+        );
+        assert_eq!(
+            scrub_text("labels: second-label then first-label and on", &spec),
+            "labels: <redacted> then <redacted> and on"
         );
     }
 }

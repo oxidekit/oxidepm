@@ -5,7 +5,8 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use oxidepm_core::AppStatus;
+use oxidepm_core::{AppStatus, Selector};
+use oxidepmd::handlers::LOG_SCRUB_MIN;
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -27,6 +28,67 @@ async fn stdout_and_stderr_are_captured_to_files() {
             line.starts_with("[20"),
             "line should carry a timestamp: {line:?}"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limited_logs_scrub_multiline_environment_values() {
+    let h = Harness::new().await;
+    let spec = h.cmd_with(
+        "log-labels",
+        &format!("printf '%s\\n' \"$LABELS\"; exec sleep {}", h.marker()),
+        json!({"env": {"LABELS": "first-label\r\non\nsecond-label"}}),
+    );
+    h.start(spec).await.expect("start");
+    h.wait_log("log-labels", "out", "second-label").await;
+
+    let selector = Selector::parse("log-labels");
+    let lines = h
+        .sup
+        .read_logs(&selector, 3, true, false, Some(LOG_SCRUB_MIN))
+        .unwrap();
+    assert_eq!(lines.len(), 3);
+    for (line, suffix) in lines.iter().zip(["<redacted>", "on", "<redacted>"]) {
+        assert!(line.ends_with(&format!("] {suffix}")), "{line}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limited_log_tails_scrub_values_across_long_line_splits() {
+    let h = Harness::new().await;
+    // The reader splits the timestamped line and capture splits the original output.
+    for (name, padding, label) in [
+        ("log-read-split", 65536 - 26 - 3, "output-label"),
+        ("log-write-split", 65536 - 3, "output-label"),
+        ("log-unicode-split", 65536 - 4, "outéput-label"),
+    ] {
+        let spec = h.cmd_with(
+            name,
+            &format!(
+                "printf '%{padding}s%s\\n' '' \"$LABEL\"; exec sleep {}",
+                h.marker()
+            ),
+            json!({"env": {"LABEL": label}}),
+        );
+        h.start(spec).await.expect("start");
+        h.wait_log(name, "out", "put-label").await;
+
+        let selector = Selector::parse(name);
+        for wanted in [1, 3] {
+            let lines = h
+                .sup
+                .read_logs(&selector, wanted, true, true, Some(LOG_SCRUB_MIN))
+                .unwrap();
+            assert!(!lines.is_empty());
+            assert!(lines.iter().any(|line| line.contains("<redacted>")));
+            assert!(lines
+                .iter()
+                .all(|line| !line.contains("out") && !line.contains("put-label")));
+        }
+
+        let lines = h.sup.logs(&selector, 3, true, false).await.unwrap();
+        assert!(lines.iter().any(|line| line.contains("out")));
+        assert!(lines.iter().any(|line| line.ends_with("put-label")));
     }
 }
 
