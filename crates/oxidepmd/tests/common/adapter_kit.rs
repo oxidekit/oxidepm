@@ -417,7 +417,8 @@ impl Kit {
                     })
                     .collect();
                 json!({
-                    "name": first.name, "kind": first.kind, "tags": ["test"],
+                    "name": first.name, "kind": first.kind,
+                    "tags": first.manifest.get("tags").cloned().unwrap_or_else(|| json!(["test"])),
                     "summary": first.summary, "description": "Made for the install tests.",
                     "releases": releases
                 })

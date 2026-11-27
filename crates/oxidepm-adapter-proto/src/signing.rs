@@ -100,6 +100,14 @@ pub fn official_keys() -> Vec<IndexKey> {
         .collect()
 }
 
+/// Whether the trust recorded after install verification identifies an official release.
+pub fn is_official_release_trust(trust: &str) -> bool {
+    trust == "bundled"
+        || trust
+            .strip_prefix("signed:")
+            .is_some_and(|id| official_keys().iter().any(|key| key.key_id == id))
+}
+
 /// The key id and algorithm bytes of a signature text, without checking anything.
 fn signature_header(sig_text: &str) -> Result<([u8; 2], [u8; 8]), SigError> {
     let line = sig_text

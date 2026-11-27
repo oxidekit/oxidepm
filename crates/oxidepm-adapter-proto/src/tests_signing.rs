@@ -3,7 +3,10 @@ use serde_json::{json, Value};
 use crate::codes;
 use crate::manifest::Rule;
 use crate::signing::testkeys::TestKey;
-use crate::signing::{trusted_comment_for, verify_index, verify_minisign, IndexKey, SigError};
+use crate::signing::{
+    is_official_release_trust, official_keys, trusted_comment_for, verify_index, verify_minisign,
+    IndexKey, SigError,
+};
 use crate::Index;
 
 fn index_json(sequence: u64) -> Value {
@@ -20,6 +23,20 @@ fn body(sequence: u64) -> Vec<u8> {
 
 fn key_of(k: &TestKey) -> IndexKey {
     IndexKey::parse(&k.public_base64()).unwrap()
+}
+
+#[test]
+fn official_release_trust_covers_the_bundle_and_embedded_keys() {
+    assert!(is_official_release_trust("bundled"));
+    for key in official_keys() {
+        assert!(is_official_release_trust(&format!("signed:{}", key.key_id)));
+    }
+    assert!(!is_official_release_trust("pinned"));
+    let other = TestKey::generate();
+    assert!(!is_official_release_trust(&format!(
+        "signed:{}",
+        other.key_id()
+    )));
 }
 
 #[test]

@@ -26,6 +26,7 @@ use nix::unistd::{geteuid, unlinkat, UnlinkatFlags};
 use oxidepm_adapter_proto::manifest::Rule;
 use oxidepm_adapter_proto::messages::method;
 use oxidepm_adapter_proto::permissions::{HostLevel, HostScope};
+use oxidepm_adapter_proto::signing::is_official_release_trust;
 use oxidepm_adapter_proto::{
     host_target, Index, Invalid, Kind, Manifest, Permissions, ValidateCtx, VerifiedIndex,
     INDEX_MAX_BYTES,
@@ -1172,7 +1173,9 @@ impl AdapterHost {
                 }
             }
             (None, true) => {
-                if !manifest.provides.runtimes.is_empty() || !manifest.provides.programs.is_empty()
+                if (!manifest.provides.runtimes.is_empty()
+                    || !manifest.provides.programs.is_empty())
+                    && !is_official_release_trust(&row.trust)
                 {
                     return Err(Error::AdapterInvalid(format!(
                         "{} provides runtimes or programs and requires explicit consent. Pass --accept {fingerprint}",

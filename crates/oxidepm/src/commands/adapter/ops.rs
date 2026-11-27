@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Result};
 use colored::Colorize;
+use oxidepm_adapter_proto::signing::is_official_release_trust;
 use oxidepm_adapter_proto::{Kind, Manifest, Permissions};
 use oxidepm_core::{Error, Paths};
 use oxidepm_ipc::{
@@ -178,10 +179,11 @@ fn manifest_of(info: &AdapterInfo) -> Result<Manifest> {
 
 fn trust_line(info: &AdapterInfo) -> String {
     match info.trust.strip_prefix("signed:") {
-        Some(key) => format!(
+        Some(key) if is_official_release_trust(&info.trust) => format!(
             "signed by key {key} (official). Program sha256 {}",
             info.exe_sha256
         ),
+        Some(key) => format!("signed by key {key}. Program sha256 {}", info.exe_sha256),
         None if info.trust == "bundled" => format!(
             "bundled with this release. Program sha256 {}",
             info.exe_sha256
@@ -253,11 +255,13 @@ pub async fn enable(a: &crate::cli::EnableArgs) -> Result<()> {
     let fingerprint = info.fingerprint.clone();
     let tty = interactive();
 
-    // the consent: an explicit fingerprint, or `--yes` for the pure class, or a person at a terminal
+    // Consent comes from a fingerprint, eligible automatic consent, or a person at a terminal.
     let mut accept = a.accept.clone();
-    let provides_programs =
-        !manifest.provides.runtimes.is_empty() || !manifest.provides.programs.is_empty();
-    if accept.is_none() && a.yes && (provides_programs || !manifest.permissions.is_pure_class()) {
+    let needs_official_trust = (!manifest.provides.runtimes.is_empty()
+        || !manifest.provides.programs.is_empty())
+        && !is_official_release_trust(&info.trust);
+    if accept.is_none() && a.yes && (needs_official_trust || !manifest.permissions.is_pure_class())
+    {
         let preview = Preview {
             manifest: &manifest,
             source_line: format!(
@@ -278,8 +282,11 @@ pub async fn enable(a: &crate::cli::EnableArgs) -> Result<()> {
         if !is_json_mode() {
             println!("{}", preview::render(&preview));
         }
-        let reason = if provides_programs {
-            format!("{} provides runtimes or programs", info.name)
+        let reason = if needs_official_trust {
+            format!(
+                "{} needs explicit consent to provide runtimes or programs",
+                info.name
+            )
         } else {
             format!(
                 "{} asks for: {}",
@@ -288,7 +295,7 @@ pub async fn enable(a: &crate::cli::EnableArgs) -> Result<()> {
             )
         };
         return Err(anyhow::Error::new(super::Refusal(format!(
-            "--yes is honoured only for an adapter with limited permissions and no provided runtimes or programs. {reason}. Review the adapter, then run: oxidepm adapter enable {} --accept {fingerprint}",
+            "--yes is honoured only for adapters with limited permissions. Adapters that provide runtimes or programs also need official release trust. {reason}. Review the adapter and run oxidepm adapter enable {} --accept {fingerprint}",
             info.name
         ))));
     }

@@ -1327,6 +1327,45 @@ fn adapters_that_provide_programs_require_explicit_consent() {
 }
 
 #[test]
+fn a_self_built_adapter_providing_programs_needs_explicit_consent() {
+    let package = Pkg::tool("programs", "0.1.0")
+        .with("provides", json!({"programs": ["example"]}))
+        .package();
+    let kit = Kit::new();
+    let archive = kit.dir.path().join("programs.tar.gz");
+    std::fs::write(&archive, &package.archive).unwrap();
+    let daemon = kit.daemon();
+    let imported = kit.run(&[
+        "adapter",
+        "import",
+        archive.to_str().unwrap(),
+        "--sha256",
+        &package.archive_sha,
+    ]);
+    assert_eq!(imported.code, 0, "{}", imported.all());
+    assert_eq!(info_json(&kit, "programs")["trust"], "pinned");
+
+    let fingerprint = package.fingerprint();
+    let refused = kit.run(&["adapter", "enable", "programs", "--yes"]);
+    assert_eq!(refused.code, 2, "{}", refused.all());
+    assert!(refused.stderr.contains(&fingerprint), "{}", refused.all());
+    assert_eq!(info_json(&kit, "programs")["enabled"], false);
+    let reply = daemon.rpc(json!({
+        "type": "adapter", "op": "enable", "name": "programs", "yes": true,
+    }));
+    assert_eq!(reply["code"], "E_ADAPTER_INVALID", "{reply}");
+
+    let accepted = kit.run(&["adapter", "enable", "programs", "--accept", &fingerprint]);
+    assert_eq!(accepted.code, 0, "{}", accepted.all());
+    assert_eq!(info_json(&kit, "programs")["enabled"], true);
+    assert!(
+        refused.stdout.contains("programs: example"),
+        "{}",
+        refused.all()
+    );
+}
+
+#[test]
 fn yes_is_not_honoured_with_env_pass_or_broad_fs_read() {
     let env = Pkg::tool("envy", "0.1.0")
         .perms(json!({"env_pass": ["SSH_AUTH_SOCK"]}))
@@ -2132,6 +2171,32 @@ fn bundled_import_can_enable_the_pure_adapters_at_once() {
         );
     }
     drop(daemon);
+}
+
+#[test]
+fn bundled_runtime_import_can_enable_with_yes() {
+    let runtime = Pkg::tool("runtime-demo", "0.1.0")
+        .with("tags", json!(["runtime"]))
+        .with(
+            "provides",
+            json!({"runtimes": ["demo"], "programs": ["demo"]}),
+        )
+        .package();
+    let kit = kit_with(&[&runtime]);
+    let _daemon = kit.daemon();
+    let run = kit.run(&[
+        "adapter",
+        "import",
+        "--bundled",
+        "--tag",
+        "runtime",
+        "--enable",
+        "--yes",
+    ]);
+    assert_eq!(run.code, 0, "{}", run.all());
+    let info = info_json(&kit, "runtime-demo");
+    assert_eq!(info["trust"], "bundled", "{info}");
+    assert_eq!(info["enabled"], true, "{info}");
 }
 
 #[test]

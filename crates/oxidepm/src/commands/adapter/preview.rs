@@ -283,6 +283,8 @@ fn adds_line(m: &Manifest) -> String {
             m.provides.runtimes.join(", "),
             m.provides.programs.join(", ")
         ));
+    } else if !m.provides.programs.is_empty() {
+        parts.push(format!("programs: {}", m.provides.programs.join(", ")));
     }
     parts.join(".   ")
 }
