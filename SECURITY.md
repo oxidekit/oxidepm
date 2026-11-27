@@ -2,6 +2,10 @@
 
 Report vulnerabilities privately through the repository's Security tab.
 
+## Supported platforms
+
+OxidePM runs on Linux (x86_64 and aarch64, glibc). The adapter sandbox uses Landlock and seccomp.
+
 ## Release signing
 
 OxidePM 0.4.0-rc.4 is the first release with a Minisign signature for `checksums.txt`.
