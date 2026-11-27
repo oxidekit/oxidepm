@@ -62,10 +62,10 @@ jobs:
       - name: Package archives
         working-directory: oxidepm
         run: |
-          tar -czf "oxidepm-$TARGET.tar.gz" \
+          tar --owner=0 --group=0 --numeric-owner -czf "oxidepm-$TARGET.tar.gz" \
             -C "$PWD/target/$TARGET/release" oxidepm oxidepmd oxidepm-sandbox \
             -C "$PWD" share LICENSE-MIT LICENSE-APACHE
-          tar -czf "oxidepm-adapters-$TARGET.tar.gz" -C share/oxidepm/adapters .
+          tar --owner=0 --group=0 --numeric-owner -czf "oxidepm-adapters-$TARGET.tar.gz" -C share/oxidepm/adapters .
 
       - name: Build Debian package
         working-directory: oxidepm
@@ -163,7 +163,15 @@ jobs:
           release_date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%d HEAD)
           target/debug/examples/catalogue prepare "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$release_date" \
             bundles artifacts "${names[@]}"
-          (cd artifacts && LC_ALL=C sha256sum -- *.tar.gz *.deb adapter-catalogue-input.json > checksums.txt)
+          source_dir=$(mktemp -d "$RUNNER_TEMP/oxidepm-source.XXXXXXXX")
+          trap 'rm -rf -- "$source_dir"' EXIT
+          source_name="oxidepm-${GITHUB_REF_NAME#v}"
+          git archive --format=tar --prefix="$source_name/" HEAD | tar -xf - -C "$source_dir"
+          tar --owner=0 --group=0 --numeric-owner -czf artifacts/oxidepm-source.tar.gz -C "$source_dir" "$source_name"
+          cp dist/aur/oxidepm.install artifacts/
+          (cd artifacts && LC_ALL=C sha256sum -- *.tar.gz *.deb adapter-catalogue-input.json oxidepm.install > checksums.txt)
+          sh scripts/render-pkgbuild.sh "$GITHUB_REF_NAME" artifacts/checksums.txt > artifacts/PKGBUILD
+          (cd artifacts && sha256sum -- PKGBUILD >> checksums.txt)
       - name: Sign release checksums
         env:
           OXIDEPM_MINISIGN_KEY: ${{ secrets.OXIDEPM_MINISIGN_KEY }}

@@ -176,26 +176,24 @@ install() {
     verify_checksum "$TEMP_DIR/oxidepm.tar.gz"
 
     info "Extracting..."
-    tar -xzf "$TEMP_DIR/oxidepm.tar.gz" -C "$TEMP_DIR"
+    tar --no-same-owner -xzf "$TEMP_DIR/oxidepm.tar.gz" -C "$TEMP_DIR"
 
     info "Installing to $INSTALL_DIR"
 
-    # Check if we need sudo
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$TEMP_DIR/oxidepm" "$INSTALL_DIR/"
-        mv "$TEMP_DIR/oxidepmd" "$INSTALL_DIR/"
-        # releases before the sandbox launcher do not have it
-        if [ -f "$TEMP_DIR/oxidepm-sandbox" ]; then mv "$TEMP_DIR/oxidepm-sandbox" "$INSTALL_DIR/"; fi
+    if [ "$(id -u)" -eq 0 ]; then
+        set -- install -m 0755 -o root -g root
+    elif [ -w "$INSTALL_DIR" ]; then
+        set -- install -m 0755
     else
         warn "Need sudo to install to $INSTALL_DIR"
-        sudo mv "$TEMP_DIR/oxidepm" "$INSTALL_DIR/"
-        sudo mv "$TEMP_DIR/oxidepmd" "$INSTALL_DIR/"
-        if [ -f "$TEMP_DIR/oxidepm-sandbox" ]; then sudo mv "$TEMP_DIR/oxidepm-sandbox" "$INSTALL_DIR/"; fi
+        set -- sudo install -m 0755 -o root -g root
     fi
 
-    chmod +x "$INSTALL_DIR/oxidepm"
-    chmod +x "$INSTALL_DIR/oxidepmd"
-    if [ -f "$INSTALL_DIR/oxidepm-sandbox" ]; then chmod +x "$INSTALL_DIR/oxidepm-sandbox"; fi
+    command "$@" -- "$TEMP_DIR/oxidepm" "$TEMP_DIR/oxidepmd" "$INSTALL_DIR/"
+    # releases before the sandbox launcher do not have it
+    if [ -f "$TEMP_DIR/oxidepm-sandbox" ]; then
+        command "$@" -- "$TEMP_DIR/oxidepm-sandbox" "$INSTALL_DIR/"
+    fi
 
     install_adapters
 }

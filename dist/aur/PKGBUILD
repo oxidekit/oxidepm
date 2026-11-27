@@ -1,6 +1,7 @@
 # Maintainer: Nayiem Willems <nayiem@mono-labs.org>
+# Use the PKGBUILD and oxidepm.install from the release assets.
 pkgname=oxidepm
-_tag=v0.4.0
+_tag=@RELEASE_TAG@
 pkgver=${_tag#v}
 pkgver=${pkgver//-/}
 pkgrel=1
@@ -11,13 +12,13 @@ license=('MIT OR Apache-2.0')
 depends=('gcc-libs')
 makedepends=('rust' 'cargo')
 install=oxidepm.install
-source=("$pkgname-$_tag.tar.gz::$url/archive/$_tag.tar.gz")
+source=("$pkgname-$_tag.tar.gz::$url/releases/download/$_tag/oxidepm-source.tar.gz")
 source_x86_64=("$pkgname-adapters-$_tag-x86_64.tar.gz::$url/releases/download/$_tag/oxidepm-adapters-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("$pkgname-adapters-$_tag-aarch64.tar.gz::$url/releases/download/$_tag/oxidepm-adapters-aarch64-unknown-linux-gnu.tar.gz")
 noextract=("$pkgname-adapters-$_tag-$CARCH.tar.gz")
-sha256sums=('SKIP')
-sha256sums_x86_64=('SKIP')
-sha256sums_aarch64=('SKIP')
+sha256sums=('@SOURCE_SHA256@')
+sha256sums_x86_64=('@X86_64_SHA256@')
+sha256sums_aarch64=('@AARCH64_SHA256@')
 
 build() {
     cd "$pkgname-${_tag#v}"
