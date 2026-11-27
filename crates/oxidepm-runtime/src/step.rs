@@ -142,14 +142,15 @@ fn resolve_program(
     }
 
     let actual = path.canonicalize().map_err(|_| unlisted())?;
-    // Prefer the requested name when it is declared and resolves to this executable.
-    let names = rules
+    // An invocation name can select a mode (for example, a Python virtual environment).
+    let invocation = rules
         .programs
         .iter()
-        .filter(|p| p.as_str() == name)
-        .chain(rules.programs.iter().filter(|p| p.as_str() != name));
+        .any(|p| p == name)
+        .then_some(path)
+        .filter(|_| may_capture(name));
     let mut matched = false;
-    for declared in names {
+    for declared in &rules.programs {
         let Some(found) = lookup(declared) else {
             continue;
         };
@@ -158,11 +159,7 @@ fn resolve_program(
         }
         matched = true;
         if may_capture(declared) {
-            let invocation = if declared == name {
-                path.to_path_buf()
-            } else {
-                found
-            };
+            let invocation = invocation.map_or(found, Path::to_path_buf);
             return Ok((actual, Some(invocation)));
         }
     }

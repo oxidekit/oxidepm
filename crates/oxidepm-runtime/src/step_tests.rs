@@ -454,6 +454,30 @@ fn an_absolute_program_can_name_the_resolved_manifest_program() {
 }
 
 #[test]
+fn an_absolute_plan_keeps_its_declared_invocation_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let program = bin.join("tool3");
+    let alias = dir.path().join("tool");
+    std::fs::write(&program, "").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&program, &alias).unwrap();
+    let rules = rules(&["tool", "tool3"], &[], &[]);
+    let env = vec![("PATH".into(), bin.display().to_string())];
+
+    let checked = validate_plan_with(
+        &plan(alias.to_str().unwrap(), dir.path()),
+        &spec(dir.path()),
+        &rules,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(checked.launch.program, program);
+    assert_eq!(checked.invocation, Some(alias));
+}
+
+#[test]
 fn a_relative_search_path_is_based_on_the_app_directory() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
