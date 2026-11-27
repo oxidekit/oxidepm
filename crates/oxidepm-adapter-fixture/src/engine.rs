@@ -688,11 +688,8 @@ impl Engine {
             Action::EchoFds {} => self.echo_fds(),
             Action::EchoLimits {} => self.echo_limits(),
             Action::EchoNnp {} => {
-                #[cfg(target_os = "linux")]
                 // SAFETY: a read of a flag of the calling thread.
                 let value = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
-                #[cfg(not(target_os = "linux"))]
-                let value = -1;
                 self.report.record("nnp", json!({ "no_new_privs": value }));
             }
             Action::Touch { path } => {
@@ -806,27 +803,18 @@ impl Engine {
                     .record("inet_socket", file_outcome(json!({}), result));
             }
             Action::IoUringSetup {} => {
-                #[cfg(target_os = "linux")]
-                {
-                    let mut params = [0u8; 120];
-                    // SAFETY: io_uring_setup writes at most the 120 bytes of io_uring_params.
-                    let fd = unsafe {
-                        libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr())
-                    };
-                    let result = if fd < 0 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        unsafe { libc::close(fd as i32) };
-                        Ok(())
-                    };
-                    self.report
-                        .record("io_uring_setup", file_outcome(json!({}), result));
-                }
-                #[cfg(not(target_os = "linux"))]
-                self.report.record(
-                    "io_uring_setup",
-                    file_outcome(json!({}), Err(not_supported())),
-                );
+                let mut params = [0u8; 120];
+                // SAFETY: io_uring_setup writes at most the 120 bytes of io_uring_params.
+                let fd =
+                    unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+                let result = if fd < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    unsafe { libc::close(fd as i32) };
+                    Ok(())
+                };
+                self.report
+                    .record("io_uring_setup", file_outcome(json!({}), result));
             }
             Action::UnixConnect { path } => {
                 let result = std::os::unix::net::UnixStream::connect(path).map(|_| ());
@@ -836,15 +824,12 @@ impl Engine {
                 );
             }
             Action::AbstractConnect { name } => {
-                #[cfg(target_os = "linux")]
                 let result = {
                     use std::os::linux::net::SocketAddrExt;
                     std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
                         .and_then(|addr| std::os::unix::net::UnixStream::connect_addr(&addr))
                         .map(|_| ())
                 };
-                #[cfg(not(target_os = "linux"))]
-                let result: std::io::Result<()> = Err(not_supported());
                 self.report.record(
                     "abstract_connect",
                     file_outcome(json!({ "name": name }), result),
@@ -1336,26 +1321,10 @@ fn file_outcome(entry: Value, result: std::io::Result<()>) -> Value {
     }
 }
 
-/// What the Linux-only behaviours record on another system.
-#[cfg(not(target_os = "linux"))]
-fn not_supported() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "not supported on this system",
-    )
-}
-
 /// Set errno to 0 for the calling thread, so a call whose legal result is -1 can be checked.
 ///
 /// # Safety
 /// Writes the thread's errno slot; always valid to do.
 unsafe fn clear_errno() {
-    #[cfg(target_os = "linux")]
-    {
-        *libc::__errno_location() = 0;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        *libc::__error() = 0;
-    }
+    *libc::__errno_location() = 0;
 }

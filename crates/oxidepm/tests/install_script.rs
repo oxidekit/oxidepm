@@ -8,11 +8,10 @@ use std::process::{Command, Output};
 use sha2::{Digest, Sha256};
 
 fn target() -> &'static str {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
-        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
-        ("aarch64", "macos") => "aarch64-apple-darwin",
-        _ => "x86_64-apple-darwin",
+    match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-gnu",
+        "aarch64" => "aarch64-unknown-linux-gnu",
+        arch => panic!("unsupported test architecture: {arch}"),
     }
 }
 

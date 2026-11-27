@@ -162,14 +162,11 @@ async fn bind_fails_when_live_listener_owns_path() {
     client.write_all(line("ping").as_bytes()).await.unwrap();
     let mut conn = first.accept().await.unwrap();
     let request = conn.read_request().await.unwrap();
-    // Linux delivers the closed liveness probe. On macOS peer credentials can fail
-    // after the probe disconnects, in which case accept skips it.
-    #[cfg(target_os = "linux")]
-    assert!(request.is_none());
-    let request = match request {
-        None => first.accept().await.unwrap().read_request().await.unwrap(),
-        Some(_) => request,
-    };
+    assert!(
+        request.is_none(),
+        "the liveness probe closed without a request"
+    );
+    let request = first.accept().await.unwrap().read_request().await.unwrap();
     assert_eq!(kind(request), "ping");
 }
 

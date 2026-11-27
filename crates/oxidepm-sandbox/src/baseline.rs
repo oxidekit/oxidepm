@@ -40,22 +40,19 @@ pub fn restrict(
     }
     apply_baseline(profile)?;
     let mut enforced = Enforced::default();
-    #[cfg(target_os = "linux")]
-    {
-        match crate::landlock_fs::apply(profile, with_exe) {
-            Ok(on) => enforced.landlock = on,
-            Err(e) if allow_unenforced => {
-                eprintln!("oxidepm-sandbox: {e} (continuing: unenforced adapters are allowed)")
-            }
-            Err(e) => return Err(e),
+    match crate::landlock_fs::apply(profile, with_exe) {
+        Ok(on) => enforced.landlock = on,
+        Err(e) if allow_unenforced => {
+            eprintln!("oxidepm-sandbox: {e} (continuing: unenforced adapters are allowed)")
         }
-        match crate::seccomp_filter::apply(profile) {
-            Ok(on) => enforced.seccomp = on,
-            Err(e) if allow_unenforced => {
-                eprintln!("oxidepm-sandbox: {e} (continuing: unenforced adapters are allowed)")
-            }
-            Err(e) => return Err(e),
+        Err(e) => return Err(e),
+    }
+    match crate::seccomp_filter::apply(profile) {
+        Ok(on) => enforced.seccomp = on,
+        Err(e) if allow_unenforced => {
+            eprintln!("oxidepm-sandbox: {e} (continuing: unenforced adapters are allowed)")
         }
+        Err(e) => return Err(e),
     }
     let open = missing(profile, enforced);
     if !open.is_empty() && !allow_unenforced {

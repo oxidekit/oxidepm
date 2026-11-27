@@ -2,6 +2,9 @@
 
 #![deny(clippy::await_holding_lock, clippy::await_holding_refcell_ref)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("OxidePM supports Linux only");
+
 pub mod adapters;
 pub mod audit;
 pub mod daemon;

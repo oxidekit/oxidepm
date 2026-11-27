@@ -190,14 +190,10 @@ pub async fn recv_with_fds(stream: &UnixStream, max: usize) -> io::Result<(Vec<u
 
 fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
     let mut buf = vec![0u8; max];
-    // Room for ATTACH_FDS descriptors on kernels that discard truncated rights.
+    // Linux discards descriptors that do not fit in the control buffer.
     // SAFETY: CMSG_SPACE only computes a size.
     let space =
         unsafe { libc::CMSG_SPACE((ATTACH_FDS * std::mem::size_of::<RawFd>()) as u32) } as usize;
-    // macOS installs the descriptors before copying the control message out. Allow a
-    // full kernel control mbuf so all the descriptors can be closed on rejection.
-    #[cfg(target_os = "macos")]
-    let space = space.max(2048);
     let mut control = vec![0u64; space.div_ceil(8)];
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
@@ -209,12 +205,8 @@ fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)>
     header.msg_iovlen = 1;
     header.msg_control = control.as_mut_ptr().cast();
     header.msg_controllen = space as _;
-    #[cfg(target_os = "linux")]
-    let flags = libc::MSG_CMSG_CLOEXEC;
-    #[cfg(not(target_os = "linux"))]
-    let flags = 0;
     // SAFETY: `header` points at live buffers for the duration of the call.
-    let n = unsafe { libc::recvmsg(socket, &mut header, flags) };
+    let n = unsafe { libc::recvmsg(socket, &mut header, libc::MSG_CMSG_CLOEXEC) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -254,13 +246,6 @@ fn recvmsg_fds(socket: RawFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)>
             io::ErrorKind::InvalidData,
             "too many descriptors were sent",
         ));
-    }
-    // Own every descriptor before setting the flags so an error closes all of them.
-    #[cfg(not(target_os = "linux"))]
-    for fd in &fds {
-        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-
-        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
     }
     buf.truncate(n as usize);
     Ok((buf, fds))

@@ -1,5 +1,8 @@
 //! OxidePM CLI - Process manager written in Rust for any runtime, with adapter support
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("OxidePM supports Linux only");
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

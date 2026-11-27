@@ -454,12 +454,7 @@ mod tests {
             .expect("the probe must complete within its timeout");
         assert!(!result.healthy);
         let message = result.message.unwrap();
-        // macOS can let a connection to a bound, non-listening port time out.
-        assert!(
-            message.contains("connection failed")
-                || (cfg!(target_os = "macos") && message == "Timeout"),
-            "{message}"
-        );
+        assert!(message.contains("connection failed"), "{message}");
     }
 
     #[tokio::test]
@@ -482,11 +477,7 @@ mod tests {
             .expect("the probe must complete within its timeout");
         assert!(!result.healthy);
         let message = result.message.unwrap();
-        assert!(
-            message.starts_with("Connection failed")
-                || (cfg!(target_os = "macos") && message == "Timeout"),
-            "{message}"
-        );
+        assert!(message.starts_with("Connection failed"), "{message}");
     }
 
     #[tokio::test]

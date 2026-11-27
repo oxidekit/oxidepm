@@ -563,7 +563,7 @@ impl Manifest {
     }
 
     /// The executable must exist under `root` (the extracted archive), be a regular file, not
-    /// reached through a symbolic link, and start with the magic of a native executable: a `#!`
+    /// reached through a symbolic link, and start with the ELF magic. A `#!`
     /// script cannot be executed from a descriptor.
     pub fn check_exec_file(&self, root: &Path) -> Result<(), Invalid> {
         self.check_exec_path()?;
@@ -593,7 +593,7 @@ impl Manifest {
         }
         let mut magic = [0u8; 4];
         let read = std::fs::File::open(&path).and_then(|mut f| f.read_exact(&mut magic));
-        if read.is_err() || !is_native_magic(magic) {
+        if read.is_err() || magic != *b"\x7fELF" {
             return invalid(
                 Rule::ExecNotNative,
                 format!("exec {:?} is not a native executable (a script cannot be executed from a descriptor)", self.exec),
@@ -738,15 +738,4 @@ fn has_dup(v: &[String]) -> bool {
     let mut s: Vec<&String> = v.iter().collect();
     s.sort();
     s.windows(2).any(|w| w[0] == w[1])
-}
-
-fn is_native_magic(m: [u8; 4]) -> bool {
-    if cfg!(target_os = "macos") {
-        matches!(
-            u32::from_be_bytes(m),
-            0xFEED_FACE | 0xFEED_FACF | 0xCEFA_EDFE | 0xCFFA_EDFE | 0xCAFE_BABE
-        )
-    } else {
-        m == [0x7f, b'E', b'L', b'F']
-    }
 }

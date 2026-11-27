@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::output::print_plan;
-use oxidepm_adapter_proto::{official_keys, verify_minisign, IndexKey};
+use oxidepm_adapter_proto::{host_target, official_keys, verify_minisign, IndexKey};
 use oxidepm_core::release_bundle::DIRECTORY as BUNDLE_PATH;
 use oxidepm_core::{Error, Paths};
 use oxidepm_fetch::{
@@ -72,7 +72,7 @@ impl Env {
             current_exe: std::env::current_exe()
                 .context("Cannot determine the path of the running oxidepm")?,
             current_version: CURRENT_VERSION.to_string(),
-            target: current_target(),
+            target: host_target(),
             release_keys: official_keys(),
             client: super::get_client(),
             adapter_db: Paths::from_env().ok().map(|paths| paths.adapters_db()),
@@ -833,20 +833,6 @@ fn probe_blocking(exe: &Path, version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the current platform target triple
-fn current_target() -> String {
-    let arch = std::env::consts::ARCH;
-    let os = std::env::consts::OS;
-
-    match (arch, os) {
-        ("x86_64", "linux") => "x86_64-unknown-linux-gnu".to_string(),
-        ("aarch64", "linux") => "aarch64-unknown-linux-gnu".to_string(),
-        ("aarch64", "macos") => "aarch64-apple-darwin".to_string(),
-        ("x86_64", "macos") => "x86_64-apple-darwin".to_string(),
-        _ => format!("{}-{}", arch, os),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,7 +999,7 @@ mod tests {
     }
 
     fn asset_name() -> String {
-        format!("oxidepm-{}.tar.gz", current_target())
+        format!("oxidepm-{}.tar.gz", host_target())
     }
 
     /// A stand-in for `oxidepm`: reports a version and says where it was run from.
@@ -1054,7 +1040,7 @@ mod tests {
                 },
                 current_exe: self.bin.join("oxidepm"),
                 current_version: OLD_VERSION.to_string(),
-                target: current_target(),
+                target: host_target(),
                 release_keys: [&server.signer, &server.next_signer]
                     .into_iter()
                     .map(|key| IndexKey::parse(&key.public_base64()).unwrap())
@@ -1233,7 +1219,7 @@ mod tests {
     async fn update_picks_the_exact_asset_name() {
         let fx = Fixture::new();
         let server = Server::start().await;
-        let target = current_target();
+        let target = host_target();
         let good = archive(&[
             ("oxidepm", &script(NEW_VERSION, None)),
             ("oxidepmd", b"good oxidepmd"),

@@ -134,8 +134,6 @@ pub async fn selftest(
     let pathname = UnixListener::bind(&socket_path)
         .map_err(|e| format!("cannot listen for the self-test: {e}"))?;
     threads.push(listen(pathname, Arc::clone(&stop)));
-    // abstract sockets exist on Linux only
-    #[cfg(target_os = "linux")]
     let abstract_name = {
         use std::os::linux::net::SocketAddrExt;
         let name = format!(
@@ -152,10 +150,8 @@ pub async fn selftest(
         let listener = UnixListener::bind_addr(&addr)
             .map_err(|e| format!("cannot listen for the self-test: {e}"))?;
         threads.push(listen(listener, Arc::clone(&stop)));
-        Some(name)
+        name
     };
-    #[cfg(not(target_os = "linux"))]
-    let abstract_name: Option<String> = None;
 
     let plan = SelftestPlan {
         write_outside: Some(outside_dir.join("written")),
@@ -163,7 +159,7 @@ pub async fn selftest(
         read_daemon_home: Some(env.home_file.clone()),
         daemon_socket: Some(env.daemon_socket.clone()),
         session_bus: session_bus(),
-        abstract_socket: abstract_name,
+        abstract_socket: Some(abstract_name),
         pathname_socket: Some(socket_path),
         exec: true_program(),
     };

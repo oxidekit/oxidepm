@@ -6,12 +6,19 @@
 //! `oxidepm-sandbox` (feature `launcher`, on by default) is the only code that restricts a
 //! process, and it restricts only itself, once, before it executes the adapter.
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("OxidePM supports Linux only");
+
+#[cfg(target_os = "linux")]
 pub mod caps;
 pub mod profile;
+#[cfg(target_os = "linux")]
 pub mod report;
 
+#[cfg(target_os = "linux")]
 pub use caps::{probe, SandboxCaps};
 pub use profile::{find_program, Profile, ProfileInput};
+#[cfg(target_os = "linux")]
 pub use report::{
     enforce_name, missing_enforcement, EnforcedRecord, Outcome, SelfTestReport, SelftestPlan,
 };

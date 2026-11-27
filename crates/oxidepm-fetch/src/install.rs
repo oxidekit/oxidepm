@@ -119,8 +119,8 @@ impl StagedFile {
 
 /// Replace `dst` by a copy of `src`: write a temporary file in the same directory, `fsync`, `rename`
 /// over the destination, `fsync` the directory. A reader sees the old file or the new one, never
-/// half of it. The rename works on a running executable on Linux and macOS; copying onto it
-/// (`fs::copy`) fails with `ETXTBSY`.
+/// half of it. Linux allows renaming over a running executable. Copying onto it with
+/// `fs::copy` fails with `ETXTBSY`.
 pub fn install_file_atomic(src: &Path, dst: &Path, mode: u32) -> Result<()> {
     StagedFile::stage(src, dst, mode)?.commit()
 }

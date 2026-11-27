@@ -10,7 +10,7 @@
 //! and a rename; it is not fsynced, because the one thing it must survive is the death of the
 //! daemon process, and after a reboot its boot id no longer matches.
 //!
-//! Linux only (`/proc`); elsewhere the sweep says it is unavailable.
+//! The sweep needs a mounted `/proc`.
 
 use super::persist;
 use nix::sys::signal::Signal;
@@ -226,7 +226,7 @@ pub fn sweep(path: &Path) -> SweepReport {
     };
     report.recorded = file.apps.len();
 
-    if !cfg!(target_os = "linux") || !Path::new("/proc/self/stat").exists() {
+    if !Path::new("/proc/self/stat").exists() {
         warn!(
             "Orphan sweep is unavailable on this platform; {} apps may have been left running",
             file.apps.len()

@@ -696,15 +696,12 @@ impl AdapterHost {
     /// accepted.
     ///
     /// `None` when no adapter process is alive (nothing is read from `/proc`, the common case),
-    /// when the platform has no `/proc`, or when the peer is not in an adapter's process tree: the
-    /// claim in the envelope then decides, as before. `Some(Adapter)` when the peer is an adapter
+    /// or when the peer is not in an adapter's process tree. The claim in the envelope then
+    /// decides. `Some(Adapter)` when the peer is an adapter
     /// or one of its descendants. `Some(Unresolved)` when the peer could not be looked at while an
     /// adapter is alive (it was gone, `SO_PEERCRED` gave no pid, the chain was too long): stricter
     /// than a person, never a person.
     pub async fn label_peer(&self, pid: Option<i32>) -> Option<PeerLabel> {
-        if !cfg!(target_os = "linux") {
-            return None;
-        }
         let adapters: Vec<AdapterProc> = self
             .pids
             .get()?

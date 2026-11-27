@@ -175,21 +175,13 @@ fn manifest_exec_must_be_relative() {
     }
 }
 
-fn native_magic() -> [u8; 4] {
-    if cfg!(target_os = "macos") {
-        [0xCF, 0xFA, 0xED, 0xFE]
-    } else {
-        [0x7f, b'E', b'L', b'F']
-    }
-}
-
 #[test]
 fn manifest_exec_must_be_elf() {
     use std::os::unix::fs::symlink;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::create_dir(root.join("bin")).unwrap();
-    let mut elf = native_magic().to_vec();
+    let mut elf = b"\x7fELF".to_vec();
     elf.extend_from_slice(&[2, 1, 1, 0]);
     std::fs::write(root.join("bin/good"), &elf).unwrap();
     std::fs::write(root.join("bin/script"), b"#!/bin/sh\necho hi\n").unwrap();

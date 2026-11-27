@@ -60,7 +60,6 @@ impl SandboxCaps {
 }
 
 /// The Landlock ABI version, if the kernel has Landlock enabled.
-#[cfg(target_os = "linux")]
 pub fn landlock_abi() -> Option<u32> {
     const LANDLOCK_CREATE_RULESET_VERSION: libc::c_ulong = 1;
     // SAFETY: a version query takes no pointer and changes nothing.
@@ -75,31 +74,14 @@ pub fn landlock_abi() -> Option<u32> {
     u32::try_from(v).ok().filter(|v| *v >= 1)
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn landlock_abi() -> Option<u32> {
-    None
-}
-
-#[cfg(target_os = "linux")]
 fn seccomp_available() -> bool {
     // SAFETY: PR_GET_SECCOMP reads the calling thread's mode; EINVAL means the kernel has no seccomp.
     unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) >= 0 }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn seccomp_available() -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
 fn no_new_privs_available() -> bool {
     // SAFETY: a read of a flag of the calling thread.
     unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) >= 0 }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn no_new_privs_available() -> bool {
-    false
 }
 
 fn ptrace_scope() -> Option<u8> {
@@ -155,7 +137,6 @@ pub fn probe() -> SandboxCaps {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn probe_is_consistent_and_does_not_change_the_process() {
         let before = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
