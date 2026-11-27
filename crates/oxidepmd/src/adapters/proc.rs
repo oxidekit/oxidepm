@@ -311,21 +311,21 @@ impl ProcessIdentity {
         self.pid
     }
 
-    fn matches(&self, expected: u64) -> bool {
-        expected != 0 && start_ticks(self.pid) == expected
-    }
-
     fn signal_group(&self, signal: Signal) {
-        let ticks = self.ticks.lock();
-        if ticks.is_some_and(|expected| self.matches(expected)) {
+        self.signal_if_current(false, || {
             let _ = kill_group(self.pgid, signal);
-        }
+        });
     }
 
     pub(super) fn kill(&self) {
+        self.signal_if_current(true, || kill_walk(self.pid as i32, self.pgid));
+    }
+
+    fn signal_if_current(&self, take_identity: bool, send: impl FnOnce()) {
         let mut ticks = self.ticks.lock();
-        if ticks.take().is_some_and(|expected| self.matches(expected)) {
-            kill_walk(self.pid as i32, self.pgid);
+        let expected = if take_identity { ticks.take() } else { *ticks };
+        if expected.is_some_and(|expected| expected != 0 && start_ticks(self.pid) == expected) {
+            send();
         }
     }
 }
@@ -898,6 +898,40 @@ fn write_log_line(dir: &File, name: &std::ffi::OsStr, line: &str) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_identity_rejects_mismatched_start_ticks() {
+        let pid = std::process::id();
+        let ticks = start_ticks(pid);
+        assert_ne!(ticks, 0);
+        let identity = ProcessIdentity {
+            pid,
+            pgid: nix::unistd::getpgrp().as_raw(),
+            ticks: Mutex::new(Some(ticks + 1)),
+        };
+        let unexpected_signal = || panic!("signalled a mismatched process identity");
+        identity.signal_if_current(false, unexpected_signal);
+        identity.signal_if_current(true, unexpected_signal);
+    }
+
+    #[test]
+    fn process_identity_can_only_be_taken_once() {
+        let pid = std::process::id();
+        let ticks = start_ticks(pid);
+        assert_ne!(ticks, 0);
+        let identity = ProcessIdentity {
+            pid,
+            pgid: nix::unistd::getpgrp().as_raw(),
+            ticks: Mutex::new(Some(ticks)),
+        };
+        let mut sent = 0;
+        identity.signal_if_current(false, || sent += 1);
+        identity.signal_if_current(true, || sent += 1);
+        assert_eq!(sent, 2);
+        let unexpected_signal = || panic!("signalled a process whose identity was taken");
+        identity.signal_if_current(false, unexpected_signal);
+        identity.signal_if_current(true, unexpected_signal);
+    }
 
     #[test]
     fn walks_a_process_with_a_non_utf8_name() {
