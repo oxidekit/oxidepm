@@ -339,6 +339,7 @@ pub struct IndexOpts {
     pub sequence: u64,
     pub generated: &'static str,
     pub expires: &'static str,
+    pub tags: &'static [&'static str],
     pub revoked: Vec<String>,
     pub yanked: Vec<String>,
 }
@@ -349,6 +350,7 @@ impl Default for IndexOpts {
             sequence: 42,
             generated: "2026-11-20T10:00:00Z",
             expires: "2099-01-20T10:00:00Z",
+            tags: &["test"],
             revoked: Vec::new(),
             yanked: Vec::new(),
         }
@@ -417,8 +419,7 @@ impl Kit {
                     })
                     .collect();
                 json!({
-                    "name": first.name, "kind": first.kind,
-                    "tags": first.manifest.get("tags").cloned().unwrap_or_else(|| json!(["test"])),
+                    "name": first.name, "kind": first.kind, "tags": opts.tags,
                     "summary": first.summary, "description": "Made for the install tests.",
                     "releases": releases
                 })

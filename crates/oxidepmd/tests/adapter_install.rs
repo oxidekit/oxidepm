@@ -2182,7 +2182,14 @@ fn bundled_runtime_import_can_enable_with_yes() {
             json!({"runtimes": ["demo"], "programs": ["demo"]}),
         )
         .package();
-    let kit = kit_with(&[&runtime]);
+    let kit = Kit::new();
+    kit.publish(
+        &[&runtime],
+        &IndexOpts {
+            tags: &["runtime"],
+            ..IndexOpts::default()
+        },
+    );
     let _daemon = kit.daemon();
     let run = kit.run(&[
         "adapter",
