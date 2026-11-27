@@ -40,14 +40,25 @@ publish_release() {
         LC_ALL=C sort -k2 > "$work/local-checksums"
     cmp -s "$work/checksums" "$work/local-checksums" || fail "release files disagree with signed checksums"
 
+    prerelease=false
+    make_latest=true
+    # In a SemVer tag, only a hyphen before any build metadata marks a pre-release.
+    case "${release_tag%%+*}" in
+        *-*)
+            prerelease=true
+            make_latest=false
+            set -- --prerelease "$@"
+            ;;
+    esac
     gh release create "$release_tag" --repo "$release_repo" --verify-tag --draft --generate-notes "$@"
     id=$(gh release view "$release_tag" --repo "$release_repo" --json databaseId --jq .databaseId)
     case "$id" in ''|*[!0-9]*) fail "invalid release ID" ;; esac
     endpoint="repos/$release_repo/releases/$id"
 
     gh api "$endpoint" > "$work/draft"
-    jq -e --arg tag "$release_tag" '.draft and (.prerelease == false) and (.tag_name == $tag)' \
-        "$work/draft" >/dev/null || fail "expected a draft for $release_tag"
+    jq -e --arg tag "$release_tag" --argjson prerelease "$prerelease" \
+        '.draft and (.prerelease == $prerelease) and (.tag_name == $tag)' "$work/draft" >/dev/null ||
+        fail "expected a draft for $release_tag"
     gh api --paginate --slurp "$endpoint/assets?per_page=100" > "$work/uploaded"
     jq -e --rawfile expected "$work/expected" '
         ($expected | split("\n") | map(select(length > 0) | split(" ") |
@@ -55,7 +66,10 @@ publish_release() {
         (flatten | map({name, size, digest, state}) | sort_by(.name))
     ' "$work/uploaded" >/dev/null || fail "uploaded assets do not match the release files"
 
-    gh api --method PATCH "$endpoint" -F draft=false -F prerelease=false -f make_latest=true --silent
+    gh api --method PATCH "$endpoint" -F draft=false -F "prerelease=$prerelease" -f "make_latest=$make_latest" --silent
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        printf 'prerelease=%s\n' "$prerelease" >> "$GITHUB_OUTPUT"
+    fi
 }
 
 download() {

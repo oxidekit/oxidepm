@@ -64,10 +64,21 @@ cat > "$work/bin/gh" <<'MOCK'
 set -eu
 case "$1 $2" in
     'release create')
-        shift 2
+        tag=$3
+        shift 3
         test ! -e "$TEST_STATE/draft"
         printf '%s\n' "$@" | grep -Fxq -- --draft
-        touch "$TEST_STATE/draft"
+        prerelease=false
+        for arg do
+            if [ "$arg" = --prerelease ]; then prerelease=true; fi
+        done
+        expected=${TEST_PRERELEASE:-false}
+        if [ "$prerelease" != "$expected" ]; then
+            echo "Expected prerelease=$expected when creating $tag, got $prerelease" >&2
+            exit 1
+        fi
+        jq -n --arg tag "$tag" --argjson prerelease "${TEST_DRAFT_PRERELEASE:-$prerelease}" \
+            '{draft:true, prerelease:$prerelease, tag_name:$tag}' > "$TEST_STATE/draft"
         if [ -e "$TEST_STATE/fail-upload" ]; then
             echo 'Upload failed' >&2
             exit 1
@@ -80,12 +91,12 @@ case "$1 $2" in
     'api --method')
         test "$3" = PATCH && test "$4" = repos/example/oxidepm/releases/123
         printf '%s\n' "$@" | grep -Fxq 'draft=false'
-        printf '%s\n' "$@" | grep -Fxq 'prerelease=false'
-        printf '%s\n' "$@" | grep -Fxq 'make_latest=true'
+        printf '%s\n' "$@" | grep -Fxq "prerelease=${TEST_PRERELEASE:-false}"
+        printf '%s\n' "$@" | grep -Fxq "make_latest=${TEST_MAKE_LATEST:-true}"
         touch "$TEST_STATE/public"
         ;;
     'api repos/example/oxidepm/releases/123')
-        jq -n --arg tag v1.0.0 '{draft:true, prerelease:false, tag_name:$tag}'
+        cat "$TEST_STATE/draft"
         ;;
     'api --paginate')
         test "$3" = --slurp && test "$4" = 'repos/example/oxidepm/releases/123/assets?per_page=100'
@@ -412,14 +423,15 @@ touch "$work/fail-upload"
 reject 'Upload failed' publish release "$repo" v1.0.0 "$release"
 test -f "$work/draft" && test ! -e "$work/public" || fail 'An upload failure must leave a draft'
 rm -- "$work/fail-upload" "$work/draft"
-(
-    cd "$release"
+uploaded_assets() (
+    cd "$1"
     for file in *; do
         sum=$(sha256sum -- "$file")
         printf '%s %s %s\n' "$file" "$(wc -c < "$file")" "${sum%% *}"
-    done
-) | jq -Rn '[inputs | split(" ") | {name:.[0], size:(.[1]|tonumber), digest:("sha256:" + .[2]), state:"uploaded"}]' > "$work/assets.json"
-cp "$work/assets.json" "$work/complete-assets.json"
+    done | jq -Rn '[inputs | split(" ") | {name:.[0], size:(.[1]|tonumber), digest:("sha256:" + .[2]), state:"uploaded"}]'
+)
+
+uploaded_assets "$release" > "$work/complete-assets.json"
 jq '.[0].digest="sha256:invalid"' "$work/complete-assets.json" > "$work/assets.json"
 reject 'uploaded assets do not match' publish release "$repo" v1.0.0 "$release"
 test -f "$work/draft" && test ! -e "$work/public" || fail 'A digest failure must leave a draft'
@@ -431,6 +443,28 @@ test -f "$work/draft" && test ! -e "$work/public" || fail 'A missing asset must 
 rm -- "$work/draft"
 
 mv "$work/complete-assets.json" "$work/assets.json"
-publish release "$repo" v1.0.0 "$release"
+GITHUB_OUTPUT="$work/final-output" publish release "$repo" v1.0.0 "$release"
 test -f "$work/public"
 printf 'ok - leaves a draft on failed upload or verification and publishes complete assets\n'
+
+rm -- "$work/draft" "$work/public"
+rc_tag=v1.1.0-rc.1
+rc_release=$work/releases/$rc_tag
+make_release "$rc_tag" 1.0.0
+prepare "$rc_tag" "$rc_release"
+sign_release "$rc_tag"
+uploaded_assets "$rc_release" > "$work/assets.json"
+
+GITHUB_OUTPUT="$work/rc-output" TEST_PRERELEASE=true TEST_DRAFT_PRERELEASE=false \
+    reject "expected a draft for $rc_tag" publish release "$repo" "$rc_tag" "$rc_release"
+test -f "$work/draft" && test ! -e "$work/public" && test ! -s "$work/rc-output" ||
+    fail 'A mismatched draft must stay unpublished'
+rm -- "$work/draft"
+printf 'ok - rejects a pre-release draft with the wrong release type\n'
+
+GITHUB_OUTPUT="$work/rc-output" TEST_PRERELEASE=true TEST_MAKE_LATEST=false \
+    publish release "$repo" "$rc_tag" "$rc_release"
+test -f "$work/public"
+test "$(cat "$work/final-output")" = 'prerelease=false'
+test "$(cat "$work/rc-output")" = 'prerelease=true'
+printf 'ok - publishes final tags as latest and pre-release tags as pre-releases\n'

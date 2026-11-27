@@ -139,6 +139,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      prerelease: ${{ steps.publish.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -185,6 +187,7 @@ jobs:
             exit 1
           fi
       - name: Upload and verify a draft before publishing
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/publish-adapter-catalogue.sh release "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" artifacts
@@ -192,6 +195,7 @@ jobs:
   catalogue:
     name: Publish adapter catalogue
     needs: release
+    if: needs.release.outputs.prerelease == 'false'
     permissions:
       contents: write
     uses: ./.github/workflows/adapter-catalogue.yml
