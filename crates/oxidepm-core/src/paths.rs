@@ -6,9 +6,10 @@
 //! `~/.oxidepm`.
 
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::constants::{
@@ -23,6 +24,14 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     home: PathBuf,
+}
+
+/// An open, verified OxidePM home directory.
+#[derive(Debug)]
+pub struct HomeDir {
+    file: File,
+    path: PathBuf,
+    uid: u32,
 }
 
 impl Paths {
@@ -181,37 +190,31 @@ impl Paths {
         self.home.join(ADAPTER_PIDS_FILE)
     }
 
-    /// Create `adapters/` with its `index`, `installed`, `state` and `staging` directories, mode
-    /// 0700, or tighten existing ones. Called by the first import or enable, never at daemon
-    /// start. A symbolic link or a file in the way is an error and nothing is created through it.
+    /// Prepare the private adapter directories on first import or enable. Existing directories
+    /// must belong to this user and must deny group and other write access.
     pub fn ensure_adapter_dirs(&self) -> Result<()> {
-        self.ensure_home()?;
-        let root = self.adapters_dir();
-        ensure_private_dir_no_link(&root)?;
-        for sub in [
-            self.adapter_index(),
-            root.join("installed"),
-            root.join("state"),
-            self.adapter_staging(),
-            self.adapter_trash(),
-        ] {
-            ensure_private_dir_no_link(&sub)?;
-        }
-        Ok(())
+        self.open_home()?.ensure_adapter_dirs().map(drop)
     }
 
     /// Create `adapters/sessions`, mode 0700 (and `adapters/` itself if needed). A symbolic link
     /// or a file in the way is an error.
     pub fn ensure_adapter_sessions_dir(&self) -> Result<()> {
-        self.ensure_home()?;
-        ensure_private_dir_no_link(&self.adapters_dir())?;
-        ensure_private_dir_no_link(&self.adapter_sessions())
+        let home = self.open_home()?;
+        let adapters = home.ensure_child(ADAPTERS_DIR)?;
+        ensure_private_dir_no_link(&adapters, &self.adapters_dir(), "sessions", home.uid).map(drop)
     }
 
     /// Create the state directory of one adapter (and `adapters/` itself if needed), mode 0700.
     pub fn ensure_adapter_state_dir(&self, name: &str) -> Result<()> {
-        self.ensure_adapter_dirs()?;
-        ensure_private_dir_no_link(&self.adapter_state(name))
+        let home = self.open_home()?;
+        let state = home.ensure_adapter_dirs()?;
+        ensure_private_dir_no_link(
+            &state,
+            &self.adapters_dir().join("state"),
+            safe_component(name),
+            home.uid,
+        )
+        .map(drop)
     }
 
     /// SQLite database (`state.db`).
@@ -237,25 +240,33 @@ impl Paths {
 
     /// Create the home with mode 0700, or check its ownership and permissions before using it.
     pub fn ensure_home(&self) -> Result<()> {
+        self.open_home().map(drop)
+    }
+
+    /// Prepare the home and keep its directory open for operations relative to it.
+    pub fn open_home(&self) -> Result<HomeDir> {
         // A trailing slash asks the filesystem to follow even a final symlink.
-        let home: PathBuf = self.home.components().collect();
-        check_home_parent(&home)?;
-        let metadata = match private_dir_metadata(&home) {
+        let path: PathBuf = self.home.components().collect();
+        check_home_parent(&path)?;
+        let file = match open_dir(&path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                create_private_dir(&home)?;
-                check_home_parent(&home)?;
-                private_dir_metadata(&home)?
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&path)?;
+                check_home_parent(&path)?;
+                open_dir(&path)?
             }
             result => result?,
         };
-        check_home_owner_and_mode(&home, metadata.uid(), metadata.mode(), effective_uid()?)?;
-        tighten_private_dir(&home, &metadata)
+        let uid = effective_uid()?;
+        check_and_tighten_dir(&file, &path, "OxidePM home", uid)?;
+        Ok(HomeDir { file, path, uid })
     }
 
     /// Prepare the home and `logs/`. Tighten read or search access for group or others to 0700.
     pub fn ensure_dirs(&self) -> Result<()> {
-        self.ensure_home()?;
-        ensure_private_dir_no_link(&self.logs_dir())
+        self.open_home()?.ensure_logs_dir()
     }
 
     /// `saved.json` written by `save` and read by `resurrect`.
@@ -289,6 +300,44 @@ impl Paths {
     }
 }
 
+impl HomeDir {
+    /// Prepare the private logs directory relative to this open home.
+    pub fn ensure_logs_dir(&self) -> Result<()> {
+        self.ensure_child(LOGS_DIR).map(drop)
+    }
+
+    /// The procfs path to this directory. Valid while this handle stays open.
+    pub fn descriptor_path(&self) -> PathBuf {
+        descriptor_path(&self.file)
+    }
+
+    /// Check that the configured pathname still names this directory before using a path-based API.
+    pub fn verify_path(&self) -> Result<()> {
+        let current = open_dir(&self.path)?.metadata()?;
+        let held = self.file.metadata()?;
+        if (current.dev(), current.ino()) != (held.dev(), held.ino()) {
+            return Err(Error::ConfigError(format!(
+                "OxidePM home {} was replaced while in use",
+                self.path.display()
+            )));
+        }
+        check_owner_and_mode(&self.path, "OxidePM home", &current, self.uid)
+    }
+
+    fn ensure_child(&self, name: &str) -> Result<File> {
+        ensure_private_dir_no_link(&self.file, &self.path, name, self.uid)
+    }
+
+    fn ensure_adapter_dirs(&self) -> Result<File> {
+        let adapters = self.ensure_child(ADAPTERS_DIR)?;
+        let path = self.path.join(ADAPTERS_DIR);
+        for name in ["index", "installed", "staging", "trash"] {
+            ensure_private_dir_no_link(&adapters, &path, name, self.uid)?;
+        }
+        ensure_private_dir_no_link(&adapters, &path, "state", self.uid)
+    }
+}
+
 fn check_home_parent(home: &Path) -> Result<()> {
     // If the parent is missing, check the directory where it would be created.
     for parent in home.ancestors().skip(1) {
@@ -314,7 +363,9 @@ fn check_home_parent(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_home_owner_and_mode(home: &Path, owner: u32, mode: u32, uid: u32) -> Result<()> {
+fn check_owner_and_mode(dir: &Path, label: &str, metadata: &fs::Metadata, uid: u32) -> Result<()> {
+    let owner = metadata.uid();
+    let mode = metadata.mode();
     let reason = if owner != uid {
         format!("is owned by UID {owner}")
     } else if mode & 0o022 != 0 {
@@ -326,8 +377,8 @@ fn check_home_owner_and_mode(home: &Path, owner: u32, mode: u32, uid: u32) -> Re
         return Ok(());
     };
     Err(Error::ConfigError(format!(
-        "OxidePM home {} {reason}. Set its owner with chown {uid} and permissions with chmod 700",
-        home.display()
+        "{label} {} {reason}. Set its owner with chown {uid} and permissions with chmod 700",
+        dir.display()
     )))
 }
 
@@ -348,15 +399,21 @@ fn effective_uid() -> io::Result<u32> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cannot read the effective UID"))
 }
 
-fn create_private_dir(dir: &Path) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    Ok(())
+fn open_dir(dir: &Path) -> io::Result<File> {
+    // O_PATH also works for directories that the owner can search but cannot read.
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)
 }
 
-fn tighten_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<()> {
+fn descriptor_path(dir: &File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+}
+
+fn check_and_tighten_dir(file: &File, dir: &Path, label: &str, uid: u32) -> Result<()> {
+    let metadata = file.metadata()?;
+    check_owner_and_mode(dir, label, &metadata, uid)?;
     let mode = metadata.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         tracing::warn!(
@@ -364,7 +421,7 @@ fn tighten_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<()> {
             dir.display(),
             mode
         );
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(descriptor_path(file), fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -380,29 +437,21 @@ fn safe_component(part: &str) -> &str {
     }
 }
 
-fn private_dir_metadata(dir: &Path) -> io::Result<fs::Metadata> {
-    let metadata = fs::symlink_metadata(dir)?;
-    if metadata.is_dir() {
-        Ok(metadata)
-    } else if metadata.file_type().is_symlink() {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is a symbolic link; refusing to use it", dir.display()),
-        ))
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{} exists and is not a directory", dir.display()),
-        ))
-    }
-}
-
-fn ensure_private_dir_no_link(dir: &Path) -> Result<()> {
-    match private_dir_metadata(dir) {
-        Ok(metadata) => tighten_private_dir(dir, &metadata),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => create_private_dir(dir),
-        Err(e) => Err(e.into()),
-    }
+fn ensure_private_dir_no_link(parent: &File, path: &Path, name: &str, uid: u32) -> Result<File> {
+    let entry = descriptor_path(parent).join(name);
+    let dir = match open_dir(&entry) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            match fs::DirBuilder::new().mode(0o700).create(&entry) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+            open_dir(&entry)?
+        }
+        result => result?,
+    };
+    check_and_tighten_dir(&dir, &path.join(name), "OxidePM directory", uid)?;
+    Ok(dir)
 }
 
 #[cfg(test)]
@@ -645,12 +694,36 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_group_writable_logs_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path());
+        let logs = paths.logs_dir();
+        fs::create_dir(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o770)).unwrap();
+
+        assert!(paths.ensure_dirs().is_err());
+        assert_eq!(mode_of(&logs), 0o770);
+    }
+
+    #[test]
+    fn refuses_a_world_writable_adapter_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path());
+        paths.ensure_adapter_dirs().unwrap();
+        let staging = paths.adapter_staging();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o707)).unwrap();
+
+        assert!(paths.ensure_adapter_dirs().is_err());
+        assert_eq!(mode_of(&staging), 0o707);
+    }
+
+    #[test]
     fn refuses_a_home_owned_by_another_user() {
         let tmp = tempfile::tempdir().unwrap();
         let metadata = fs::metadata(tmp.path()).unwrap();
         let uid = metadata.uid().wrapping_add(1);
 
-        let error = check_home_owner_and_mode(tmp.path(), metadata.uid(), 0o700, uid)
+        let error = check_owner_and_mode(tmp.path(), "OxidePM home", &metadata, uid)
             .unwrap_err()
             .to_string();
         assert!(error.contains(&tmp.path().display().to_string()), "{error}");

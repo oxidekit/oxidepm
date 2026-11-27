@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use oxidepm_adapter_proto::messages::OutputStream;
 use oxidepm_core::actor::Via;
+use oxidepm_core::paths::HomeDir;
 use oxidepm_core::{DaemonConfig, Error, ErrorCode, Paths, Result};
 use oxidepm_db::Database;
 use oxidepm_ipc::protocol::{DaemonPhase, FEATURES, PROTOCOL_MIN, PROTOCOL_VERSION};
@@ -333,6 +334,7 @@ pub struct Daemon {
     signals: Mutex<Option<Signals>>,
     /// Held for the life of the process: one daemon per home.
     _lock: DaemonLock,
+    _home: HomeDir,
 }
 
 impl Daemon {
@@ -352,12 +354,13 @@ impl Daemon {
         // (apps may already be starting): handle them, act on them once the loop runs.
         let signals = Signals::install()?;
 
-        // Home and logs directory, private to the owner
-        paths.ensure_dirs()?;
+        let home = paths.open_home()?;
+        home.ensure_logs_dir()?;
 
         // One daemon per home. A second one gets `DaemonAlreadyRunning` here.
-        let lock = DaemonLock::acquire(&paths.lock())?;
+        let lock = DaemonLock::acquire(&Paths::new(home.descriptor_path()).lock())?;
 
+        home.verify_path()?;
         let config = DaemonConfig::load(&paths.daemon_config())?;
 
         // Children do not survive the daemon: whatever a daemon that was SIGKILLed left running
@@ -387,6 +390,7 @@ impl Daemon {
         }
 
         // Initialize database
+        home.verify_path()?;
         let db_path = paths.db();
         let db = Database::new(&db_path).await?;
         info!("Database initialized at {}", db_path.display());
@@ -414,6 +418,7 @@ impl Daemon {
         // The agent socket is an extra: a bind that fails (a path that is too long, a file in the
         // way) leaves the daemon without it and never stops the boot.
         let agent = if config.agent_socket {
+            home.verify_path()?;
             let agent_path = paths.agent_socket();
             match IpcServer::bind_with(&agent_path, ServerLimits::AGENT).await {
                 Ok(server) => Some(server),
@@ -432,6 +437,7 @@ impl Daemon {
 
         // Create IPC server. This process holds the lock, so it alone may replace a stale
         // socket; `bind` still refuses one that answers.
+        home.verify_path()?;
         let socket_path = paths.socket();
         let server = IpcServer::bind(&socket_path).await?;
         info!("IPC server listening on {}", socket_path.display());
@@ -441,6 +447,7 @@ impl Daemon {
 
         // The adapter table is read before the boot resurrect is spawned below, so an app that
         // needs an adapter finds it there. This starts no process and cannot fail the boot.
+        home.verify_path()?;
         let adapters = AdapterHost::load(
             &paths,
             Some(Arc::clone(handler.audit())),
@@ -519,6 +526,7 @@ impl Daemon {
             core,
             signals: Mutex::new(Some(signals)),
             _lock: lock,
+            _home: home,
         })
     }
 
@@ -832,8 +840,28 @@ mod tests {
     use super::*;
     use oxidepm_ipc::protocol::Envelope;
     use oxidepm_ipc::server::IpcConnection;
+    use std::os::unix::fs::MetadataExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+
+    #[tokio::test]
+    async fn daemon_keeps_its_home_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::with_paths(Arc::new(Paths::new(dir.path())))
+            .await
+            .unwrap();
+        let metadata = std::fs::metadata(dir.path()).unwrap();
+        let home_is_open = || {
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| std::fs::metadata(entry.ok()?.path()).ok())
+                .any(|fd| fd.dev() == metadata.dev() && fd.ino() == metadata.ino())
+        };
+
+        assert!(home_is_open());
+        drop(daemon);
+        assert!(!home_is_open());
+    }
 
     #[tokio::test]
     async fn status_waits_for_initial_app_discovery() {
