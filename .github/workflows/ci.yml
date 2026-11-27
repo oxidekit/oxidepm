@@ -50,11 +50,13 @@ jobs:
         run: |
           git ls-files 'crates/oxidepmd/src/*.rs' 'crates/oxidepm-health/src/*.rs' |
             xargs awk '
-              FNR == 1 { tests = 0 }
-              /^mod tests[[:space:]]*\{/ { tests = 1 }
+              FNR == 1 { tests = 0; previous = "" }
+              /^(pub(\(crate\))?[[:space:]]+)?mod tests[[:space:]]*\{/ && previous == "#[cfg(test)]" { tests = 1 }
+              /^}[[:space:]]*$/ { tests = 0 }
               !tests && /Command::new/ {
                 print FILENAME ":" FNR ": Spawn daemon children through oxidepm-runtime"
                 found = 1
               }
+              { previous = $0 }
               END { exit found }
             '
