@@ -6,7 +6,7 @@ use colored::Colorize;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use oxidepm_core::constants;
+use oxidepm_core::{constants, Paths};
 use oxidepm_ipc::{DryRunPlan, PlannedItem};
 use std::fs;
 use std::io::Write;
@@ -225,7 +225,7 @@ pub async fn execute_restore(file: &str, yes: bool, dry_run: bool) -> Result<()>
     if dry_run {
         return rehearse_restore(file_path, &home, yes).await;
     }
-    fs::create_dir_all(&home)?;
+    Paths::new(&home).ensure_home()?;
 
     // 1. Unpack and validate in a scratch directory next to the real one
     //    (same filesystem, so the final moves are atomic renames).

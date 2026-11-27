@@ -73,6 +73,20 @@ fn restore_fails(home: &TestHome, archive: &Path, extra: &[&str]) -> String {
 }
 
 #[test]
+fn restore_refuses_a_group_writable_home() {
+    let home = TestHome::new();
+    let oxhome = home.oxidepm_dir();
+    std::fs::set_permissions(&oxhome, std::fs::Permissions::from_mode(0o770)).unwrap();
+    let archive = home.path().join("backup.tar.gz");
+    build_archive(&archive, &[Member::File("saved.json", b"[]")]);
+
+    let error = restore_fails(&home, &archive, &["--yes"]);
+    assert!(error.contains(&oxhome.display().to_string()), "{error}");
+    assert!(error.contains("chmod 700"), "{error}");
+    assert!(listing(&oxhome).is_empty());
+}
+
+#[test]
 fn restore_rejects_symlink_member() {
     let home = TestHome::new();
     let oxhome = home.oxidepm_dir();

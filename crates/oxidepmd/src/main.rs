@@ -73,7 +73,7 @@ async fn run_daemon(check: bool) -> ExitCode {
 
     // The log file lives in the home, which must exist (private) before the first line is logged.
     if let Err(e) = paths.ensure_dirs() {
-        report_fatal(&paths, &format!("oxidepmd: {e}"));
+        eprintln!("oxidepmd: {e}");
         return ExitCode::FAILURE;
     }
 

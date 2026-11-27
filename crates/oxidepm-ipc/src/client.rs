@@ -1,8 +1,10 @@
 //! IPC Client - Unix socket client for CLI
 
 use oxidepm_core::constants::{DAEMON_LOG_FILE, EXIT_ALREADY_RUNNING};
-use oxidepm_core::{Error, ErrorCode, Result};
+use oxidepm_core::{Error, ErrorCode, Paths, Result};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -96,22 +98,24 @@ impl StartedDaemon {
     }
 }
 
-/// Open `{home}/daemon.log` for appending (mode 0600, home created 0700 if missing).
-/// Returns the path, its current size, and the open file.
-fn open_daemon_log(home: &Path) -> std::io::Result<(PathBuf, u64, std::fs::File)> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(home)?;
+/// Prepare the home before opening its startup log. If the log cannot be opened, the
+/// daemon can still start with stdout and stderr discarded.
+fn open_daemon_log(home: &Path) -> Result<Option<(PathBuf, u64, File, File)>> {
+    Paths::new(home).ensure_home()?;
     let path = home.join(DAEMON_LOG_FILE);
-    let file = std::fs::OpenOptions::new()
+    let log = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(&path)?;
-    let offset = file.metadata()?.len();
-    Ok((path, offset, file))
+        .open(&path)
+        .and_then(|file| Ok((file.metadata()?.len(), file.try_clone()?, file)));
+    match log {
+        Ok((offset, out, err)) => Ok(Some((path, offset, out, err))),
+        Err(e) => {
+            warn!("Cannot open the daemon log in {}: {}", home.display(), e);
+            Ok(None)
+        }
+    }
 }
 
 /// Read at most the most recent 64 KiB, starting no earlier than the spawn offset
@@ -317,19 +321,11 @@ impl IpcClient {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map(PathBuf::from);
-        let (log_path, log_offset, stdout, stderr) = match &home {
-            Some(home) => match open_daemon_log(home).and_then(|(path, offset, file)| {
-                let second = file.try_clone()?;
-                Ok((path, offset, file, second))
-            }) {
-                Ok((path, offset, out, err)) => {
-                    (Some(path), offset, Stdio::from(out), Stdio::from(err))
-                }
-                Err(e) => {
-                    warn!("Cannot open the daemon log in {}: {}", home.display(), e);
-                    (None, 0, Stdio::null(), Stdio::null())
-                }
-            },
+        let log = home.as_deref().map(open_daemon_log).transpose()?.flatten();
+        let (log_path, log_offset, stdout, stderr) = match log {
+            Some((path, offset, out, err)) => {
+                (Some(path), offset, Stdio::from(out), Stdio::from(err))
+            }
             None => (None, 0, Stdio::null(), Stdio::null()),
         };
 
@@ -659,7 +655,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
         let home = dir.path().join("home");
-        let (path, offset, _file) = open_daemon_log(&home).unwrap();
+        let (path, offset, _out, _err) = open_daemon_log(&home).unwrap().unwrap();
         assert_eq!((path.clone(), offset), (home.join("daemon.log"), 0));
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -670,7 +666,7 @@ mod tests {
             0o700
         );
         std::fs::write(&path, "abc").unwrap();
-        assert_eq!(open_daemon_log(&home).unwrap().1, 3);
+        assert_eq!(open_daemon_log(&home).unwrap().unwrap().1, 3);
     }
 
     #[tokio::test]

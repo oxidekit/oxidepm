@@ -6,6 +6,9 @@
 //! `~/.oxidepm`.
 
 use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::constants::{
@@ -182,6 +185,7 @@ impl Paths {
     /// 0700, or tighten existing ones. Called by the first import or enable, never at daemon
     /// start. A symbolic link or a file in the way is an error and nothing is created through it.
     pub fn ensure_adapter_dirs(&self) -> Result<()> {
+        self.ensure_home()?;
         let root = self.adapters_dir();
         ensure_private_dir_no_link(&root)?;
         for sub in [
@@ -199,6 +203,7 @@ impl Paths {
     /// Create `adapters/sessions`, mode 0700 (and `adapters/` itself if needed). A symbolic link
     /// or a file in the way is an error.
     pub fn ensure_adapter_sessions_dir(&self) -> Result<()> {
+        self.ensure_home()?;
         ensure_private_dir_no_link(&self.adapters_dir())?;
         ensure_private_dir_no_link(&self.adapter_sessions())
     }
@@ -230,13 +235,26 @@ impl Paths {
         self.home.join(DAEMON_CONFIG_FILE)
     }
 
-    /// Create the home directory and `logs/` with mode 0700. An existing
-    /// directory that is accessible to group or others is tightened to 0700
-    /// and a warning is logged, because the home holds process environments.
-    pub fn ensure_dirs(&self) -> Result<()> {
+    /// Create the home with mode 0700, or check its ownership and permissions before using it.
+    pub fn ensure_home(&self) -> Result<()> {
         // A trailing slash asks the filesystem to follow even a final symlink.
         let home: PathBuf = self.home.components().collect();
-        ensure_private_dir_no_link(&home)?;
+        check_home_parent(&home)?;
+        let metadata = match private_dir_metadata(&home) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                create_private_dir(&home)?;
+                check_home_parent(&home)?;
+                private_dir_metadata(&home)?
+            }
+            result => result?,
+        };
+        check_home_owner_and_mode(&home, metadata.uid(), metadata.mode(), effective_uid()?)?;
+        tighten_private_dir(&home, &metadata)
+    }
+
+    /// Prepare the home and `logs/`. Tighten read or search access for group or others to 0700.
+    pub fn ensure_dirs(&self) -> Result<()> {
+        self.ensure_home()?;
         ensure_private_dir_no_link(&self.logs_dir())
     }
 
@@ -271,36 +289,84 @@ impl Paths {
     }
 }
 
-/// Create `dir` (and missing parents) with mode 0700, or tighten an existing one.
-fn ensure_private_dir(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-
-    match std::fs::metadata(dir) {
-        Ok(meta) if meta.is_dir() => {
-            let mode = meta.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                tracing::warn!(
-                    "{} had mode {:04o}; restricting it to 0700",
-                    dir.display(),
-                    mode
-                );
-                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-            }
-            Ok(())
+fn check_home_parent(home: &Path) -> Result<()> {
+    // If the parent is missing, check the directory where it would be created.
+    for parent in home.ancestors().skip(1) {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let mode = match fs::metadata(parent) {
+            Ok(metadata) => metadata.mode(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            return Err(Error::ConfigError(format!(
+                "OxidePM home {} has a group- or world-writable parent {} without the sticky bit. Use a private parent or remove group and other write access with chmod go-w",
+                home.display(),
+                parent.display()
+            )));
         }
-        Ok(_) => Err(Error::IoError(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{} exists and is not a directory", dir.display()),
-        ))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)?;
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
+        break;
     }
+    Ok(())
+}
+
+fn check_home_owner_and_mode(home: &Path, owner: u32, mode: u32, uid: u32) -> Result<()> {
+    let reason = if owner != uid {
+        format!("is owned by UID {owner}")
+    } else if mode & 0o022 != 0 {
+        format!(
+            "has group or other write access (mode {:04o})",
+            mode & 0o777
+        )
+    } else {
+        return Ok(());
+    };
+    Err(Error::ConfigError(format!(
+        "OxidePM home {} {reason}. Set its owner with chown {uid} and permissions with chmod 700",
+        home.display()
+    )))
+}
+
+fn effective_uid() -> io::Result<u32> {
+    let status = fs::read("/proc/thread-self/status")?;
+    status
+        .split(|&byte| byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"Uid:"))
+        .and_then(|uids| {
+            // The kernel lists real, effective, saved and filesystem UIDs in that order.
+            std::str::from_utf8(uids)
+                .ok()?
+                .split_ascii_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cannot read the effective UID"))
+}
+
+fn create_private_dir(dir: &Path) -> Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    Ok(())
+}
+
+fn tighten_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<()> {
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            "{} had mode {:04o}; restricting it to 0700",
+            dir.display(),
+            mode
+        );
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// `part` if it is one plain path component, otherwise `_invalid_`.
@@ -314,14 +380,28 @@ fn safe_component(part: &str) -> &str {
     }
 }
 
-/// Like [`ensure_private_dir`], but a symbolic link at `dir` is refused instead of followed.
-fn ensure_private_dir_no_link(dir: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(Error::IoError(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+fn private_dir_metadata(dir: &Path) -> io::Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if metadata.is_dir() {
+        Ok(metadata)
+    } else if metadata.file_type().is_symlink() {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
             format!("{} is a symbolic link; refusing to use it", dir.display()),
-        ))),
-        _ => ensure_private_dir(dir),
+        ))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a directory", dir.display()),
+        ))
+    }
+}
+
+fn ensure_private_dir_no_link(dir: &Path) -> Result<()> {
+    match private_dir_metadata(dir) {
+        Ok(metadata) => tighten_private_dir(dir, &metadata),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => create_private_dir(dir),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -562,6 +642,88 @@ mod tests {
         paths.ensure_dirs().unwrap();
         assert_eq!(mode_of(paths.home()), 0o700);
         assert_eq!(mode_of(&paths.logs_dir()), 0o700);
+    }
+
+    #[test]
+    fn refuses_a_home_owned_by_another_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let metadata = fs::metadata(tmp.path()).unwrap();
+        let uid = metadata.uid().wrapping_add(1);
+
+        let error = check_home_owner_and_mode(tmp.path(), metadata.uid(), 0o700, uid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&tmp.path().display().to_string()), "{error}");
+        assert!(error.contains(&format!("chown {uid}")), "{error}");
+        assert!(error.contains("chmod 700"), "{error}");
+    }
+
+    #[test]
+    fn refuses_a_group_writable_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().join("home"));
+        std::fs::create_dir(paths.home()).unwrap();
+        std::fs::set_permissions(paths.home(), std::fs::Permissions::from_mode(0o770)).unwrap();
+
+        let error = paths.ensure_dirs().unwrap_err().to_string();
+        assert!(
+            error.contains(&paths.home().display().to_string()),
+            "{error}"
+        );
+        assert!(
+            error.contains("chown") && error.contains("chmod 700"),
+            "{error}"
+        );
+        assert_eq!(mode_of(paths.home()), 0o770);
+        assert!(!paths.logs_dir().exists());
+    }
+
+    #[test]
+    fn refuses_a_world_writable_home_when_creating_adapter_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().join("home"));
+        std::fs::create_dir(paths.home()).unwrap();
+        std::fs::set_permissions(paths.home(), std::fs::Permissions::from_mode(0o707)).unwrap();
+
+        let error = paths.ensure_adapter_dirs().unwrap_err().to_string();
+        assert!(
+            error.contains(&paths.home().display().to_string()),
+            "{error}"
+        );
+        assert!(error.contains("chmod 700"), "{error}");
+        assert_eq!(mode_of(paths.home()), 0o707);
+        assert!(!paths.adapters_dir().exists());
+    }
+
+    #[test]
+    fn refuses_a_writable_parent_without_the_sticky_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let paths = Paths::new(parent.join("home"));
+        for mode in [0o770, 0o707] {
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = paths.ensure_dirs().unwrap_err().to_string();
+            assert!(error.contains(&parent.display().to_string()), "{error}");
+            assert!(error.contains("chmod go-w"), "{error}");
+            assert!(!paths.home().exists());
+        }
+    }
+
+    #[test]
+    fn accepts_a_sticky_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let paths = Paths::new(parent.join("home"));
+        paths.ensure_dirs().unwrap();
+        assert_eq!(mode_of(paths.home()), 0o700);
+        paths.ensure_dirs().unwrap();
     }
 
     #[test]

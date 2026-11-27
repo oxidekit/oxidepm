@@ -98,6 +98,63 @@ fn oxidepmd_check_on_a_usable_home_exits_zero_without_starting_a_daemon() {
 }
 
 #[test]
+fn oxidepmd_check_refuses_a_group_writable_home() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770)).unwrap();
+
+    let (status, stderr) = run_check(&home);
+    assert_eq!(status.and_then(|status| status.code()), Some(1), "{stderr}");
+    assert!(stderr.contains(&home.display().to_string()), "{stderr}");
+    assert!(stderr.contains("chmod 700"), "{stderr}");
+    assert!(!home.join("state.db").exists());
+}
+
+#[test]
+fn oxidepmd_refuses_a_group_writable_home_before_opening_the_log() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770)).unwrap();
+    std::fs::write(home.join("oxidepm.db"), b"old schema").unwrap();
+
+    let mut daemon = DaemonProc::spawn_unready(&home);
+    assert_eq!(daemon.wait_exit().code(), Some(1));
+    let stderr = daemon.stderr();
+    assert!(stderr.contains(&home.display().to_string()), "{stderr}");
+    assert!(stderr.contains("chmod 700"), "{stderr}");
+    assert!(!home.join("daemon.log").exists());
+}
+
+#[tokio::test]
+async fn autostart_refuses_a_group_writable_home_before_opening_the_log() {
+    use oxidepm_ipc::{IpcClient, Request};
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770)).unwrap();
+    std::fs::write(home.join("oxidepm.db"), b"old schema").unwrap();
+    let client =
+        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(env!("CARGO_BIN_EXE_oxidepmd"));
+
+    let error = client
+        .send_autostart(&Request::Status)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&home.display().to_string()), "{error}");
+    assert!(error.contains("chmod 700"), "{error}");
+    assert!(!home.join("daemon.log").exists());
+}
+
+#[test]
 fn oxidepmd_check_exits_nonzero_on_unreadable_saved_file() {
     let tmp = TempDir::new().expect("temp dir");
     let home = tmp.path().join("home");
