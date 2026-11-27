@@ -1454,6 +1454,11 @@ fn refuses_a_sandbox_launcher_changed_since_startup() {
     ]);
     assert_eq!(run.code, 1, "{}", run.all());
     assert!(run.stderr.contains("digest"), "{}", run.all());
+    assert!(
+        run.stderr.contains("Restart oxidepmd after an upgrade"),
+        "{}",
+        run.all()
+    );
 }
 
 #[tokio::test]

@@ -217,13 +217,10 @@ fn open_launcher(path: &Path) -> io::Result<File> {
     )?;
     // SAFETY: openat returned a new descriptor owned by this File.
     let file = unsafe { File::from_raw_fd(fd) };
-    if parent.metadata()?.mode() & 0o022 != 0 {
-        return Err(io::Error::other(
-            "the launcher directory is writable by group or others",
-        ));
-    }
-    let meta = file.metadata()?;
+    let parent_meta = parent.metadata()?;
     let uid = nix::unistd::geteuid().as_raw();
+    check_launcher_directory(parent_meta.uid(), parent_meta.mode(), uid)?;
+    let meta = file.metadata()?;
     if !meta.is_file() || meta.mode() & 0o111 == 0 {
         return Err(io::Error::other(
             "the launcher must be a regular executable",
@@ -235,6 +232,20 @@ fn open_launcher(path: &Path) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+fn check_launcher_directory(owner: u32, mode: u32, daemon_uid: u32) -> io::Result<()> {
+    if owner != 0 && owner != daemon_uid {
+        return Err(io::Error::other(
+            "the launcher directory must be owned by root or the daemon user",
+        ));
+    }
+    if mode & 0o022 != 0 {
+        return Err(io::Error::other(
+            "the launcher directory is writable by group or others",
+        ));
+    }
+    Ok(())
 }
 
 /// Reopen the launcher and verify the same file that will be passed to exec.
@@ -250,7 +261,7 @@ pub(super) fn open_verified_launcher(path: &Path) -> Result<File, String> {
         let actual = sha256_hex(&mut file).map_err(error)?;
         if &actual != expected {
             return Err(format!(
-                "{} does not match the launcher digest recorded at daemon startup",
+                "{} does not match the launcher digest recorded at daemon startup. Restart oxidepmd after an upgrade",
                 path.display()
             ));
         }
@@ -1007,6 +1018,13 @@ fn write_log_line(dir: &File, name: &std::ffi::OsStr, line: &str) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_directory_requires_root_or_daemon_ownership() {
+        assert!(check_launcher_directory(0, 0o755, 1000).is_ok());
+        assert!(check_launcher_directory(1000, 0o700, 1000).is_ok());
+        assert!(check_launcher_directory(1001, 0o755, 1000).is_err());
+    }
 
     #[test]
     fn process_identity_rejects_mismatched_start_ticks() {
