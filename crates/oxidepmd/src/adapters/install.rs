@@ -1153,6 +1153,8 @@ impl AdapterHost {
         let manifest = Manifest::parse(row.manifest_json.as_bytes()).map_err(manifest_error)?;
         let fingerprint = manifest.fingerprint(&row.exe_sha256);
 
+        let official_release = is_official_release_trust(&row.trust);
+
         // the files are what was imported
         let exec = paths.adapter_exec(&row.name, &row.version, &manifest.exec);
         if std::fs::symlink_metadata(&exec).is_err() {
@@ -1175,7 +1177,7 @@ impl AdapterHost {
             (None, true) => {
                 if (!manifest.provides.runtimes.is_empty()
                     || !manifest.provides.programs.is_empty())
-                    && !is_official_release_trust(&row.trust)
+                    && !official_release
                 {
                     return Err(Error::AdapterInvalid(format!(
                         "{} provides runtimes or programs and requires explicit consent. Pass --accept {fingerprint}",
@@ -1242,11 +1244,10 @@ impl AdapterHost {
         let record = self
             .measure_enforcement(&paths, &row, &grant, args.allow_unenforced)
             .await?;
+        let enforcement_note = record.enforcement_note(&grant.requires_enforcement);
         if let Err(missing) = record.check_with_unix_reachability(&grant.requires_enforcement) {
             let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
-            let unix_note = record
-                .unix_note()
-                .map_or(String::new(), |note| format!(". {note}"));
+            let unix_note = enforcement_note.map_or(String::new(), |note| format!(". {note}"));
             return Err(Error::AdapterInvalid(format!(
                 "{} requires the sandbox to enforce {}, which this machine cannot ({}){unix_note}. If you accept that, pass --allow-unenforced",
                 row.name,
@@ -1254,7 +1255,7 @@ impl AdapterHost {
                 self.caps().summary()
             )));
         }
-        if args.yes && args.accept.is_none() && !record.allow_unenforced {
+        if args.yes && args.accept.is_none() && !record.allow_unenforced && !official_release {
             if let Some(note) = record.unix_note() {
                 return Err(Error::AdapterInvalid(format!(
                     "Enabling {} requires explicit consent. {note}. Pass --accept {fingerprint} or --allow-unenforced",
@@ -1312,7 +1313,7 @@ impl AdapterHost {
             level: level_text(grant.host.level).to_string(),
             scope: scope_text(grant.host.scope).to_string(),
             enforced,
-            unix_note: record.unix_note(),
+            unix_note: enforcement_note,
         })
     }
 
@@ -1368,12 +1369,10 @@ impl AdapterHost {
                 ))
             })?;
         let read_any = grant.fs.read.iter().any(|p| p == "any");
-        Ok(EnforcedRecord::from_report(
-            &report,
-            caps,
-            allow_unenforced,
-            read_any,
-        ))
+        Ok(
+            EnforcedRecord::from_report(&report, caps, allow_unenforced, read_any)
+                .with_required_enforcement(&grant.requires_enforcement),
+        )
     }
 
     /// Start the entry and make one `ping` round trip; a tool is stopped again after it.
@@ -1739,7 +1738,7 @@ impl AdapterHost {
                 {
                     let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
                     let unix_note = record
-                        .unix_note()
+                        .enforcement_note(&grant.requires_enforcement)
                         .map_or(String::new(), |note| format!(". {note}"));
                     return Err(Error::AdapterInvalid(format!(
                         "{name} {} requires the sandbox to enforce {}, which this machine cannot{unix_note}. {name} stays on {}",

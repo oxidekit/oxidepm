@@ -200,6 +200,32 @@ impl EnforcedRecord {
         })
     }
 
+    /// Explain any Unix-socket reachability and whether the kernel can enforce the required rule.
+    pub fn enforcement_note(&self, required: &[Enforce]) -> Option<String> {
+        let reachable = self.unix_note();
+        if self.caps.landlock_unix_connect || !required.contains(&Enforce::Network) {
+            return reachable;
+        }
+        let limitation = "The kernel cannot restrict connections to pathname Unix sockets";
+        Some(reachable.map_or_else(
+            || limitation.to_string(),
+            |note| format!("{note}. {limitation}"),
+        ))
+    }
+
+    /// Record required network enforcement only when the Unix layer also held.
+    pub fn with_required_enforcement(mut self, required: &[Enforce]) -> Self {
+        if self.required_network_is_open(required) {
+            self.enforced.retain(|item| *item != Enforce::Network);
+        }
+        self
+    }
+
+    fn required_network_is_open(&self, required: &[Enforce]) -> bool {
+        required.contains(&Enforce::Network)
+            && (!self.caps.landlock_unix_connect || !self.unix_reachable.is_empty())
+    }
+
     /// Read a stored record; anything that does not parse means "nothing was accepted".
     pub fn parse(text: Option<&str>) -> Option<Self> {
         serde_json::from_str(text?).ok()
@@ -216,12 +242,9 @@ impl EnforcedRecord {
         }
     }
 
-    /// Check the required items, including whether the self-test reached a Unix service.
+    /// Check the required items, including whether Unix services are restricted.
     pub fn check_with_unix_reachability(&self, required: &[Enforce]) -> Result<(), Vec<Enforce>> {
-        if self.allow_unenforced
-            || self.unix_reachable.is_empty()
-            || !required.contains(&Enforce::Network)
-        {
+        if self.allow_unenforced || !self.required_network_is_open(required) {
             return self.check(required);
         }
 
@@ -364,12 +387,22 @@ mod tests {
             Ok(())
         );
         assert_eq!(record.check(&[Enforce::Network]), Ok(()));
+        assert!(!record
+            .clone()
+            .with_required_enforcement(&required)
+            .enforced
+            .contains(&Enforce::Network));
 
         record.allow_unenforced = true;
         assert_eq!(record.check_with_unix_reachability(&required), Ok(()));
 
         record.allow_unenforced = false;
         record.unix_reachable.clear();
+        assert_eq!(
+            record.check_with_unix_reachability(&[Enforce::Network]),
+            Err(vec![Enforce::Network])
+        );
+        record.caps.landlock_unix_connect = true;
         assert_eq!(
             record.check_with_unix_reachability(&[Enforce::Network]),
             Ok(())

@@ -596,7 +596,7 @@ pub async fn info(name: &str) -> Result<bool> {
                 ""
             }
         );
-        if let Some(note) = record.unix_note() {
+        if let Some(note) = record.enforcement_note(&manifest.permissions.requires_enforcement) {
             println!("          {}", sanitize(&note, false));
         }
     }

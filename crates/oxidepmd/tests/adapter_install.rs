@@ -17,6 +17,16 @@ fn kit_with(pkgs: &[&Packaged]) -> Kit {
     kit
 }
 
+fn enable_with_fingerprint(kit: &Kit, pkg: &Packaged) -> Run {
+    kit.run(&[
+        "adapter",
+        "enable",
+        &pkg.name,
+        "--accept",
+        &pkg.fingerprint(),
+    ])
+}
+
 fn no_adapter_files(kit: &Kit) {
     assert!(
         kit.adapters_tree().is_empty(),
@@ -1265,7 +1275,8 @@ fn yes_is_honoured_only_for_the_pure_class() {
         .package();
     let kit = kit_with(&[&pure, &wide]);
     let daemon = kit.daemon();
-    import(&kit, "alpha");
+    let bundled = kit.run(&["adapter", "import", "--bundled", "alpha"]);
+    assert_eq!(bundled.code, 0, "{}", bundled.all());
     import(&kit, "wide");
     let ok = kit.run(&["adapter", "enable", "alpha", "--yes"]);
     assert_eq!(ok.code, 0, "{}", ok.all());
@@ -1540,7 +1551,7 @@ fn enable_runs_the_tool_round_trip_and_fails_on_a_broken_adapter() {
     import(&kit, "good");
     import(&kit, "broken");
 
-    let ok = kit.run(&["adapter", "enable", "good", "--yes"]);
+    let ok = enable_with_fingerprint(&kit, &good);
     assert_eq!(ok.code, 0, "{}", ok.all());
     let info = info_json(&kit, "good");
     assert_eq!(info["enabled"], true);
@@ -1684,7 +1695,7 @@ fn enabled_adapters_may_not_ask_for_more_than_a_gibibyte_together() {
     let daemon = kit.daemon();
     for (n, p) in [("big-a", &a), ("big-b", &b), ("big-c", &c)] {
         import(&kit, n);
-        let run = kit.run(&["adapter", "enable", n, "--yes"]);
+        let run = enable_with_fingerprint(&kit, p);
         if n == "big-c" {
             assert_eq!(run.code, 1, "1200 MiB over three: {}", run.all());
             assert!(
@@ -1696,7 +1707,6 @@ fn enabled_adapters_may_not_ask_for_more_than_a_gibibyte_together() {
         } else {
             assert_eq!(run.code, 0, "{n}: {}", run.all());
         }
-        let _ = p;
     }
     drop(daemon);
 }
@@ -1716,7 +1726,7 @@ fn a_ninth_service_is_refused() {
     let daemon = kit.daemon();
     for (i, p) in pkgs.iter().enumerate() {
         import(&kit, &p.name);
-        let run = kit.run(&["adapter", "enable", &p.name, "--yes"]);
+        let run = enable_with_fingerprint(&kit, p);
         if i < 8 {
             assert_eq!(run.code, 0, "{}: {}", p.name, run.all());
         } else {
@@ -1812,7 +1822,7 @@ fn info_says_which_af_unix_services_the_self_test_reached() {
     let kit = kit_with(&[&a]);
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    let run = kit.run(&["adapter", "enable", "alpha", "--yes"]);
+    let run = kit.run(&["adapter", "enable", "alpha", "--accept", &a.fingerprint()]);
     assert_eq!(run.code, 0, "{}", run.all());
     let record = info_json(&kit, "alpha")["enforced"].clone();
     let reached = record["unix_reachable"]
@@ -1835,6 +1845,56 @@ fn info_says_which_af_unix_services_the_self_test_reached() {
         );
     }
     drop(daemon);
+}
+
+#[test]
+fn a_bundled_adapter_can_enable_with_reachable_unix_services() {
+    let a = alpha();
+    let kit = kit_with(&[&a]);
+    let state = oxidepm_core::Paths::new(kit.home.clone()).adapter_state("alpha");
+    let _daemon = kit.daemon_with(&[("TMPDIR", state.to_str().unwrap())]);
+    let run = kit.run(&[
+        "adapter",
+        "import",
+        "--bundled",
+        "alpha",
+        "--enable",
+        "--yes",
+    ]);
+    assert_eq!(run.code, 0, "{}", run.all());
+    assert!(
+        run.stdout.contains("AF_UNIX services reachable:")
+            && run.stdout.contains("pathname_socket"),
+        "{}",
+        run.all()
+    );
+    let info = info_json(&kit, "alpha");
+    assert_eq!(info["enabled"], true, "{info}");
+    assert_eq!(info["trust"], "bundled", "{info}");
+    assert_eq!(info["enforced"]["allow_unenforced"], false, "{info}");
+}
+
+#[test]
+fn a_third_party_adapter_can_enable_with_yes_when_unix_services_are_blocked() {
+    let a = alpha();
+    let kit = kit_with(&[&a]);
+    let _daemon = kit.daemon_with(&[("TMPDIR", kit.dir.path().to_str().unwrap())]);
+    import(&kit, "alpha");
+    let run = kit.run(&["adapter", "enable", "alpha", "--yes"]);
+    let info = info_json(&kit, "alpha");
+    assert_eq!(
+        info["trust"],
+        format!("signed:{}", kit.key.key_id()),
+        "{info}"
+    );
+    if oxidepm_sandbox::probe().landlock_unix_connect {
+        assert_eq!(run.code, 0, "{}", run.all());
+        assert_eq!(info["enforced"]["unix_reachable"], json!([]), "{info}");
+    } else {
+        assert_eq!(run.code, 1, "{}", run.all());
+        assert!(run.stderr.contains("pathname_socket"), "{}", run.all());
+        assert_eq!(info["enabled"], false, "{info}");
+    }
 }
 
 // ---- tampering, missing files ------------------------------------------------------------------
@@ -1978,7 +2038,7 @@ fn remove_deletes_the_installed_tree() {
     let kit = kit_with(&[&a]);
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a).code, 0);
     let run = kit.run(&["adapter", "remove", "alpha"]);
     assert_eq!(run.code, 0, "{}", run.all());
     assert!(
@@ -2003,12 +2063,7 @@ fn remove_keeps_state_unless_purge() {
     let daemon = kit.daemon();
     for (name, pkg) in [("one", &one), ("two", &two)] {
         import(&kit, name);
-        assert_eq!(
-            kit.run(&["adapter", "enable", name, "--yes"]).code,
-            0,
-            "{}",
-            pkg.name
-        );
+        assert_eq!(enable_with_fingerprint(&kit, pkg).code, 0, "{}", pkg.name);
         let state = kit.home.join("adapters/state").join(name);
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join("token.txt"), "a secret").unwrap();
@@ -2323,7 +2378,7 @@ fn backup_has_no_adapter_state() {
     let kit = kit_with(&[&a]);
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a).code, 0);
     let state = kit.home.join("adapters/state/alpha");
     std::fs::create_dir_all(&state).unwrap();
     std::fs::write(state.join("token.txt"), "TOKEN-123").unwrap();
@@ -2364,7 +2419,7 @@ fn restore_disables_adapters_and_clears_grants() {
     let kit = kit_with(&[&a]);
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a).code, 0);
     assert_eq!(info_json(&kit, "alpha")["enabled"], true);
     stop(daemon);
     let archive = kit.dir.path().join("backup.tar.gz");
@@ -2458,7 +2513,7 @@ fn revoked_release_is_disabled_when_the_index_is_read() {
     );
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a).code, 0);
     assert_eq!(info_json(&kit, "alpha")["enabled"], true);
 
     // the next index revokes this executable
@@ -2513,7 +2568,7 @@ fn a_cached_revocation_applies_when_the_daemon_starts() {
     );
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a).code, 0);
     stop(daemon);
     // the index is read while the daemon is down is not possible; so it arrives, the daemon stops,
     // and the adapter's row is made enabled again by hand: the cached index still revokes it
@@ -2578,15 +2633,10 @@ fn bundled_update_by_name_keeps_an_enabled_adapter_enabled() {
     let new = Pkg::tool("alpha", "0.2.0").package();
     let kit = kit_with(&[&old]);
     let _daemon = kit.daemon();
-    let import = kit.run(&[
-        "adapter",
-        "import",
-        "--bundled",
-        "alpha",
-        "--enable",
-        "--yes",
-    ]);
+    let import = kit.run(&["adapter", "import", "--bundled", "alpha"]);
     assert_eq!(import.code, 0, "{}", import.all());
+    let enable = enable_with_fingerprint(&kit, &old);
+    assert_eq!(enable.code, 0, "{}", enable.all());
 
     kit.publish(&[&new], &seq(2));
     let run = run_without_index(&kit, &["adapter", "update", "alpha"]);
@@ -2613,8 +2663,12 @@ fn bundled_update_all_continues_past_an_adapter_that_needs_consent() {
     let new_beta = Pkg::tool("beta", "0.2.0").package();
     let kit = kit_with(&[&old_alpha, &old_beta]);
     let _daemon = kit.daemon();
-    let import = kit.run(&["adapter", "import", "--bundled", "--enable", "--yes"]);
+    let import = kit.run(&["adapter", "import", "--bundled"]);
     assert_eq!(import.code, 0, "{}", import.all());
+    for pkg in [&old_alpha, &old_beta] {
+        let enable = enable_with_fingerprint(&kit, pkg);
+        assert_eq!(enable.code, 0, "{}", enable.all());
+    }
 
     kit.publish(&[&new_alpha, &new_beta], &seq(2));
     let run = run_without_index(&kit, &["adapter", "update", "--all"]);
@@ -2732,7 +2786,7 @@ fn update_with_more_permissions_needs_consent() {
     kit.publish(&[&v1], &seq(1));
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &v1).code, 0);
 
     kit.publish(&[&v1, &v2], &seq(2));
     let run = kit.run(&["adapter", "update", "alpha"]);
@@ -2791,9 +2845,9 @@ fn an_update_cannot_exceed_the_enabled_memory_limit() {
     let kit = Kit::new();
     kit.publish(&[&v1, &b, &c], &seq(1));
     let daemon = kit.daemon();
-    for name in ["alpha", "beta", "gamma"] {
-        import(&kit, name);
-        let enable = kit.run(&["adapter", "enable", name, "--yes"]);
+    for pkg in [&v1, &b, &c] {
+        import(&kit, &pkg.name);
+        let enable = enable_with_fingerprint(&kit, pkg);
         assert_eq!(enable.code, 0, "{}", enable.all());
     }
     kit.publish(&[&v1, &v2, &b, &c], &seq(2));
@@ -2845,7 +2899,7 @@ fn rollback_restores_the_previous_enforcement_decision() {
     kit.publish(&[&v1], &seq(1));
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &v1).code, 0);
     assert_eq!(
         info_json(&kit, "alpha")["enforced"]["allow_unenforced"],
         false
@@ -3090,7 +3144,7 @@ fn import_of_a_name_whose_files_are_gone_brings_them_back() {
     );
     let info = info_json(&kit, "alpha");
     assert_eq!(info["state"], "disabled", "{info}");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a).code, 0);
     drop(daemon);
 }
 
@@ -3182,7 +3236,7 @@ fn rollback_restores_the_previous_version_without_network() {
     kit.publish(&[&v1], &seq(1));
     let daemon = kit.daemon();
     import(&kit, "alpha");
-    assert_eq!(kit.run(&["adapter", "enable", "alpha", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &v1).code, 0);
     kit.publish(&[&v1, &v2], &seq(2));
     assert_eq!(kit.run(&["adapter", "update", "alpha"]).code, 0);
     assert_eq!(version_of(&kit, "alpha"), "0.2.0");
@@ -3330,8 +3384,8 @@ fn update_all_updates_each_adapter_and_reports_the_ones_that_failed() {
     let daemon = kit.daemon();
     import(&kit, "one");
     import(&kit, "two");
-    assert_eq!(kit.run(&["adapter", "enable", "one", "--yes"]).code, 0);
-    assert_eq!(kit.run(&["adapter", "enable", "two", "--yes"]).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &a1).code, 0);
+    assert_eq!(enable_with_fingerprint(&kit, &b1).code, 0);
     kit.publish(&[&a1, &a2, &b1, &b2], &seq(2));
     let run = kit.run(&["adapter", "update", "--all"]);
     // `one` is updated, `two` asks for more and needs its fingerprint

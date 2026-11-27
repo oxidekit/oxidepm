@@ -110,6 +110,14 @@ pub fn apply(profile: &Profile, with_exe: bool) -> Result<bool, String> {
 
 fn apply_with(profile: &Profile, exe: Option<&File>) -> Result<bool, String> {
     let mut handled = AccessFs::from_all(ABI_NEWEST);
+    // Let the self-test measure pathname reachability with an older ABI.
+    #[cfg(debug_assertions)]
+    if exe.is_none()
+        && oxidepm_sandbox::caps::landlock_abi()
+            .is_some_and(|abi| abi < oxidepm_sandbox::caps::LANDLOCK_ABI_UNIX_CONNECT)
+    {
+        handled.remove(AccessFs::ResolveUnix);
+    }
     let handles_execute = profile.spawn != SpawnMode::Any;
     if !handles_execute {
         handled.remove(AccessFs::Execute);
@@ -174,9 +182,11 @@ fn apply_with(profile: &Profile, exe: Option<&File>) -> Result<bool, String> {
                 path.display()
             ));
         }
-        ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, AccessFs::ResolveUnix))
-            .map_err(|e| err(&format!("cannot allow socket {}", path.display()), &e))?;
+        if handled.contains(AccessFs::ResolveUnix) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, AccessFs::ResolveUnix))
+                .map_err(|e| err(&format!("cannot allow socket {}", path.display()), &e))?;
+        }
     }
     for port in &profile.listen_ports {
         ruleset = ruleset

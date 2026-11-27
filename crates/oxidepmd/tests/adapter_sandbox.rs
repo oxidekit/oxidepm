@@ -1524,6 +1524,23 @@ fn enable_accounts_for_reachable_unix_services() {
             let override_run =
                 kit.run(&["adapter", "enable", "net", "--yes", "--allow-unenforced"]);
             assert_eq!(override_run.code, 0, "{}", override_run.all());
+            let info = kit.run(&["--json", "adapter", "info", "net"]);
+            assert_eq!(info.code, 0, "{}", info.all());
+            let info: Value = serde_json::from_str(&info.stdout).unwrap();
+            let record = &info["enforced"];
+            assert!(
+                !record["enforced"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("network")),
+                "{record}"
+            );
+            if !oxidepm_sandbox::probe().landlock_unix_connect {
+                let note = "The kernel cannot restrict connections to pathname Unix sockets";
+                assert_eq!(record["caps"]["landlock_unix_connect"], false, "{record}");
+                assert!(run.stderr.contains(note), "{}", run.all());
+                assert!(override_run.stdout.contains(note), "{}", override_run.all());
+            }
         } else {
             assert_eq!(run.code, 0, "{}", run.all());
         }

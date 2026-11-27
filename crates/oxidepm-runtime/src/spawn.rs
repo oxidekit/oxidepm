@@ -249,6 +249,10 @@ pub async fn run_launcher_selftest(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
+    #[cfg(debug_assertions)]
+    if let Some(abi) = std::env::var_os("OXIDEPM_TEST_LANDLOCK_ABI") {
+        cmd.env("OXIDEPM_TEST_LANDLOCK_ABI", abi);
+    }
     let mut child = GroupChild::spawn(&mut cmd)
         .map_err(|e| format!("cannot start the sandbox launcher: {e}"))?;
     let (Some(stdout), Some(stderr)) = (child.take_stdout(), child.take_stderr()) else {

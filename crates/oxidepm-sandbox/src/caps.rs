@@ -71,7 +71,13 @@ pub fn landlock_abi() -> Option<u32> {
             LANDLOCK_CREATE_RULESET_VERSION,
         )
     };
-    u32::try_from(v).ok().filter(|v| *v >= 1)
+    let abi = u32::try_from(v).ok().filter(|v| *v >= 1);
+    // Exercise machines without pathname socket restrictions in integration tests.
+    #[cfg(debug_assertions)]
+    if std::env::var("OXIDEPM_TEST_LANDLOCK_ABI").as_deref() == Ok("8") {
+        return abi.map(|v| v.min(8));
+    }
+    abi
 }
 
 fn seccomp_available() -> bool {
