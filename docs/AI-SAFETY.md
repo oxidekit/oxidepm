@@ -36,7 +36,7 @@ oxidepm --version               # Version info
 | `oxidepm restart <selector>` | Medium | Brief downtime while the process restarts |
 | `oxidepm reload <selector>` | Medium | The same as `restart`: the process is stopped and started again, there is no zero-downtime reload |
 | `oxidepm save` | Low | Writes the apps that should be running to `saved.json`; refuses to replace a non-empty file with an empty list unless `--force` |
-| `oxidepm startup` | Low | Generates an autostart script (systemd/launchd) |
+| `oxidepm startup` | Low | Generates an autostart script (systemd) |
 | `oxidepm resurrect` | Medium | Starts every app the daemon's registry says should be running and is not up (apps you stopped stay stopped), and re-adds apps from `saved.json` that the registry no longer has — verify the saved state first |
 | `oxidepm check [target]` | Medium | The check adapter declares a caution-tier verb. `--fix` may install Node dependencies and create `.env`. `--set-env` edits `.env` |
 | `oxidepm init [dir]` | Caution | The init adapter writes a new project config. Preview with `--dry-run` |

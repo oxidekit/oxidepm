@@ -58,18 +58,6 @@ sudo dpkg -i oxidepm_0.4.0_amd64.deb
 sudo dpkg -i oxidepm_0.4.0_arm64.deb
 ```
 
-### Homebrew (macOS/Linux)
-
-Download `oxidepm.rb` from the release and add it to a local tap:
-
-```bash
-brew tap-new local/oxidepm
-cp oxidepm.rb "$(brew --repository local/oxidepm)/Formula/oxidepm.rb"
-brew install local/oxidepm/oxidepm
-```
-
-On Linux, [import the bundled runtimes](#runtimes). On macOS, use the `cmd` runtime.
-
 ### Arch Linux (AUR)
 
 ```bash
@@ -103,8 +91,6 @@ Pre-built binaries available on the [Releases page](https://github.com/oxidekit/
 |----------|--------------|----------|
 | Linux | x86_64 | `oxidepm-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux | ARM64 | `oxidepm-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS | Intel | `oxidepm-x86_64-apple-darwin.tar.gz` |
-| macOS | Apple Silicon | `oxidepm-aarch64-apple-darwin.tar.gz` |
 
 #### Verify a release download
 
@@ -125,14 +111,13 @@ you downloaded and compute its SHA-256.
 
 ```sh
 ARCHIVE=oxidepm-x86_64-unknown-linux-gnu.tar.gz
-sha256sum "$ARCHIVE"       # Linux
-shasum -a 256 "$ARCHIVE"  # macOS
+sha256sum "$ARCHIVE"
 ```
 
 Compare the digest with the entry for that exact filename in the verified `checksums.txt`
 before extracting the archive.
 Place `oxidepm`, `oxidepmd` and `oxidepm-sandbox` in your prefix's `bin`, and copy
-`share/oxidepm/adapters` to the same path under the prefix. On Linux, import the runtimes as shown below.
+`share/oxidepm/adapters` to the same path under the prefix. Import the runtimes as shown below.
 
 Releases before 0.4.0-rc.4 are unsigned and their `oxidepm update` does not verify
 signatures, so upgrade from them with the manual install and verification steps above.
@@ -155,14 +140,14 @@ files.
 The release archive ships all adapters under `share/oxidepm/adapters` with
 `index.json` and `SHA256SUMS`. The CLI and daemon verify the catalog and selected archives
 against `SHA256SUMS` on import. The release archive's digest is listed in `checksums.txt`.
-On Linux, import and enable the bundled runtimes offline with:
+Import and enable the bundled runtimes offline with:
 
 ```bash
 oxidepm adapter import --bundled --tag runtime --enable --yes
 ```
 
-The install script attempts this import for you. Adapters run only on Linux and use Landlock
-and seccomp where the kernel supports them. The core runs on macOS with the built-in `cmd` runtime.
+The install script attempts this import for you. Adapters use Landlock
+and seccomp where the kernel supports them.
 Until a runtime is imported, `oxidepm start app.js` fails with the adapter's name and the command
 that imports it, and creates nothing. `examples/*.config.toml` that use node, python or go work as
 soon as the runtimes are imported.
@@ -176,7 +161,7 @@ and the target directory, so workspaces and a `target-dir` setting work; the bui
 
 ## Optional adapters
 
-On Linux, import and enable any adapter from the installed release bundle. For example:
+Import and enable any adapter from the installed release bundle. For example:
 
 ```bash
 oxidepm adapter import --bundled watch --enable
@@ -275,7 +260,7 @@ oxidepm stop my-app
 | `monit` | Provided by the `ui-tui` adapter ([install the adapter](#optional-adapters)): the terminal dashboard (a session verb that runs on your terminal) |
 | `save [--force]` | Write `saved.json` from the apps that should be running (refused when that would blank a file that lists apps, unless `--force`) |
 | `resurrect` | Start the apps that should be running and are not up (an app you stopped stays stopped), and add apps from `saved.json` that were deleted since |
-| `startup [systemd\|launchd]` | Generate autostart script. The systemd unit sets `TimeoutStopSec` to the daemon's shutdown budget (`daemon.toml`, 120 s by default) plus 40 s, and `KillMode=mixed`, so systemd sends the stop signal to the daemon alone and leaves it time to stop the apps in order; run `startup` again to get this in an existing unit |
+| `startup [systemd]` | Generate autostart script. The systemd unit sets `TimeoutStopSec` to the daemon's shutdown budget (`daemon.toml`, 120 s by default) plus 40 s, and `KillMode=mixed`, so systemd sends the stop signal to the daemon alone and leaves it time to stop the apps in order; run `startup` again to get this in an existing unit |
 | `check [target] [--fix] [--strict] [--set-env KEY=VALUE]` | Check project readiness through the check adapter |
 | `flush <selector>` | Truncate the active log files (rotated files stay); a file that cannot be emptied is reported for that app |
 | `describe <target>` | Show command without starting |
@@ -849,7 +834,7 @@ All data stored in `~/.oxidepm/` (the `OXIDEPM_HOME` environment variable names 
 | **Advanced** |
 | Process dependencies | ✅ | ❌ | `depends_on = ["postgres"]` |
 | Cron restarts | ✅ | ❌ | `restart_cron = "0 4 * * *"` |
-| Systemd/launchd | ✅ | ✅ | Auto-start on boot |
+| Systemd | ✅ | ✅ | Auto-start on boot |
 | **Configuration** |
 | TOML config | ✅ | ❌ | Clean, readable config format |
 | YAML config | ✅ | ✅ | Ecosystem file support |
@@ -872,7 +857,7 @@ All data stored in `~/.oxidepm/` (the `OXIDEPM_HOME` environment variable names 
 
 ## Requirements
 
-- Linux for all features. macOS for the built-in `cmd` runtime.
+- Linux only (x86_64 and aarch64, glibc)
 - A current stable Rust toolchain (only for building from source)
 - Runtimes only needed for their respective app types:
   - Node.js for Node/npm/pnpm/yarn apps
