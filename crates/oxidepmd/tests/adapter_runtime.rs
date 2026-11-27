@@ -618,6 +618,55 @@ fn build_output_is_capped_and_tail_kept_for_the_error() {
 }
 
 #[test]
+fn limited_responses_scrub_failed_build_output() {
+    let m = marker();
+    let rig = runtime_rig(
+        |work| {
+            let body = "if [ -f fail-build ]; then printf 'Build labels: %s\\n' \"$BUILD_LABELS\"; exit 3; fi";
+            script(
+                json!([step("build", json!(["sh", "-c", body]), 30)]),
+                sleep_plan(work, &m),
+            )
+        },
+        &["sleep", "sh"],
+        &[],
+        &[],
+    );
+    let app = "fx-build-labels";
+    let started = rig.start(
+        app,
+        json!({"ai_control": true, "env": {"BUILD_LABELS": "first-label\nsecond-label"}}),
+    );
+    assert_eq!(started["type"], "started", "{started}");
+    std::fs::write(rig.work.join("fail-build"), "").unwrap();
+
+    let daemon = rig.daemon();
+    let read = |request| {
+        daemon.rpc_on(&daemon.socket(), "build-labels", Some("ai:client"), request)["response"]
+            .clone()
+    };
+    let selector = json!({ "by": "name", "value": app });
+    let restarted = read(json!({ "type": "restart", "selector": selector }));
+    assert_eq!(restarted["type"], "restarted", "{restarted}");
+    assert_eq!(restarted["items"][0]["result"]["code"], "E_BUILD_FAILED");
+    let status = read(json!({ "type": "status" }));
+    let shown = read(json!({ "type": "show", "selector": selector }));
+    for field in [
+        &restarted["items"][0]["result"]["message"],
+        &status["apps"][0]["state"]["last_error"],
+        &shown["app"]["state"]["last_error"],
+    ] {
+        let message = field.as_str().expect("build failure message");
+        assert!(message.contains("exited with 3"), "{message}");
+        assert!(message.contains("Build labels: <redacted>"), "{message}");
+        assert!(!message.contains("first-label") && !message.contains("second-label"));
+    }
+    let log = std::fs::read_to_string(rig.home.join("logs").join(format!("{app}-build.log")))
+        .expect("build log");
+    assert!(log.contains("Build labels: first-label\nsecond-label"));
+}
+
+#[test]
 fn build_timeout_kills_the_step() {
     let m = marker();
     let rig = runtime_rig(

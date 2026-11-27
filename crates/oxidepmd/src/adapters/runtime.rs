@@ -25,11 +25,11 @@ use oxidepm_adapter_proto::messages::{
     StepDone,
 };
 use oxidepm_adapter_proto::{from_params, to_params};
-use oxidepm_core::{runtime_hints, AppSpec, Error, Result, Runtime};
+use oxidepm_core::{runtime_hints, scrub_text, AppSpec, Error, Result, Runtime};
 use oxidepm_runtime::resolve::{absolute_search_path, anchor_runtime_path};
 use oxidepm_runtime::step::{
     canonical_app_dir, open_runtime_cwd, run_step, validate_plan, validate_steps, BuildLog,
-    CheckedPlan, CheckedStep,
+    CheckedPlan, CheckedStep, STEP_TAIL_BYTES,
 };
 use oxidepm_runtime::{
     build_env, get_runner, group_command, GroupChild, LaunchPlan, Origin, PrepareResult, Runner,
@@ -673,9 +673,18 @@ impl Runner for AdapterRunner {
                         None => "was killed by a signal".to_string(),
                     }
                 };
+                // The failure can be returned directly or published as app state. The local
+                // build log still has the original output.
+                let tail = scrub_text(&out.tail, spec);
+                let mut start = tail.len().saturating_sub(STEP_TAIL_BYTES);
+                while !tail.is_char_boundary(start) {
+                    start += 1;
+                }
                 return Ok(PrepareResult::failure(format!(
                     "step '{}' ({}) {why}:\n{}",
-                    step.id, step.description, out.tail
+                    step.id,
+                    step.description,
+                    &tail[start..]
                 )));
             }
             done.push(StepDone {
