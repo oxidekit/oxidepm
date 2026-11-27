@@ -934,6 +934,110 @@ async fn live_proc_is_recorded_at_launch_and_cleared_after_reap() {
     assert_eq!(fx.handle("ut-live-exit").live().proc(), None);
 }
 
+#[tokio::test]
+async fn samples_cpu_and_resident_memory_of_children_and_grandchildren() {
+    use super::sampler::{Sampler, SysProbe};
+
+    let fx = fixture().await;
+    let spec = fx.cmd(
+        "tree",
+        r#"
+        sh -c 'sleep 30 & echo "$!" > grandchild.pid; wait' &
+        parent=$!
+        sleep 30 &
+        sleeper=$!
+        sh -c 'printf "\377)x" > /proc/self/comm; : > worker.ready; while :; do :; done' &
+        worker=$!
+        printf '%s\n' "$$" "$parent" "$sleeper" "$worker" > tree.pids
+        wait
+        "#,
+    );
+    let id = fx.sup.start(spec).await.unwrap();
+    let handle = fx.handle("tree");
+    let pids = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pids: Vec<u32> = ["tree.pids", "grandchild.pid"]
+                .iter()
+                .flat_map(|file| {
+                    std::fs::read_to_string(fx.file(file))
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .filter_map(|pid| pid.parse().ok())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            if pids.len() == 5 && fx.file("worker.ready").exists() {
+                break pids;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture reports all five pids");
+    let sampler = Sampler::new(SysProbe::default());
+    sampler.tick(std::slice::from_ref(&handle)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    sampler.tick(std::slice::from_ref(&handle)).await;
+    let tree = fx.sup.app_stats(id).unwrap().tree;
+    let leader_cpu = handle.run_state().cpu_percent;
+    let rss_pages: u64 = pids
+        .into_iter()
+        .map(|pid| {
+            let stat = std::fs::read(format!("/proc/{pid}/stat")).unwrap();
+            let end_of_name = stat.iter().rposition(|&byte| byte == b')').unwrap();
+            std::str::from_utf8(&stat[end_of_name + 1..])
+                .unwrap()
+                .split_whitespace()
+                .nth(24 - 3)
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        })
+        .sum();
+    let page_size = nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE)
+        .unwrap()
+        .unwrap() as u64;
+    fx.sup.stop(id).await.unwrap();
+
+    assert_eq!(tree.process_count, 5);
+    let expected_rss = rss_pages * page_size;
+    assert!(
+        tree.memory_bytes.abs_diff(expected_rss) <= 32 * page_size,
+        "sampled {} bytes, expected {expected_rss}",
+        tree.memory_bytes
+    );
+    assert!(
+        tree.cpu_percent > leader_cpu,
+        "{tree:?}, leader CPU {leader_cpu}"
+    );
+    assert_eq!(fx.sup.app_stats(id).unwrap().tree, Default::default());
+}
+
+#[tokio::test]
+async fn samples_fifty_apps_within_the_interval_budget() {
+    use super::sampler::{Sampler, SysProbe};
+
+    let fx = fixture().await;
+    let mut handles = Vec::new();
+    for index in 0..50 {
+        let name = format!("sample-{index}");
+        let (spec, _) = fx.sleeper(&name);
+        fx.sup.start(spec).await.unwrap();
+        handles.push(fx.handle(&name));
+    }
+
+    let sampler = Sampler::new(SysProbe::default());
+    let start = Instant::now();
+    sampler.tick(&handles).await;
+    let elapsed = start.elapsed();
+    eprintln!("Sampled 50 live apps in {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    for handle in handles {
+        assert_eq!(fx.sup.app_stats(handle.id).unwrap().tree.process_count, 1);
+    }
+    fx.sup.shutdown(Duration::from_secs(5)).await;
+}
+
 /// A stop cancels the dependency wait: the pipeline future is dropped (no task is left waiting
 /// on the dependency's snapshot) and the app is stopped, not errored by a later timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

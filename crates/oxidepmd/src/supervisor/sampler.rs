@@ -1,54 +1,41 @@
-//! The metrics sampler: one task for the whole daemon that measures the leader process of every
-//! live app and asks for a restart of one over its memory limit.
+//! The metrics sampler measures every live app in one pass over /proc on a blocking worker.
 //!
-//! It reads only the processes it tracks, never the whole table (`refresh_all` scanned every
-//! process on the host every two seconds), and never on an async worker: the reading runs in
-//! `spawn_blocking`. A pid is trusted only while the start time recorded at launch still matches
-//! `/proc/<pid>/stat`, so a recycled pid is never measured. The actor clears
-//! `Live::proc` right after it reaps the child, and the sampler looks again before it stores a
-//! reading, so a dead child is never measured either.
-//!
-//! The sampler never signals anything. A limit is a `Command::LimitExceeded` post to the app's
-//! mailbox (carrying the generation it measured); the actor decides, and ignores a post that
-//! names a child it no longer runs.
-//!
-//! Known limit: only the leader is measured. An app started as `npm start` is measured by the
-//! `npm` wrapper, not by the `node` child under it. Summing the descendants is a follow-up.
+//! It publishes tree totals alongside the leader metrics. The sampler never signals anything.
+//! A leader over its memory limit causes a mailbox post tagged with the measured generation.
 
 use super::actor::AbortOnDrop;
 use super::handle::{Command, HandleKind, LimitKind, LiveProc, ProcessHandle};
 #[cfg(test)]
 use super::pids::parse_start_ticks;
 pub(super) use super::pids::read_start_ticks as start_ticks;
+use super::pids::stat_fields;
 use super::registry::Registry;
+use super::stats::Reading;
+use nix::unistd::{sysconf, SysconfVar};
 use oxidepm_core::constants::DEFAULT_METRICS_INTERVAL_SECS;
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::{Arc, Once, Weak};
-use std::time::Duration;
-use sysinfo::{Pid, ProcessRefreshKind, System};
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-/// One measurement of a leader process.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Reading {
-    pub cpu_percent: f32,
-    pub mem_bytes: u64,
-}
+const MAX_PROC_ENTRIES: usize = 32_768;
+const MAX_TREE_PROCESSES: usize = 4_096;
+const MAX_TREE_DEPTH: usize = 64;
 
 /// Where the numbers come from (tests replace it).
-pub trait Probe: Send + 'static {
+pub(super) trait Probe: Send + 'static {
     /// The start time of `pid` in clock ticks since boot, `None` if there is no such process.
     fn start_ticks(&self, pid: u32) -> Option<u64>;
 
-    /// Measure these processes (all of them validated just before). A process the probe cannot
-    /// read is left out. Anything the probe kept for a pid that is not listed is dropped.
-    fn measure(&mut self, pids: &[u32]) -> HashMap<u32, Reading>;
+    /// Measure these apps (the leader pids were validated just before). Forget old baselines.
+    fn measure(&mut self, leaders: &[LiveProc]) -> HashMap<u32, Reading>;
 }
 
-/// What the whole process tree of an adapter uses. Unlike an app, which is
-/// measured by its leader, an adapter is measured over its process group and over everything
-/// that descends from its leader, so that a helper it starts counts, in or out of the group.
+/// What the whole process tree of an adapter uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GroupUsage {
     pub processes: u32,
@@ -56,31 +43,54 @@ pub struct GroupUsage {
     pub rss_bytes: u64,
 }
 
-/// The fields of `/proc/<pid>/stat` that the group sum needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The fields of `/proc/<pid>/stat` used for sampling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatLine {
     pub ppid: i32,
     pub pgrp: i32,
     pub threads: u64,
     pub rss_pages: u64,
+    session: i32,
+    start_ticks: u64,
+    cpu_ticks: u64,
+    zombie: bool,
 }
 
 /// Parse one `/proc/<pid>/stat` line.
-pub fn parse_stat(stat: &str) -> Option<StatLine> {
-    // the command name (field 2) may hold spaces and parentheses: count from the last ')'
-    let rest = &stat[stat.rfind(')')? + 1..];
-    let mut fields = rest.split_whitespace();
-    // `rest` starts at field 3 (state): ppid is field 4, pgrp field 5, num_threads field 20, rss field 24
-    let ppid = fields.nth(1)?.parse().ok()?;
+fn parse_stat(stat: &[u8]) -> Option<StatLine> {
+    let mut fields = stat_fields(stat)?;
+    let zombie = matches!(fields.next()?, "Z" | "X"); // field 3
+    let ppid = fields.next()?.parse().ok()?;
     let pgrp = fields.next()?.parse().ok()?;
-    let threads = fields.nth(14)?.parse().ok()?;
-    let rss_pages: i64 = fields.nth(3)?.parse().ok()?;
+    let session = fields.next()?.parse().ok()?;
+    let user_ticks: u64 = fields.nth(7)?.parse().ok()?; // field 14
+    let system_ticks = fields.next()?.parse().ok()?;
+    let threads = fields.nth(4)?.parse().ok()?; // field 20
+    let start_ticks = fields.nth(1)?.parse().ok()?; // field 22
+    let rss_pages: i64 = fields.nth(1)?.parse().ok()?; // field 24
     Some(StatLine {
         ppid,
         pgrp,
         threads,
         rss_pages: rss_pages.max(0) as u64,
+        session,
+        start_ticks,
+        cpu_ticks: user_ticks.saturating_add(system_ticks),
+        zombie,
     })
+}
+
+fn read_stat(pid: u32) -> Option<StatLine> {
+    parse_stat(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
+}
+
+fn read_resident_pages(pid: u32) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/{pid}/statm"))
+        .ok()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// The usage of the group `pgid` led by `leader`, from a table of every process: the members of
@@ -126,26 +136,121 @@ pub fn group_usage(leader: u32, pgid: i32) -> GroupUsage {
     let table: Vec<(i32, StatLine)> = dir
         .filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()))
-        .filter_map(|pid| {
-            Some((
-                pid,
-                parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)?,
-            ))
-        })
+        .filter_map(|pid| Some((pid, read_stat(pid as u32)?)))
         .collect();
     sum_group(&table, leader as i32, pgid, page_size)
 }
 
-/// The real probe: sysinfo, one `System` per tracked pid. A process's CPU usage is the change
-/// since that process was last read, so each one needs a baseline of its own (one shared
-/// `System` would divide every reading by the time since the previous pid's).
-#[derive(Default)]
-pub struct SysProbe {
-    systems: HashMap<u32, System>,
+/// A cgroup v2 path as seen from the daemon's cgroup namespace.
+fn cgroup_path(pid: u32) -> Option<PathBuf> {
+    let entry = std::fs::read(format!("/proc/{pid}/cgroup")).ok()?;
+    let path = entry
+        .split(|&byte| byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"0::"))?;
+    Some(PathBuf::from(OsStr::from_bytes(path)))
 }
 
-fn refresh_kind() -> ProcessRefreshKind {
-    ProcessRefreshKind::new().with_cpu().with_memory()
+/// Look up members only when an app occupies a subtree separate from the daemon and other apps.
+fn cgroup_members(leaders: &[LiveProc], table: &HashMap<u32, StatLine>) -> HashMap<u32, Vec<u32>> {
+    let Some(daemon) = cgroup_path(std::process::id()) else {
+        return HashMap::new();
+    };
+    let paths: Vec<_> = leaders
+        .iter()
+        .filter_map(|leader| {
+            let path = cgroup_path(leader.pid)?;
+            (start_ticks(leader.pid) == Some(leader.start_ticks)).then_some((leader.pid, path))
+        })
+        .collect();
+    let scopes: HashMap<&Path, u32> = paths
+        .iter()
+        .filter(|(pid, path)| {
+            path.is_absolute()
+                && !daemon.starts_with(path)
+                && !paths
+                    .iter()
+                    .any(|(other_pid, other_path)| pid != other_pid && other_path.starts_with(path))
+        })
+        .map(|(pid, path)| (path.as_path(), *pid))
+        .collect();
+    let mut members = HashMap::<u32, Vec<u32>>::new();
+    if !scopes.is_empty() {
+        for (&pid, stat) in table {
+            let Some(leader) = cgroup_path(pid)
+                .and_then(|path| path.ancestors().find_map(|path| scopes.get(path)).copied())
+            else {
+                continue;
+            };
+            if start_ticks(pid) == Some(stat.start_ticks) {
+                members.entry(leader).or_default().push(pid);
+            }
+        }
+    }
+    members
+}
+
+fn tree_members(
+    leader: LiveProc,
+    table: &HashMap<u32, StatLine>,
+    children: &HashMap<u32, Vec<u32>>,
+    cgroup: &[u32],
+) -> Vec<u32> {
+    let lead = table[&leader.pid];
+    // Apps normally inherit the daemon's session. Only an app-owned session identifies members.
+    let owns_session = lead.session == leader.pid as i32;
+    let peers = table.iter().filter_map(|(&pid, stat)| {
+        (stat.pgrp == leader.pgid || (owns_session && stat.session == lead.session)).then_some(pid)
+    });
+    let mut seen = HashSet::from([leader.pid]);
+    let mut queue = vec![(leader.pid, 0)];
+    let mut add = |queue: &mut Vec<_>, pid, depth, oldest| {
+        if table[&pid].start_ticks >= oldest && seen.insert(pid) {
+            queue.push((pid, depth));
+        }
+    };
+    for pid in peers.chain(cgroup.iter().copied()) {
+        if queue.len() == MAX_TREE_PROCESSES {
+            break;
+        }
+        add(&mut queue, pid, 0, lead.start_ticks);
+    }
+    let mut cursor = 0;
+    while cursor < queue.len() && queue.len() < MAX_TREE_PROCESSES {
+        let (parent, depth) = queue[cursor];
+        cursor += 1;
+        if depth == MAX_TREE_DEPTH {
+            continue;
+        }
+        for &pid in children.get(&parent).into_iter().flatten() {
+            if queue.len() == MAX_TREE_PROCESSES {
+                break;
+            }
+            // An older child cannot have been forked by this incarnation of the parent.
+            add(&mut queue, pid, depth + 1, table[&parent].start_ticks);
+        }
+    }
+    queue.into_iter().map(|(pid, _)| pid).collect()
+}
+
+pub(super) struct SysProbe {
+    previous: HashMap<u32, StatLine>,
+    sampled_at: Option<Instant>,
+    page_size: u64,
+    ticks_per_second: f32,
+}
+
+impl Default for SysProbe {
+    fn default() -> Self {
+        Self {
+            previous: HashMap::new(),
+            sampled_at: None,
+            page_size: sysconf(SysconfVar::PAGE_SIZE)
+                .ok()
+                .flatten()
+                .unwrap_or(4096) as u64,
+            ticks_per_second: sysconf(SysconfVar::CLK_TCK).ok().flatten().unwrap_or(100) as f32,
+        }
+    }
 }
 
 impl Probe for SysProbe {
@@ -153,37 +258,78 @@ impl Probe for SysProbe {
         start_ticks(pid)
     }
 
-    fn measure(&mut self, pids: &[u32]) -> HashMap<u32, Reading> {
-        self.systems.retain(|pid, _| pids.contains(pid));
+    fn measure(&mut self, leaders: &[LiveProc]) -> HashMap<u32, Reading> {
+        let previous = std::mem::take(&mut self.previous);
+        let now = Instant::now();
+        let elapsed = self
+            .sampled_at
+            .replace(now)
+            .map(|time| (now - time).as_secs_f32());
+        if leaders.is_empty() {
+            return HashMap::new();
+        }
+        let mut table: HashMap<u32, StatLine> = std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .take(MAX_PROC_ENTRIES)
+            .filter_map(|pid| Some((pid, read_stat(pid)?)))
+            .collect();
+        let leaders: Vec<_> = leaders
+            .iter()
+            .copied()
+            .filter(|leader| {
+                // Also covers leaders outside the bounded census and ones that exited during it.
+                table.remove(&leader.pid);
+                let Some(stat) = read_stat(leader.pid) else {
+                    return false;
+                };
+                table.insert(leader.pid, stat);
+                stat.start_ticks == leader.start_ticks && !stat.zombie
+            })
+            .collect();
+        table.retain(|_, stat| !stat.zombie);
+        let mut children = HashMap::<u32, Vec<u32>>::new();
+        for (&pid, stat) in &table {
+            children.entry(stat.ppid as u32).or_default().push(pid);
+        }
+        let cgroups = cgroup_members(&leaders, &table);
         let mut readings = HashMap::new();
-        for &pid in pids {
-            let system = self.systems.entry(pid).or_default();
-            let sys_pid = Pid::from(pid as usize);
-            if !system.refresh_process_specifics(sys_pid, refresh_kind()) {
-                self.systems.remove(&pid);
+        for leader in leaders {
+            // Keep the same resident-memory source for the leader's existing limit.
+            let leader_rss =
+                read_resident_pages(leader.pid).unwrap_or(table[&leader.pid].rss_pages);
+            if start_ticks(leader.pid) != Some(leader.start_ticks) {
                 continue;
             }
-            if let Some(process) = system.process(sys_pid) {
-                readings.insert(
-                    pid,
-                    Reading {
-                        cpu_percent: process.cpu_usage(),
-                        mem_bytes: process.memory(),
-                    },
-                );
+            let cgroup = cgroups.get(&leader.pid).map_or(&[][..], Vec::as_slice);
+            let mut reading = Reading {
+                mem_bytes: leader_rss.saturating_mul(self.page_size),
+                ..Reading::default()
+            };
+            for pid in tree_members(leader, &table, &children, cgroup) {
+                let stat = table[&pid];
+                let cpu = previous
+                    .get(&pid)
+                    .filter(|old| old.start_ticks == stat.start_ticks)
+                    .zip(elapsed.filter(|&seconds| seconds > 0.0))
+                    .map_or(0.0, |(old, seconds)| {
+                        100.0 * stat.cpu_ticks.saturating_sub(old.cpu_ticks) as f32
+                            / (seconds * self.ticks_per_second)
+                    });
+                let rss = stat.rss_pages.saturating_mul(self.page_size);
+                self.previous.insert(pid, stat);
+                if pid == leader.pid {
+                    reading.cpu_percent = cpu;
+                }
+                reading.tree.process_count += 1;
+                reading.tree.cpu_percent += cpu;
+                reading.tree.memory_bytes = reading.tree.memory_bytes.saturating_add(rss);
             }
+            readings.insert(leader.pid, reading);
         }
         readings
     }
-}
-
-/// sysinfo keeps a `/proc/<pid>/stat` descriptor open for every process it has read, up to half
-/// of RLIMIT_NOFILE. A daemon that ran for hours held thousands. Zero keeps none open.
-fn stop_caching_proc_files() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        sysinfo::set_open_files_limit(0);
-    });
 }
 
 /// How often the sampler runs: two seconds, or `OXIDEPM_SAMPLE_INTERVAL_MS` (a test knob,
@@ -201,7 +347,6 @@ pub fn sample_interval() -> Duration {
 
 /// The task: sample every interval until the registry is gone.
 pub fn spawn(registry: Weak<Registry>) -> AbortOnDrop {
-    stop_caching_proc_files();
     let sampler = Sampler::new(SysProbe::default());
     AbortOnDrop::new(tokio::spawn(async move {
         let mut interval = tokio::time::interval(sample_interval());
@@ -219,7 +364,7 @@ pub fn spawn(registry: Weak<Registry>) -> AbortOnDrop {
     }))
 }
 
-pub struct Sampler<P: Probe> {
+pub(super) struct Sampler<P: Probe> {
     probe: Arc<Mutex<P>>,
 }
 
@@ -238,10 +383,7 @@ impl<P: Probe> Sampler<P> {
             .filter(|h| h.kind == HandleKind::Process)
             .filter_map(|h| h.live().proc().map(|proc| (h.clone(), proc)))
             .collect();
-        let leaders: Vec<(u32, u64)> = tracked
-            .iter()
-            .map(|(_, p)| (p.pid, p.start_ticks))
-            .collect();
+        let leaders: Vec<LiveProc> = tracked.iter().map(|(_, proc)| *proc).collect();
 
         let probe = Arc::clone(&self.probe);
         let readings = if leaders.is_empty() {
@@ -262,40 +404,37 @@ impl<P: Probe> Sampler<P> {
         for ((handle, proc), reading) in tracked.into_iter().zip(readings) {
             let Some(reading) = reading else { continue };
             // the child may have been reaped or replaced while the reading was taken
-            if handle.live().proc() != Some(proc) {
+            if !handle.live().set_metrics(proc, reading) {
                 continue;
             }
-            handle
-                .live()
-                .set_metrics(reading.cpu_percent, reading.mem_bytes);
             post_memory_limit(&handle, proc, reading.mem_bytes);
         }
     }
 }
 
 /// Validate every leader's start time, measure the ones that match. One entry per leader.
-fn sample<P: Probe>(probe: &mut P, leaders: &[(u32, u64)]) -> Vec<Option<Reading>> {
-    let valid: Vec<u32> = leaders
+fn sample<P: Probe>(probe: &mut P, leaders: &[LiveProc]) -> Vec<Option<Reading>> {
+    let valid: Vec<LiveProc> = leaders
         .iter()
-        .filter(|(pid, ticks)| {
-            let ok = probe.start_ticks(*pid) == Some(*ticks);
+        .copied()
+        .filter(|leader| {
+            let ok = probe.start_ticks(leader.pid) == Some(leader.start_ticks);
             if !ok {
                 // a recycled pid, or a child that is already gone
                 debug!(
                     "Not measuring pid {}: it is not the process that was launched",
-                    pid
+                    leader.pid
                 );
             }
             ok
         })
-        .map(|(pid, _)| *pid)
         .collect();
     let mut measured = probe.measure(&valid);
     leaders
         .iter()
-        .map(|(pid, _)| {
-            if valid.contains(pid) {
-                measured.remove(pid)
+        .map(|leader| {
+            if valid.contains(leader) {
+                measured.remove(&leader.pid)
             } else {
                 None
             }
@@ -337,15 +476,24 @@ mod tests {
             pgrp,
             threads,
             rss_pages,
+            ..StatLine::default()
         }
     }
 
     #[test]
     fn a_stat_line_with_spaces_and_parentheses_in_the_name_is_read() {
         let stat = "4242 (my (odd) name) S 100 200 300 0 -1 4194560 100 0 0 0 5 6 0 0 20 0 7 0 12345 1000000 321 18446744073709551615 0 0 0";
-        assert_eq!(parse_stat(stat), Some(line(100, 200, 7, 321)));
-        assert_eq!(parse_stat("garbage"), None);
-        assert_eq!(parse_stat("1 (x) S 1"), None);
+        assert_eq!(
+            parse_stat(stat.as_bytes()),
+            Some(StatLine {
+                session: 300,
+                start_ticks: 12345,
+                cpu_ticks: 11,
+                ..line(100, 200, 7, 321)
+            })
+        );
+        assert_eq!(parse_stat(b"garbage"), None);
+        assert_eq!(parse_stat(b"1 (x) S 1"), None);
     }
 
     #[test]
@@ -383,6 +531,60 @@ mod tests {
             "{usage:?}"
         );
     }
+
+    #[test]
+    fn tree_combines_membership_sources_and_ignores_an_older_child() {
+        let table: HashMap<_, _> = [
+            (100, 1, 100, 100, 10),   // leader
+            (101, 1, 100, 100, 11),   // reparented group member
+            (102, 101, 102, 102, 12), // detached child of that group member
+            (103, 1, 103, 100, 12),   // reparented member of the leader's session
+            (104, 1, 104, 104, 12),   // cgroup member
+            (105, 102, 105, 105, 11), // older than its reported parent
+            (106, 1, 106, 106, 12),   // unrelated
+        ]
+        .into_iter()
+        .map(|(pid, ppid, pgrp, session, start_ticks)| {
+            (
+                pid,
+                StatLine {
+                    session,
+                    start_ticks,
+                    ..line(ppid, pgrp, 1, 1)
+                },
+            )
+        })
+        .collect();
+        let children = HashMap::from([
+            (1, vec![100, 101, 103, 104, 106]),
+            (101, vec![102]),
+            (102, vec![105]),
+        ]);
+        let mut members = tree_members(proc(100, 1, 10), &table, &children, &[104, 101]);
+        members.sort_unstable();
+        assert_eq!(members, [100, 101, 102, 103, 104]);
+    }
+
+    #[test]
+    fn tree_walk_caps_depth_and_process_count() {
+        let count = MAX_TREE_PROCESSES as u32 + 1;
+        let mut table: HashMap<_, _> = (1..=count)
+            .map(|pid| (pid, line(pid as i32 - 1, pid as i32, 1, 1)))
+            .collect();
+        let children = (1..count).map(|pid| (pid, vec![pid + 1])).collect();
+        assert_eq!(
+            tree_members(proc(1, 1, 0), &table, &children, &[]).len(),
+            MAX_TREE_DEPTH + 1
+        );
+        for stat in table.values_mut() {
+            stat.pgrp = 1;
+        }
+        assert_eq!(
+            tree_members(proc(1, 1, 0), &table, &children, &[]).len(),
+            MAX_TREE_PROCESSES
+        );
+    }
+
     use oxidepm_core::{AppSpec, Desired, Runtime};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -400,12 +602,15 @@ mod tests {
             self.ticks.lock().get(&pid).copied()
         }
 
-        fn measure(&mut self, pids: &[u32]) -> HashMap<u32, Reading> {
+        fn measure(&mut self, leaders: &[LiveProc]) -> HashMap<u32, Reading> {
             self.measure_calls.fetch_add(1, Ordering::SeqCst);
-            self.measured.lock().push(pids.to_vec());
+            self.measured
+                .lock()
+                .push(leaders.iter().map(|p| p.pid).collect());
             let readings = self.readings.lock();
-            pids.iter()
-                .filter_map(|p| readings.get(p).map(|r| (*p, *r)))
+            leaders
+                .iter()
+                .filter_map(|p| readings.get(&p.pid).map(|r| (p.pid, *r)))
                 .collect()
         }
     }
@@ -439,6 +644,7 @@ mod tests {
         Reading {
             cpu_percent: 1.5,
             mem_bytes: mb * 1024 * 1024,
+            ..Reading::default()
         }
     }
 
@@ -453,9 +659,12 @@ mod tests {
     #[test]
     fn start_ticks_is_field_22_even_when_the_name_has_spaces_and_parentheses() {
         let stat = "123 (my (odd) name) S 1 123 123 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 100 18446744073709551615";
-        assert_eq!(parse_start_ticks(stat), Some(987654));
-        assert_eq!(parse_start_ticks("garbage"), None);
-        assert_eq!(parse_start_ticks("1 (x) S 1"), None);
+        assert_eq!(parse_start_ticks(stat.as_bytes()), Some(987654));
+        let mut non_utf8 = stat.as_bytes().to_vec();
+        non_utf8[5] = 0xff;
+        assert_eq!(parse_start_ticks(&non_utf8), Some(987654));
+        assert_eq!(parse_start_ticks(b"garbage"), None);
+        assert_eq!(parse_start_ticks(b"1 (x) S 1"), None);
         // and it works on this very process
         assert!(start_ticks(std::process::id()).is_some());
     }
@@ -627,11 +836,11 @@ mod tests {
             fn start_ticks(&self, _pid: u32) -> Option<u64> {
                 Some(10)
             }
-            fn measure(&mut self, pids: &[u32]) -> HashMap<u32, Reading> {
-                if !pids.is_empty() {
+            fn measure(&mut self, leaders: &[LiveProc]) -> HashMap<u32, Reading> {
+                if !leaders.is_empty() {
                     self.0.live().set_proc(Some(proc(48, 2, 20)));
                 }
-                pids.iter().map(|p| (*p, reading(80))).collect()
+                leaders.iter().map(|p| (p.pid, reading(80))).collect()
             }
         }
         let (h, mut parts) = handle(Some(20));

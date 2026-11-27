@@ -784,6 +784,22 @@ impl FromStr for AppStatus {
     }
 }
 
+/// Resource use summed across the processes belonging to an application.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProcessTreeStats {
+    pub process_count: u32,
+    /// 100 percent represents one fully occupied CPU core.
+    pub cpu_percent: f32,
+    /// Summed resident memory, including shared pages once per process.
+    pub memory_bytes: u64,
+}
+
+/// The supervisor's live measurements for an application.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AppStats {
+    pub tree: ProcessTreeStats,
+}
+
 /// Runtime state of an application
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {

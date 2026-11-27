@@ -153,9 +153,7 @@ struct ProcInfo {
 }
 
 fn parse_stat(pid: u32, stat: &str) -> Option<ProcInfo> {
-    // the command name (field 2) may hold spaces and parentheses: count from the last ')'
-    let rest = &stat[stat.rfind(')')? + 1..];
-    let mut fields = rest.split_whitespace();
+    let mut fields = stat_fields(stat.as_bytes())?;
     let state = fields.next()?; // field 3
     let pgrp = fields.nth(1)?.parse().ok()?; // field 5
     let start_ticks = fields.nth(16)?.parse().ok()?; // field 22
@@ -331,12 +329,18 @@ pub fn start_ticks(pid: u32) -> u64 {
 }
 
 pub(super) fn read_start_ticks(pid: u32) -> Option<u64> {
-    read_proc(pid).map(|p| p.start_ticks)
+    parse_start_ticks(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
 }
 
-#[cfg(test)]
-pub(super) fn parse_start_ticks(stat: &str) -> Option<u64> {
-    parse_stat(0, stat).map(|p| p.start_ticks)
+pub(super) fn parse_start_ticks(stat: &[u8]) -> Option<u64> {
+    stat_fields(stat)?.nth(19)?.parse().ok() // field 22
+}
+
+pub(super) fn stat_fields(stat: &[u8]) -> Option<std::str::SplitWhitespace<'_>> {
+    // The command name (field 2) may hold parentheses, spaces and non-UTF-8 bytes.
+    // Only decode the fields after its final ')'.
+    let rest = &stat[stat.iter().rposition(|&byte| byte == b')')? + 1..];
+    Some(std::str::from_utf8(rest).ok()?.split_whitespace())
 }
 
 #[cfg(test)]

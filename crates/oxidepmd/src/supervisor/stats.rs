@@ -104,3 +104,20 @@ mod imp {
 }
 
 pub use imp::{Counted, Stats};
+
+/// A single sample, including the leader figures used by the existing memory limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct Reading {
+    pub cpu_percent: f32,
+    pub mem_bytes: u64,
+    pub tree: oxidepm_core::ProcessTreeStats,
+}
+
+impl super::Supervisor {
+    /// Live measurements for a registered application.
+    pub fn app_stats(&self, id: super::AppId) -> Option<oxidepm_core::AppStats> {
+        self.registry.get(id).map(|handle| oxidepm_core::AppStats {
+            tree: handle.live().metrics().tree,
+        })
+    }
+}

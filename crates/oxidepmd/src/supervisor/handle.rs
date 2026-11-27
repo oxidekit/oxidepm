@@ -5,10 +5,11 @@
 //! and reads what it published. Reading a snapshot never messages the actor, so `status` and
 //! `show` do not wait for a slow stop.
 
+use super::stats::Reading;
 use chrono::{DateTime, Utc};
 use oxidepm_core::{AppSpec, AppStatus, Desired, Error, Result, RunState};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -271,40 +272,50 @@ pub struct LiveProc {
 /// Numbers that tasks other than the actor write and `status` reads.
 #[derive(Debug, Default)]
 pub struct Live {
-    proc: Mutex<Option<LiveProc>>,
-    cpu_milli_pct: AtomicU32,
-    mem_bytes: AtomicU64,
+    sampled: Mutex<SampledProcess>,
     health_failures: AtomicU32,
     last_health_unix_ms: AtomicI64,
     /// Set by the sampler when it posted a limit restart; cleared at launch.
     limit_pending: AtomicBool,
 }
 
+#[derive(Debug, Default)]
+struct SampledProcess {
+    proc: Option<LiveProc>,
+    metrics: Reading,
+}
+
 impl Live {
     pub fn proc(&self) -> Option<LiveProc> {
-        *self.proc.lock()
+        self.sampled.lock().proc
     }
 
     pub fn set_proc(&self, proc: Option<LiveProc>) {
-        *self.proc.lock() = proc;
-        if proc.is_none() {
-            self.cpu_milli_pct.store(0, Ordering::Relaxed);
-            self.mem_bytes.store(0, Ordering::Relaxed);
+        let mut sampled = self.sampled.lock();
+        if sampled.proc != proc {
+            *sampled = SampledProcess {
+                proc,
+                metrics: Reading::default(),
+            };
         }
     }
 
-    pub fn set_metrics(&self, cpu_percent: f32, mem_bytes: u64) {
-        self.cpu_milli_pct
-            .store((cpu_percent.max(0.0) * 1000.0) as u32, Ordering::Relaxed);
-        self.mem_bytes.store(mem_bytes, Ordering::Relaxed);
+    pub(super) fn set_metrics(&self, proc: LiveProc, metrics: Reading) -> bool {
+        let mut sampled = self.sampled.lock();
+        if sampled.proc != Some(proc) {
+            return false;
+        }
+        sampled.metrics = metrics;
+        true
     }
 
-    pub fn cpu_percent(&self) -> f32 {
-        self.cpu_milli_pct.load(Ordering::Relaxed) as f32 / 1000.0
+    pub(super) fn metrics(&self) -> Reading {
+        self.sampled.lock().metrics
     }
 
+    #[cfg(test)]
     pub fn mem_bytes(&self) -> u64 {
-        self.mem_bytes.load(Ordering::Relaxed)
+        self.metrics().mem_bytes
     }
 
     pub fn record_health(&self, failures: u32) {
@@ -460,8 +471,9 @@ impl ProcessHandle {
             if let Some(started) = state.started_at {
                 state.uptime_secs = (Utc::now() - started).num_seconds().max(0) as u64;
             }
-            state.cpu_percent = self.live.cpu_percent();
-            state.memory_bytes = self.live.mem_bytes();
+            let metrics = self.live.metrics();
+            state.cpu_percent = metrics.cpu_percent;
+            state.memory_bytes = metrics.mem_bytes;
             state.health_check_failures = self.live.health_failures();
             state.last_health_check = self.live.last_health();
         }
