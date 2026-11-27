@@ -61,6 +61,7 @@ pub struct CheckedStep {
     pub id: String,
     pub description: String,
     pub program: PathBuf,
+    invocation: Option<PathBuf>,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: ChildEnv,
@@ -80,36 +81,105 @@ fn has_nul(s: &str) -> bool {
     s.contains('\0')
 }
 
-/// The name a program is judged by: the file name of the path, or the bare name itself.
-fn basename(program: &str) -> &str {
-    program.rsplit('/').next().unwrap_or(program)
-}
-
-/// Resolve `program` with the child's `PATH`: an absolute path as it is, a bare name through
-/// `PATH`; a relative path with a slash is refused (it would depend on a directory).
-fn resolve(program: &str, cwd: &Path, search: Option<std::ffi::OsString>) -> Result<PathBuf> {
+/// Resolve an adapter program using the search path chosen by the daemon and app owner.
+/// Absolute requests are authorized by file identity as resolved by canonicalization.
+fn resolve_program(
+    program: &str,
+    cwd: &Path,
+    search: Option<&std::ffi::OsStr>,
+    rules: &RuntimeRules,
+    capturing: bool,
+    what: &str,
+) -> Result<(PathBuf, Option<PathBuf>)> {
+    let path = Path::new(program);
     if program.is_empty() {
         return invalid("the program is empty");
     }
-    if program.contains('/') {
-        if !Path::new(program).is_absolute() {
-            return invalid(format!(
-                "program '{program}' is a relative path; it must be absolute or a bare name"
-            ));
+    if program.contains('/') && !path.is_absolute() {
+        return invalid(format!(
+            "program '{program}' is a relative path; it must be absolute or a bare name"
+        ));
+    }
+    let search = search.map(|search| crate::resolve::absolute_search_path(search, cwd));
+    let lookup = |name: &str| {
+        search
+            .as_ref()
+            .and_then(|search| which::which_in(name, Some(search), cwd).ok())
+    };
+    let may_capture = |name: &str| !capturing || rules.capture_programs.iter().any(|p| p == name);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    let unlisted = || {
+        Error::AdapterInvalid(format!(
+            "{what}: program '{name}' is not one the adapter's manifest lists"
+        ))
+    };
+    let capture_denied = || {
+        Error::AdapterInvalid(format!(
+            "{what}: the output of '{name}' may not be captured"
+        ))
+    };
+    if !path.is_absolute() {
+        if !rules.programs.iter().any(|p| p == program) {
+            return Err(unlisted());
         }
-        return Ok(PathBuf::from(program));
+        if !may_capture(program) {
+            return Err(capture_denied());
+        }
+        return lookup(program).map(|path| (path, None)).ok_or_else(|| {
+            Error::ProcessStartFailed(format!("program '{program}' not found in PATH"))
+        });
     }
-    match search {
-        Some(search) => which::which_in(
-            program,
-            Some(crate::resolve::absolute_search_path(&search, cwd)),
-            cwd,
-        )
-        .map_err(|_| Error::ProcessStartFailed(format!("program '{program}' not found in PATH"))),
-        None => Err(Error::ProcessStartFailed(format!(
-            "program '{program}' not found in PATH"
-        ))),
+
+    let actual = path.canonicalize().map_err(|_| unlisted())?;
+    // Prefer the requested name when it is declared and resolves to this executable.
+    let names = rules
+        .programs
+        .iter()
+        .filter(|p| p.as_str() == name)
+        .chain(rules.programs.iter().filter(|p| p.as_str() != name));
+    let mut matched = false;
+    for declared in names {
+        let Some(found) = lookup(declared) else {
+            continue;
+        };
+        if found.canonicalize().ok().as_ref() != Some(&actual) {
+            continue;
+        }
+        matched = true;
+        if may_capture(declared) {
+            let invocation = if declared == name {
+                path.to_path_buf()
+            } else {
+                found
+            };
+            return Ok((actual, Some(invocation)));
+        }
     }
+    Err(if matched {
+        capture_denied()
+    } else {
+        unlisted()
+    })
+}
+
+/// The search path used for an adapter's programs, independent of what is passed to the child.
+fn program_search_path<'a>(
+    spec: &'a AppSpec,
+    daemon_env: &'a [(String, String)],
+) -> Option<&'a std::ffi::OsStr> {
+    spec.env
+        .get("PATH")
+        .or_else(|| {
+            daemon_env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value)
+        })
+        .map(std::ffi::OsStr::new)
 }
 
 /// The entries of an adapter's environment that apply, and the keys left out.
@@ -203,18 +273,7 @@ pub fn validate_steps_with(
             Some(c) if !c.is_empty() => spec.cwd.join(c),
             _ => spec.cwd.clone(),
         };
-        let name = basename(argv0);
-        if !rules.programs.iter().any(|p| p == name) {
-            return invalid(format!(
-                "{what}: program '{name}' is not one the adapter's manifest lists"
-            ));
-        }
         let capturing = step.capture != Capture::None;
-        if capturing && !rules.capture_programs.iter().any(|p| p == name) {
-            return invalid(format!(
-                "{what}: the output of '{name}' may not be captured"
-            ));
-        }
         let capture_max = match step.capture_max {
             Some(n) if n as usize > rules.limits.capture_max => {
                 return invalid(format!(
@@ -241,21 +300,20 @@ pub fn validate_steps_with(
         } else {
             crate::resolve::build_env_from(spec, &add, daemon_env, crate::resolve::APP_ENV_MODE)
         };
-        // Look up an explicitly configured app PATH without passing it to a capturing step.
-        let search = if capturing {
-            spec.env
-                .get("PATH")
-                .map(std::ffi::OsString::from)
-                .or_else(|| env.get("PATH"))
-        } else {
-            env.get("PATH")
-        };
-        let program = resolve(argv0, &cwd, search)?;
+        let (program, invocation) = resolve_program(
+            argv0,
+            &cwd,
+            program_search_path(spec, daemon_env),
+            rules,
+            capturing,
+            &what,
+        )?;
         let timeout = Duration::from_secs(step.timeout_secs.max(1)).min(rules.build_timeout_max);
         out.push(CheckedStep {
             id: step.id.clone(),
             description: step.description.clone(),
             program,
+            invocation,
             args: step.argv[1..].to_vec(),
             cwd,
             env,
@@ -273,6 +331,8 @@ pub fn validate_steps_with(
 #[derive(Debug, Clone)]
 pub struct CheckedPlan {
     pub launch: LaunchPlan,
+    /// The invocation path for a program executed via its canonical path.
+    pub invocation: Option<PathBuf>,
     pub binary_path: Option<PathBuf>,
     /// Keys of `extra_env` left out because the app's own `env` sets them.
     pub dropped_env: Vec<String>,
@@ -318,16 +378,6 @@ pub fn validate_plan_with(
         .binary_path
         .as_deref()
         .is_some_and(|b| b == plan.program);
-    if built {
-        check_built_binary(&plan.program)?;
-    } else {
-        let name = basename(&plan.program);
-        if !rules.programs.iter().any(|p| p == name) {
-            return invalid(format!(
-                "plan: program '{name}' is not one the adapter's manifest lists"
-            ));
-        }
-    }
     let cwd = PathBuf::from(&plan.cwd);
     if !cwd.is_absolute() {
         return invalid(format!("plan: cwd '{}' is not an absolute path", plan.cwd));
@@ -336,8 +386,19 @@ pub fn validate_plan_with(
         return invalid(format!("plan: cwd '{}' is not a directory", plan.cwd));
     }
     let (extra, dropped_env) = check_env(&plan.extra_env, spec, rules, what)?;
-    let env = build_env_from_plan(spec, &extra, daemon_env);
-    let program = resolve(&plan.program, &cwd, env.get("PATH"))?;
+    let (program, invocation) = if built {
+        check_built_binary(&plan.program)?;
+        (PathBuf::from(&plan.program), None)
+    } else {
+        resolve_program(
+            &plan.program,
+            &cwd,
+            program_search_path(spec, daemon_env),
+            rules,
+            false,
+            what,
+        )?
+    };
     let binary_path = match &plan.binary_path {
         Some(p) if !Path::new(p).is_absolute() => {
             return invalid(format!("plan: binary_path '{p}' is not absolute"))
@@ -352,6 +413,7 @@ pub fn validate_plan_with(
             cwd,
             extra_env: extra,
         },
+        invocation,
         binary_path,
         dropped_env,
     })
@@ -383,14 +445,6 @@ fn check_built_binary(program: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn build_env_from_plan(
-    spec: &AppSpec,
-    extra: &[(String, String)],
-    daemon_env: &[(String, String)],
-) -> ChildEnv {
-    crate::resolve::build_env_from(spec, extra, daemon_env, crate::resolve::APP_ENV_MODE)
 }
 
 /// Where the output of the steps of one build goes: the first [`BUILD_LOG_BYTES`] of it, to
@@ -512,6 +566,9 @@ fn push_capped(buf: &mut Vec<u8>, data: &[u8], max: usize) {
 /// when this future is dropped (a Stop during the build).
 pub async fn run_step(step: &CheckedStep, log: &mut BuildLog) -> Result<StepOutcome> {
     let mut cmd = crate::spawn::group_command(&step.program);
+    if let Some(invocation) = &step.invocation {
+        cmd.arg0(invocation);
+    }
     cmd.args(&step.args).current_dir(&step.cwd);
     if step.env.clear {
         cmd.env_clear();

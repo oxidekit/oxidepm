@@ -20,6 +20,7 @@ use super::pids::{self, PidGuard, PidRecord, PidTable};
 use super::registry::Registry;
 use super::stats::{Counted, Kind, Stats};
 use super::store::AppStore;
+use crate::adapters::runtime::spawn_runtime;
 use chrono::{DateTime, Utc};
 use nix::sys::signal::Signal;
 use oxidepm_core::restart::{CrashTracker, Decision, ExitCause};
@@ -35,6 +36,7 @@ use oxidepm_runtime::{
 use parking_lot::Mutex;
 use std::future::Future;
 use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -209,10 +211,16 @@ enum PipelineMode {
     Cached,
 }
 
+#[derive(Clone)]
+struct PreparedLaunch {
+    plan: LaunchPlan,
+    invocation: Option<PathBuf>,
+}
+
 enum PipelineResult {
     /// The plan to launch, and the launch slot to hold until the launch is over (an operator
     /// launch; an automatic one needs no build and takes none).
-    Ready(LaunchPlan, Option<OwnedSemaphorePermit>, Vec<String>),
+    Ready(PreparedLaunch, Option<OwnedSemaphorePermit>, Vec<String>),
     Failed(Error),
 }
 
@@ -254,7 +262,7 @@ pub struct ProcessActor {
     ctx: Arc<ActorCtx>,
     child: Option<GroupChild>,
     capture: Option<Capture>,
-    plan: Option<LaunchPlan>,
+    plan: Option<PreparedLaunch>,
     /// Cancelled when the child goes away; the health task is tied to it.
     launch_token: Option<CancellationToken>,
     health: Option<AbortOnDrop>,
@@ -1375,7 +1383,8 @@ impl ProcessActor {
     /// The one place an app process is created: the log files are opened before the
     /// spawn, so a log failure leaves no process, and the pipes are handed to the capture tasks
     /// before the child can fill them.
-    async fn launch(&mut self, plan: &LaunchPlan) -> Result<()> {
+    async fn launch(&mut self, launch: &PreparedLaunch) -> Result<()> {
+        let plan = &launch.plan;
         if self.is_closed() {
             return Err(Error::ShuttingDown);
         }
@@ -1392,7 +1401,10 @@ impl ProcessActor {
             plan.program.display(),
             plan.args
         );
-        let mut child = spawn_group(plan, &env)?;
+        let mut child = match &launch.invocation {
+            Some(invocation) => spawn_runtime(plan, invocation, &env)?,
+            None => spawn_group(plan, &env)?,
+        };
         let pid = child.pid();
         let pgid = child.pgid();
         // recorded with no await since the spawn: a SIGKILL of the daemon from here on leaves
@@ -1869,7 +1881,7 @@ async fn run_pipeline(
     spec: Arc<AppSpec>,
     mode: PipelineMode,
     origin: Origin,
-    cached: Option<LaunchPlan>,
+    cached: Option<PreparedLaunch>,
     building: Arc<AtomicBool>,
     phase: Arc<Notify>,
 ) -> PipelineResult {
@@ -1926,6 +1938,11 @@ async fn run_pipeline(
     };
     info!("Prepare successful for {}", spec.name);
     let warnings = prepared.warnings;
+    let invocation = if runner.mode_name() == "adapter" {
+        prepared.binary_path
+    } else {
+        None
+    };
     let plan = match prepared.plan {
         Some(plan) => plan,
         None => match runner.plan(&spec) {
@@ -1969,7 +1986,7 @@ async fn run_pipeline(
             }
         }
     }
-    PipelineResult::Ready(plan, Some(slot), warnings)
+    PipelineResult::Ready(PreparedLaunch { plan, invocation }, Some(slot), warnings)
 }
 
 /// The dependency wait of a pipeline: `Ok(true)` when every dependency is running, `Ok(false)`

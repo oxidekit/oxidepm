@@ -1548,9 +1548,7 @@ fn reboot_after_the_build_steps_ran_and_the_plan_cannot_be_asked_uses_the_stored
     rig.stop("bp-app");
 }
 
-/// A stored plan names a program by its absolute path, and nothing checks that the file is
-/// still there but the load of the plan (`validate_plan` only resolves a bare name): a plan whose
-/// program has gone is not used, and the adapter is asked as if there were no plan.
+/// A saved plan is discarded if its program is no longer on the app’s search path.
 #[test]
 fn stored_plan_whose_program_is_gone_is_not_used() {
     use std::os::unix::fs::PermissionsExt;
@@ -1567,7 +1565,10 @@ fn stored_plan_whose_program_is_gone_is_not_used() {
         &[],
         &[FAST],
     );
-    assert_eq!(rig.start("pg-app", json!({}))["type"], "started");
+    assert_eq!(
+        rig.start("pg-app", json!({ "env": { "PATH": ".:/usr/bin:/bin" } }))["type"],
+        "started"
+    );
     let pid = rig.pid_of("pg-app").expect("a pid");
     assert!(
         wait_for(10, || cmdline_of(pid).contains(&m1)),
@@ -1604,20 +1605,22 @@ fn stored_plan_whose_program_is_gone_is_not_used() {
 
 #[test]
 fn an_app_whose_first_start_failed_leaves_no_stored_plan() {
-    // the plan passes the checks (the file exists) and is stored; the spawn then fails because
-    // the file is not executable, and the app that never ran is removed again
+    // The plan is stored after validation. Its missing interpreter then prevents spawn.
     let rig = runtime_rig(
         |work| {
-            let tool = work.join("notexec");
-            std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let tool = work.join("missing-interpreter");
+            let interpreter = work.join("interpreter");
+            std::fs::write(&tool, format!("#!{}\n", interpreter.display())).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
             let plan = json!({ "program": tool.display().to_string(), "args": [], "cwd": work.display().to_string() });
             script(json!([]), plan)
         },
-        &["notexec"],
+        &["missing-interpreter"],
         &[],
         &[FAST],
     );
-    let reply = rig.start("ff-app", json!({}));
+    let reply = rig.start("ff-app", json!({ "env": { "PATH": ".:/usr/bin:/bin" } }));
     assert_eq!(reply["type"], "error", "{reply}");
     assert!(rig.app("ff-app").is_none(), "no row is left");
     assert_eq!(rig.plan_rows(), [], "and no plan");

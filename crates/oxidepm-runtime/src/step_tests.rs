@@ -433,6 +433,27 @@ fn plan_whose_program_is_not_installed_is_a_start_failure_not_an_invalid_adapter
 }
 
 #[test]
+fn an_absolute_program_can_name_the_resolved_manifest_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("program");
+    let declared = dir.path().join("tool");
+    std::fs::write(&executable, "").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&executable, &declared).unwrap();
+    let app = spec(dir.path());
+    let rules = rules(&["tool"], &["tool"], &[]);
+    let env = vec![("PATH".into(), dir.path().display().to_string())];
+    let mut build = step("probe", &[executable.to_str().unwrap()]);
+    build.capture = Capture::Stdout;
+    let launch = plan(executable.to_str().unwrap(), dir.path());
+
+    let checked = validate_steps_with(&[build], &app, &rules, &env).unwrap();
+    assert_eq!(checked[0].program, executable);
+    let checked = validate_plan_with(&launch, &app, &rules, &env).unwrap();
+    assert_eq!(checked.launch.program, executable);
+}
+
+#[test]
 fn step_timeout_is_capped_by_the_core() {
     let dir = tempfile::tempdir().unwrap();
     let r = rules(&["sh"], &[], &[]);

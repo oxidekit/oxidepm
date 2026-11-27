@@ -19,9 +19,12 @@ use oxidepm_adapter_proto::messages::{
 };
 use oxidepm_adapter_proto::{from_params, to_params};
 use oxidepm_core::{runtime_hints, AppSpec, Error, Result, Runtime};
-use oxidepm_runtime::step::{run_step, validate_plan, validate_steps, BuildLog, CheckedStep};
+use oxidepm_runtime::step::{
+    run_step, validate_plan, validate_steps, BuildLog, CheckedPlan, CheckedStep,
+};
 use oxidepm_runtime::{
-    build_env, get_runner, LaunchPlan, Origin, PrepareResult, Runner, RuntimeSource,
+    build_env, get_runner, group_command, ChildEnv, GroupChild, LaunchPlan, Origin, PrepareResult,
+    Runner, RuntimeSource,
 };
 use parking_lot::Mutex;
 use tracing::{info, warn};
@@ -247,8 +250,33 @@ struct Consulted {
 
 /// A stored plan that passed the reuse checks.
 struct Stored {
-    plan: oxidepm_runtime::step::CheckedPlan,
+    plan: CheckedPlan,
     had_steps: bool,
+}
+
+/// Pass the invocation path alongside an adapter's launch plan so aliases retain their argv[0].
+fn prepared_plan(plan: CheckedPlan, warnings: Vec<String>) -> PrepareResult {
+    let mut result = PrepareResult::success("");
+    result.binary_path = plan.invocation;
+    result.plan = Some(plan.launch);
+    result.warnings = warnings;
+    result
+}
+
+pub(crate) fn spawn_runtime(
+    plan: &LaunchPlan,
+    invocation: &std::path::Path,
+    env: &ChildEnv,
+) -> Result<GroupChild> {
+    let mut cmd = group_command(&plan.program);
+    cmd.arg0(invocation).args(&plan.args).current_dir(&plan.cwd);
+    if env.clear {
+        cmd.env_clear();
+    }
+    cmd.envs(env.vars.iter().map(|(k, v)| (k, v)));
+    GroupChild::spawn(&mut cmd).map_err(|e| {
+        Error::ProcessStartFailed(format!("Failed to start '{}': {e}", invocation.display()))
+    })
 }
 
 /// The errors that mean the adapter could not be asked (not that it said no, and not that it is
@@ -333,9 +361,7 @@ impl AdapterRunner {
         }
         let reply: PlanResult = serde_json::from_str(&row.plan_json).ok()?;
         let plan = validate_plan(&reply, spec, &self.rules).ok()?;
-        // not redundant: `validate_plan` finds a bare program name on the PATH but takes an
-        // absolute path as it is, and the file may have gone since the plan was made
-        plan.launch.program.exists().then_some(Stored {
+        Some(Stored {
             plan,
             had_steps: row.had_steps,
         })
@@ -488,11 +514,7 @@ impl Runner for AdapterRunner {
         };
         if use_stored {
             let stored = stored.expect("a stored plan was chosen");
-            let mut result = PrepareResult::success("");
-            result.binary_path = stored.plan.binary_path;
-            result.plan = Some(stored.plan.launch);
-            result.warnings = warnings;
-            return Ok(result);
+            return Ok(prepared_plan(stored.plan, warnings));
         }
         let had_steps = !steps.is_empty();
         let log_path = self
@@ -542,11 +564,7 @@ impl Runner for AdapterRunner {
             Err(e) if is_outage(&e) && stored.is_some() => {
                 let stored = stored.expect("checked");
                 warnings.push(self.stored_warning(&e, false));
-                let mut result = PrepareResult::success("");
-                result.binary_path = stored.plan.binary_path;
-                result.plan = Some(stored.plan.launch);
-                result.warnings = warnings;
-                return Ok(result);
+                return Ok(prepared_plan(stored.plan, warnings));
             }
             Err(e) => return Err(e),
         };
@@ -565,11 +583,7 @@ impl Runner for AdapterRunner {
             );
         }
         self.store_plan(spec, digest, &reply, had_steps).await;
-        let mut result = PrepareResult::success("");
-        result.binary_path = checked.binary_path;
-        result.plan = Some(checked.launch);
-        result.warnings = warnings;
-        Ok(result)
+        Ok(prepared_plan(checked, warnings))
     }
 
     /// The plan comes from `prepare` for a runtime adapter.
