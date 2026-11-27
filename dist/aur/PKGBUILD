@@ -22,7 +22,7 @@ sha256sums_aarch64=('@AARCH64_SHA256@')
 
 build() {
     cd "$pkgname-${_tag#v}"
-    cargo build --workspace --release
+    cargo build --locked --workspace --release
 }
 
 package() {

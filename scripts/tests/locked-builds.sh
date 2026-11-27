@@ -10,5 +10,5 @@ awk '
         invalid = 1
     }
     END { exit invalid }
-' .github/workflows/ci.yml .github/workflows/release.yml
-printf '%s\n' 'ok - CI and release builds use the checked-in lockfile'
+' .github/workflows/*.yml Dockerfile dist/aur/PKGBUILD
+printf '%s\n' 'ok - workflows, Dockerfile and PKGBUILD use the checked-in lockfile'

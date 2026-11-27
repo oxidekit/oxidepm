@@ -7,7 +7,7 @@ FROM rust:bookworm AS builder
 WORKDIR /build
 COPY . .
 
-RUN cargo build --workspace --release
+RUN cargo build --locked --workspace --release
 
 # Runtime image
 FROM debian:bookworm-slim

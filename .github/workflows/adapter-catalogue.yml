@@ -43,7 +43,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build catalogue tooling and install minisign
         run: |
-          cargo build -p oxidepm-adapter-proto --example catalogue
+          cargo build --locked -p oxidepm-adapter-proto --example catalogue
           sudo apt-get update
           sudo apt-get install -y minisign
       - name: Verify and publish the signed pair
@@ -88,5 +88,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify expiry from the signed branch history
         run: |
-          cargo build -p oxidepm-adapter-proto --example catalogue
+          cargo build --locked -p oxidepm-adapter-proto --example catalogue
           sh scripts/publish-adapter-catalogue.sh check-expiry "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
