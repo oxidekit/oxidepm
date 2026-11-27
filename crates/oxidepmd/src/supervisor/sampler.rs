@@ -94,19 +94,21 @@ fn read_resident_pages(pid: u32) -> Option<u64> {
 }
 
 /// The usage of the group `pgid` led by `leader`, from a table of every process: the members of
-/// the group plus every descendant of the leader.
+/// the group plus their descendants, including helpers that left the group.
 pub fn sum_group(table: &[(i32, StatLine)], leader: i32, pgid: i32, page_size: u64) -> GroupUsage {
-    let mut members: Vec<i32> = table
+    let mut frontier: Vec<i32> = table
         .iter()
         .filter(|(pid, line)| line.pgrp == pgid || *pid == leader)
         .map(|(pid, _)| *pid)
         .collect();
-    // descendants by parent pid, which reaches helpers that left the group with `setsid`
-    let mut frontier = vec![leader];
+    let mut members: HashSet<i32> = frontier.iter().copied().collect();
+    // The leader may have exited while /proc was being read.
+    if !members.contains(&leader) {
+        frontier.push(leader);
+    }
     while let Some(parent) = frontier.pop() {
         for (pid, line) in table {
-            if line.ppid == parent && !members.contains(pid) {
-                members.push(*pid);
+            if line.ppid == parent && members.insert(*pid) {
                 frontier.push(*pid);
             }
         }
@@ -519,6 +521,25 @@ mod tests {
         );
         // a pgid with nobody in it and a leader that is gone
         assert_eq!(sum_group(&table, 999, 999, 4096), GroupUsage::default());
+    }
+
+    #[test]
+    fn group_usage_counts_a_descendant_with_a_non_utf8_name() {
+        let helper = parse_stat(b"102 (worker \xff) S 101 102 102 0 -1 4194560 100 0 0 0 5 6 0 0 20 0 7 0 12345 1000000 321").unwrap();
+        let table = [
+            (100, line(1, 100, 2, 10)),
+            (101, line(100, 100, 1, 20)),
+            (102, helper),
+        ];
+
+        assert_eq!(
+            sum_group(&table, 100, 100, 4096),
+            GroupUsage {
+                processes: 3,
+                threads: 10,
+                rss_bytes: 351 * 4096,
+            }
+        );
     }
 
     #[test]
