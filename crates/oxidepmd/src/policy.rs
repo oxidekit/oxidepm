@@ -20,6 +20,7 @@ use oxidepm_core::actor::{ActorClass, ActorId, Via};
 use oxidepm_core::{Error, Result, Tier};
 use oxidepm_ipc::{Envelope, Request};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::{self, Write};
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
@@ -318,7 +319,7 @@ pub fn log_request(ctx: &ReqCtx, request: &Request) {
         .map_or_else(|| "?".to_string(), |p| p.to_string());
     let line = format!(
         "request {} {} actor={} class={} via={} pid={}",
-        ctx.request_id,
+        log_field(&ctx.request_id),
         request.name(),
         ctx.actor.wire(),
         ctx.actor.class.as_str(),
@@ -330,6 +331,35 @@ pub fn log_request(ctx: &ReqCtx, request: &Request) {
     } else {
         info!("{}", line);
     }
+}
+
+/// Render a client-controlled field on one line, stopping at the byte limit even
+/// when the value is formatted in pieces (such as a selector or an error).
+pub(crate) fn log_field(value: impl fmt::Display) -> String {
+    const MAX_BYTES: usize = 256;
+    const ELLIPSIS: &str = "…";
+
+    #[derive(Default)]
+    struct Field(String);
+
+    impl Write for Field {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            for ch in text.chars() {
+                let escaped = ch.escape_debug();
+                let bytes: usize = escaped.clone().map(char::len_utf8).sum();
+                if self.0.len() + bytes > MAX_BYTES - ELLIPSIS.len() {
+                    self.0.push_str(ELLIPSIS);
+                    return Err(fmt::Error);
+                }
+                self.0.extend(escaped);
+            }
+            Ok(())
+        }
+    }
+
+    let mut field = Field::default();
+    let _ = write!(field, "{value}");
+    field.0
 }
 
 /// What the gate needs to know about one app a request acts on, read from the markers on the

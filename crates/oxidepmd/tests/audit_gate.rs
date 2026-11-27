@@ -68,6 +68,103 @@ async fn wait_lines<T>(dir: &Path, file: &str, pick: impl Fn(&[Value]) -> Option
     }
 }
 
+#[test]
+fn daemon_log_bounds_and_escapes_client_strings() {
+    use common::daemon::DaemonProc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let mut daemon = DaemonProc::spawn_with_env(&home, &[("RUST_LOG", "debug")]);
+    let suffix = "a".repeat(1024);
+    let id = format!("request\n\r\x1b[0m{suffix}");
+    let client = format!("client\n\r\x1b[0m{suffix}");
+    let reply = daemon.rpc_on(
+        &daemon.socket(),
+        &id,
+        None,
+        json!({ "type": "hello", "client": client }),
+    );
+    assert_eq!(reply["request_id"], id);
+    assert_eq!(reply["response"]["type"], "hello");
+
+    let name = format!("app\n\r\x1b[0m{suffix}");
+    let mut spec = oxidepm_core::AppSpec::new(
+        "app".into(),
+        oxidepm_core::Runtime::CMD,
+        "/bin/true".into(),
+        dir.path().to_path_buf(),
+    );
+    spec.name = name.clone();
+    assert_eq!(
+        daemon.rpc(json!({ "type": "start", "spec": spec }))["type"],
+        "error"
+    );
+    let reply = daemon.rpc(json!({ "type": "describe", "selector": selector(&name) }));
+    assert_eq!(reply["type"], "error");
+    assert_eq!(daemon.rpc(json!({ "type": "kill" }))["type"], "ok");
+    assert!(daemon.wait_exit().success());
+
+    let log: String = std::fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("daemon.log")
+        })
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect();
+    for prefix in [
+        "request request",
+        "Hello from client",
+        "Handling start request for: app",
+        "Handling describe request for: app",
+    ] {
+        assert!(
+            log.contains(&format!(r"{prefix}\n\r\u{{1b}}[0m")),
+            "{prefix}"
+        );
+    }
+    assert!(!log.contains('\r'));
+    assert!(!log.contains('\x1b'));
+    assert!(!log.contains(&suffix));
+}
+
+#[test]
+fn non_human_ping_and_hello_share_the_request_budget() {
+    use common::daemon::DaemonProc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonProc::spawn(&dir.path().join("home"));
+    daemon.wait_for_boot();
+    let mut limited = [false; 2];
+    for n in 0..300 {
+        let (request, expected) = if n % 2 == 0 {
+            (json!({ "type": "ping" }), "pong")
+        } else {
+            (json!({ "type": "hello", "client": "test" }), "hello")
+        };
+        let reply = daemon.rpc_on(&daemon.socket(), "poll", Some("ai:poller"), request);
+        let response = &reply["response"];
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "E_RATE_LIMITED", "{response}");
+            limited[n % 2] = true;
+        } else {
+            assert_eq!(response["type"], expected, "{response}");
+        }
+        if limited == [true, true] {
+            break;
+        }
+    }
+    assert_eq!(limited, [true, true]);
+    assert_eq!(daemon.rpc(json!({ "type": "ping" }))["type"], "pong");
+    assert_eq!(
+        daemon.rpc(json!({ "type": "hello", "client": "cli" }))["type"],
+        "hello"
+    );
+}
+
 #[tokio::test]
 async fn decision_is_durable_before_the_effect() {
     let h = Harness::new().await;

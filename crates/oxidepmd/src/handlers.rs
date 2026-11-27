@@ -27,7 +27,7 @@ use crate::adapters::host::AdapterHost;
 use crate::adapters::invoke::{InvokeRun, ResolvedVerb};
 use crate::adapters::session::SessionRun;
 use crate::audit::{self, ActorView, Audit, Deny, Lanes, Phase, Record, Target};
-use crate::policy::{self, Authorized, ReqCtx, RestartLimiter};
+use crate::policy::{self, log_field, Authorized, ReqCtx, RestartLimiter};
 use crate::supervisor::Supervisor;
 
 /// Test hook: holds the next request between its authorization and its execution.
@@ -123,11 +123,14 @@ impl RequestHandler {
         self.audit.close(audit::DRAIN_BUDGET).await;
     }
 
-    /// A `ping` or `hello` of a non-human actor: counted into the folded polling line.
-    pub fn note_poll(&self, ctx: &ReqCtx, op: &str) {
+    /// Charge a `ping` or `hello` and count it into the folded polling line.
+    pub(crate) fn admit_poll(&self, ctx: &ReqCtx, op: &str) -> Result<()> {
         if !matches!(ctx.actor.class, ActorClass::Human | ActorClass::System) {
-            self.audit.poll(&ctx.actor, &view_of(ctx), op);
+            let view = view_of(ctx);
+            self.audit.check_rate(&ctx.actor, &view, Tier::Safe)?;
+            self.audit.poll(&ctx.actor, &view, op);
         }
+        Ok(())
     }
 
     /// Test hook: the next request that passes the gate waits between `authorize` and `execute`
@@ -325,7 +328,11 @@ impl RequestHandler {
     ) -> Result<(Authorized, Vec<Target>)> {
         let grant = ctx.grant.as_ref();
         let denied = |e: Error| {
-            warn!("request {} denied: {}", ctx.request_id, e);
+            warn!(
+                "request {} denied: {}",
+                log_field(&ctx.request_id),
+                log_field(&e)
+            );
             e
         };
         policy::stage1(&ctx.actor, grant, classified).map_err(denied)?;
@@ -686,7 +693,11 @@ impl RequestHandler {
         let (resolved, cwd) = match found {
             Ok(found) => found,
             Err(e) => {
-                warn!("request {} denied: {}", ctx.request_id, e);
+                warn!(
+                    "request {} denied: {}",
+                    log_field(&ctx.request_id),
+                    log_field(&e)
+                );
                 let mut record = decision_record(
                     self.audit.next_req(),
                     ctx,
@@ -904,7 +915,11 @@ impl RequestHandler {
             let (resolved, cwd) = match found {
                 Ok(found) => found,
                 Err(e) => {
-                    warn!("request {} denied: {}", ctx.request_id, e);
+                    warn!(
+                        "request {} denied: {}",
+                        log_field(&ctx.request_id),
+                        log_field(&e)
+                    );
                     let mut record = decision_record(
                         self.audit.next_req(),
                         ctx,
@@ -1002,7 +1017,7 @@ impl RequestHandler {
                 Ok(true) => ItemResult::changed(id, name),
                 Ok(false) => ItemResult::unchanged(id, name),
                 Err(e) => {
-                    error!("Error {} {}: {}", verb, name, e);
+                    error!("Error {} {}: {}", verb, log_field(&name), log_field(&e));
                     ItemResult::failed(id, name, &e)
                 }
             });
@@ -1012,7 +1027,7 @@ impl RequestHandler {
 
     /// Handle start request
     async fn start(&self, spec: AppSpec) -> Result<Response> {
-        info!("Handling start request for: {}", spec.name);
+        info!("Handling start request for: {}", log_field(&spec.name));
 
         let name = spec.name.clone();
         let id = self.supervisor.start(spec).await?;
@@ -1046,7 +1061,11 @@ impl RequestHandler {
                     },
                 },
                 Err(e) => {
-                    error!("Error starting {}: {}", item.name, e);
+                    error!(
+                        "Error starting {}: {}",
+                        log_field(&item.name),
+                        log_field(&e)
+                    );
                     ItemResult::failed(item.id, item.name, &e)
                 }
             })
@@ -1056,7 +1075,7 @@ impl RequestHandler {
 
     /// Handle stop request
     async fn stop(&self, selector: &Selector, ids: &[u32]) -> Result<Response> {
-        info!("Handling stop request for: {}", selector);
+        info!("Handling stop request for: {}", log_field(selector));
 
         // dependents before their dependencies, a layer at a time
         let mut items = Vec::with_capacity(ids.len());
@@ -1066,7 +1085,7 @@ impl RequestHandler {
                 Ok(true) => ItemResult::changed(id, name),
                 Ok(false) => ItemResult::unchanged(id, name),
                 Err(e) => {
-                    error!("Error stopping {}: {}", name, e);
+                    error!("Error stopping {}: {}", log_field(&name), log_field(&e));
                     ItemResult::failed(id, name, &e)
                 }
             });
@@ -1079,7 +1098,7 @@ impl RequestHandler {
 
     /// Handle restart request
     async fn restart(&self, selector: &Selector, ids: &[u32]) -> Result<Response> {
-        info!("Handling restart request for: {}", selector);
+        info!("Handling restart request for: {}", log_field(selector));
 
         let supervisor = &self.supervisor;
         let items = self
@@ -1093,7 +1112,7 @@ impl RequestHandler {
 
     /// Handle delete request
     async fn delete(&self, selector: &Selector, ids: &[u32]) -> Result<Response> {
-        info!("Handling delete request for: {}", selector);
+        info!("Handling delete request for: {}", log_field(selector));
 
         let supervisor = &self.supervisor;
         let items = self
@@ -1233,7 +1252,7 @@ impl RequestHandler {
     /// Handle reload request. A reload is a restart (there is no rolling reload), and the
     /// response says so.
     async fn reload(&self, selector: &Selector, ids: &[u32]) -> Result<Response> {
-        info!("Handling reload request for: {}", selector);
+        info!("Handling reload request for: {}", log_field(selector));
 
         let supervisor = &self.supervisor;
         let items = self
@@ -1248,7 +1267,7 @@ impl RequestHandler {
 
     /// Handle flush request (truncate log files)
     async fn flush(&self, selector: &Selector, ids: &[u32]) -> Result<Response> {
-        info!("Handling flush request for: {}", selector);
+        info!("Handling flush request for: {}", log_field(selector));
 
         let items = self
             .for_each(ids, "flushing logs of", |id| self.flush_logs_for_app(id))
@@ -1274,7 +1293,7 @@ impl RequestHandler {
         protected: Option<bool>,
         ai_control: Option<bool>,
     ) -> Result<Response> {
-        info!("Handling set_policy request for: {}", selector);
+        info!("Handling set_policy request for: {}", log_field(selector));
         let items = self
             .supervisor
             .set_markers(ids, protected, ai_control)
@@ -1329,7 +1348,7 @@ impl RequestHandler {
 
     /// Handle describe request (show what command would run)
     async fn describe(&self, selector: Selector, reveal: bool) -> Result<Response> {
-        info!("Handling describe request for: {}", selector);
+        info!("Handling describe request for: {}", log_field(&selector));
 
         let app = self.one_app(&selector).await?;
         let spec = redact_spec(&app.spec, reveal);

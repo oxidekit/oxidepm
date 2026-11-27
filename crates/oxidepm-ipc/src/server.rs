@@ -543,7 +543,7 @@ impl IpcConnection {
                 }
                 let incoming = classify_line(&String::from_utf8_lossy(&buf));
                 if let Incoming::Request(envelope) = &incoming {
-                    debug!("Received request: {:?}", envelope);
+                    debug!("Received IPC request: {}", envelope.request.name());
                 }
                 Ok(Some(incoming))
             }
@@ -553,7 +553,7 @@ impl IpcConnection {
     /// Send a response envelope.
     pub async fn send_response(&mut self, response: &ResponseEnvelope) -> Result<()> {
         self.send_json(serde_json::to_string(response)?).await?;
-        debug!("Sent response: {:?}", response);
+        debug!("Sent IPC response");
         Ok(())
     }
 

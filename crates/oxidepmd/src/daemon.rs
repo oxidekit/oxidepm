@@ -23,7 +23,7 @@ use crate::adapters::hostapi::Dispatch;
 use crate::adapters::runtime::DaemonRuntimes;
 use crate::handlers::{self, RequestHandler};
 use crate::lock::DaemonLock;
-use crate::policy::{self, PeerCred, ReqCtx};
+use crate::policy::{self, log_field, PeerCred, ReqCtx};
 use crate::supervisor::{EventSink, RuntimeSourceRef, Supervisor, SupervisorConfig, CURRENT_ACTOR};
 
 /// What `oxidepmd --check` verifies: the home directory can be prepared, the database opens
@@ -230,21 +230,22 @@ impl Core {
 
     /// The one place a request becomes a response, and the one place an error does.
     ///
-    /// `Ping` and `Hello` need no app state and are open to every actor. Everything else goes
+    /// `Ping` and `Hello` need no app state and only go through the rate check. Everything else goes
     /// through the gate (`RequestHandler::guarded`): the policy decides, once, which apps the
     /// request may act on, and the handler acts on those. `Kill` is the same routine as a
     /// signal, after the same gate.
     async fn dispatch(self: &Arc<Self>, ctx: &ReqCtx, request: Request) -> Response {
+        if matches!(request, Request::Ping | Request::Hello { .. }) {
+            if let Err(e) = self.handler.admit_poll(ctx, request.name()) {
+                return Response::from_error(&e);
+            }
+        }
         policy::log_request(ctx, &request);
 
         match &request {
-            Request::Ping => {
-                self.handler.note_poll(ctx, "ping");
-                return Response::Pong;
-            }
+            Request::Ping => return Response::Pong,
             Request::Hello { client } => {
-                info!("Hello from {}", client);
-                self.handler.note_poll(ctx, "hello");
+                info!("Hello from {}", log_field(client));
                 return Response::Hello {
                     protocol_min: PROTOCOL_MIN,
                     protocol_max: PROTOCOL_VERSION,
@@ -295,7 +296,11 @@ impl Core {
         // per-app lock, everything else runs concurrently.
         let result = self.handler.guarded(ctx, request).await;
         result.unwrap_or_else(|e| {
-            warn!("Request {} failed: {}", ctx.request_id, e);
+            warn!(
+                "Request {} failed: {}",
+                log_field(&ctx.request_id),
+                log_field(&e)
+            );
             // A request that passed the check above and then met a shutdown that closed the
             // database under it is answered as what it is, not with a database error.
             if self.is_shutting_down() {
@@ -655,7 +660,11 @@ async fn serve_connection(core: Arc<Core>, mut conn: oxidepm_ipc::server::IpcCon
                                 )
                                 .await
                                 .unwrap_or_else(|e| {
-                                    warn!("Request {} failed: {}", ctx.request_id, e);
+                                    warn!(
+                                        "Request {} failed: {}",
+                                        log_field(&ctx.request_id),
+                                        log_field(&e)
+                                    );
                                     Response::from_error(&e)
                                 })
                         };
@@ -766,7 +775,11 @@ async fn serve_invoke(
     let (resolved, cwd, ticket) = match prepared {
         Ok(ok) => ok,
         Err(e) => {
-            warn!("Request {} failed: {}", ctx.request_id, e);
+            warn!(
+                "Request {} failed: {}",
+                log_field(&ctx.request_id),
+                log_field(&e)
+            );
             return writer
                 .send(&finish(Response::from_error(&e)), relay)
                 .await
@@ -799,7 +812,7 @@ async fn serve_invoke(
                 );
                 if let Err(e) = writer.send(&part, relay).await {
                     // a client that does not read (stopped, or suspended) must not hold the tool
-                    warn!("Request {}: {}; the call is cancelled", ctx.request_id, e);
+                    warn!("Request {}: {}; the call is cancelled", log_field(&ctx.request_id), log_field(&e));
                     alive = false;
                     cancel.cancel();
                 }
@@ -829,7 +842,11 @@ async fn serve_invoke(
         return false;
     }
     let response = result.unwrap_or_else(|e| {
-        warn!("Request {} failed: {}", ctx.request_id, e);
+        warn!(
+            "Request {} failed: {}",
+            log_field(&ctx.request_id),
+            log_field(&e)
+        );
         Response::from_error(&e)
     });
     writer.send(&finish(response), relay).await.is_ok()
