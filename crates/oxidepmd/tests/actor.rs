@@ -358,7 +358,8 @@ async fn cluster_stop_stops_every_child_and_parent() {
         "act-cl-stop-1",
         "act-cl-stop-2",
     ] {
-        assert_eq!(h.state(name).await.status, AppStatus::Stopped, "{name}");
+        // the processes are gone; the state follows once the supervisor has seen each exit
+        h.wait_status(name, AppStatus::Stopped).await;
     }
 }
 
