@@ -1346,7 +1346,17 @@ impl AdapterHost {
             home_file: paths.adapters_db(),
             scratch_base: None,
         };
-        let report = selftest(&launcher, &profile, &env, allow_unenforced)
+        let launcher =
+            tokio::task::spawn_blocking(move || super::proc::open_verified_launcher(&launcher))
+                .await
+                .map_err(|e| {
+                    Error::AdapterUnavailable(format!(
+                        "the launcher integrity check failed to run: {e}"
+                    ))
+                })?
+                .map_err(Error::AdapterUnavailable)?;
+        let launcher_path = PathBuf::from(format!("/proc/self/fd/{}", launcher.as_raw_fd()));
+        let report = selftest(&launcher_path, &profile, &env, allow_unenforced)
             .await
             .map_err(|e| {
                 Error::AdapterUnavailable(format!(

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use nix::fcntl::{openat, renameat, AtFlags, Flock, FlockArg, OFlag};
@@ -160,6 +160,102 @@ fn sha256_hex(file: &mut File) -> std::io::Result<String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+struct InstalledLauncher {
+    path: PathBuf,
+    digest: Result<String, String>,
+}
+
+/// Pin the launcher shipped next to the daemon once, when the host config is created.
+fn installed_launcher() -> Option<&'static InstalledLauncher> {
+    static LAUNCHER: OnceLock<Option<InstalledLauncher>> = OnceLock::new();
+    LAUNCHER
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            let path = exe.parent()?.join("oxidepm-sandbox");
+            let digest = open_launcher(&path).and_then(|mut file| sha256_hex(&mut file));
+            if digest
+                .as_ref()
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+            {
+                return None;
+            }
+            let digest = digest.map_err(|e| format!("cannot verify {}: {e}", path.display()));
+            Some(InstalledLauncher { path, digest })
+        })
+        .as_ref()
+}
+
+pub(super) fn installed_launcher_path() -> Option<PathBuf> {
+    installed_launcher().map(|launcher| launcher.path.clone())
+}
+
+pub(super) fn launcher_was_verified(path: &Path) -> bool {
+    match installed_launcher().filter(|launcher| launcher.path == path) {
+        Some(launcher) => launcher.digest.is_ok(),
+        None => open_launcher(path).is_ok(),
+    }
+}
+
+fn open_launcher(path: &Path) -> io::Result<File> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("no launcher directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("no launcher file name"))?;
+    let parent = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW).bits())
+        .open(dir)?;
+    let fd = openat(
+        Some(parent.as_raw_fd()),
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?;
+    // SAFETY: openat returned a new descriptor owned by this File.
+    let file = unsafe { File::from_raw_fd(fd) };
+    if parent.metadata()?.mode() & 0o022 != 0 {
+        return Err(io::Error::other(
+            "the launcher directory is writable by group or others",
+        ));
+    }
+    let meta = file.metadata()?;
+    let uid = nix::unistd::geteuid().as_raw();
+    if !meta.is_file() || meta.mode() & 0o111 == 0 {
+        return Err(io::Error::other(
+            "the launcher must be a regular executable",
+        ));
+    }
+    if (meta.uid() != 0 && meta.uid() != uid) || meta.mode() & 0o022 != 0 {
+        return Err(io::Error::other(
+            "the launcher has unsafe ownership or permissions",
+        ));
+    }
+    Ok(file)
+}
+
+/// Reopen the launcher and verify the same file that will be passed to exec.
+pub(super) fn open_verified_launcher(path: &Path) -> Result<File, String> {
+    let expected = installed_launcher()
+        .filter(|launcher| launcher.path == path)
+        .map(|launcher| launcher.digest.as_ref())
+        .transpose()
+        .map_err(Clone::clone)?;
+    let error = |e| format!("cannot verify {}: {e}", path.display());
+    let mut file = open_launcher(path).map_err(error)?;
+    if let Some(expected) = expected {
+        let actual = sha256_hex(&mut file).map_err(error)?;
+        if &actual != expected {
+            return Err(format!(
+                "{} does not match the launcher digest recorded at daemon startup",
+                path.display()
+            ));
+        }
+    }
+    Ok(file)
 }
 
 /// Open the executable (never through a symbolic link), hash the open descriptor and compare the
@@ -380,9 +476,18 @@ impl AdapterProc {
     ) -> Result<AdapterProc, ProcError> {
         let exec = launch.exec.clone();
         let expected = launch.exe_sha256.clone();
-        let exe = tokio::task::spawn_blocking(move || open_verified(&exec, &expected))
-            .await
-            .map_err(|e| ProcError::Spawn(format!("the integrity check failed to run: {e}")))??;
+        let launcher = launch.sandbox.as_ref().map(|s| s.launcher.clone());
+        let (exe, launcher) = tokio::task::spawn_blocking(move || {
+            let exe = open_verified(&exec, &expected)?;
+            let launcher = launcher
+                .as_deref()
+                .map(open_verified_launcher)
+                .transpose()
+                .map_err(ProcError::Sandbox)?;
+            Ok::<_, ProcError>((exe, launcher))
+        })
+        .await
+        .map_err(|e| ProcError::Spawn(format!("the integrity check failed to run: {e}")))??;
 
         ensure_state_dir(&launch.state_dir).map_err(|e| {
             ProcError::Spawn(format!(
@@ -423,11 +528,15 @@ impl AdapterProc {
             args: &[],
             env: &env,
             cwd: &launch.state_dir,
-            sandbox: launch.sandbox.as_ref().map(|s| SandboxLaunch {
-                launcher: &s.launcher,
-                profile_json: socket_profile.as_deref().unwrap_or(&s.profile_json),
-                allow_unenforced: s.allow_unenforced,
-            }),
+            sandbox: launch
+                .sandbox
+                .as_ref()
+                .zip(launcher.as_ref())
+                .map(|(s, launcher)| SandboxLaunch {
+                    launcher,
+                    profile_json: socket_profile.as_deref().unwrap_or(&s.profile_json),
+                    allow_unenforced: s.allow_unenforced,
+                }),
             terminal: session.as_ref().map(|s| (&s.terminal.0, &s.terminal.1)),
         })
         .map_err(|e| ProcError::Spawn(e.to_string()))?;

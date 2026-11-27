@@ -27,7 +27,9 @@ use super::entry::{AdapterEntry, EntryConfig, EntrySpec, EntryState, FailReason,
 use super::events::EventHub;
 use super::hostapi::{Dispatch, HostApi, HostLink};
 use super::peer::{self, AdapterProc, ProcReader};
-use super::proc::{EnvSource, Launch, SandboxSetup};
+use super::proc::{
+    installed_launcher_path, launcher_was_verified, EnvSource, Launch, SandboxSetup,
+};
 use super::store::AdapterStore;
 use crate::audit::Audit;
 use crate::policy::{AdapterGrant, PeerLabel};
@@ -139,12 +141,7 @@ const ADAPTER_PATH: [&str; 3] = ["/usr/local/bin", "/usr/bin", "/bin"];
 /// The launcher installed next to this executable (the three binaries are installed, staged and
 /// updated together).
 pub fn find_launcher() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join("oxidepm-sandbox");
-    std::fs::metadata(&candidate)
-        .ok()
-        .filter(|m| m.is_file())
-        .map(|_| candidate)
+    installed_launcher_path()
 }
 
 impl HostConfig {
@@ -277,7 +274,11 @@ impl AdapterHost {
             no_new_privs: caps.no_new_privs,
             ptrace_scope: caps.ptrace_scope,
             cgroup_delegated: caps.cgroup_delegated,
-            launcher: self.cfg.launcher.is_some(),
+            launcher: self
+                .cfg
+                .launcher
+                .as_deref()
+                .is_some_and(launcher_was_verified),
             summary: caps.summary(),
         }
     }

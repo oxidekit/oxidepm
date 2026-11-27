@@ -431,7 +431,7 @@ async fn five_hundred_concurrent_launcher_spawns_do_not_deadlock() {
 
     let dir = tempfile::tempdir().unwrap();
     let exe = std::fs::File::open(common::fixture::fixture_bin()).unwrap();
-    let launcher = launcher_bin();
+    let launcher = std::fs::File::open(launcher_bin()).unwrap();
     let profile = oxidepm_sandbox::Profile::from_permissions(
         &common::fixture::rig_permissions(
             &json!({ "fs": { "read": [], "write": [] } }),
@@ -1382,6 +1382,78 @@ fn lone_daemon_binary(dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_oxidepmd"), &bin).unwrap();
     bin
+}
+
+#[test]
+fn refuses_an_unsafe_sandbox_launcher() {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = lone_daemon_binary(tmp.path());
+    let dir = bin.parent().unwrap();
+    let launcher = dir.join("oxidepm-sandbox");
+    let home = tmp.path().join("home");
+    let real = launcher_bin();
+    let check = |case: &str| {
+        let daemon = DaemonProc::spawn_binary(&bin, &home, &[]);
+        let status = daemon.rpc(json!({"type": "daemon_status"}));
+        assert_eq!(status["sandbox"]["launcher"], false, "{case}: {status}");
+    };
+
+    symlink(&real, &launcher).unwrap();
+    check("symbolic link");
+    fs::remove_file(&launcher).unwrap();
+
+    fs::copy(&real, &launcher).unwrap();
+    fs::set_permissions(&launcher, Permissions::from_mode(0o775)).unwrap();
+    check("group-writable file");
+    fs::set_permissions(&launcher, Permissions::from_mode(0o644)).unwrap();
+    check("non-executable file");
+
+    fs::set_permissions(&launcher, Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(dir, Permissions::from_mode(0o775)).unwrap();
+    check("group-writable directory");
+}
+
+#[test]
+fn refuses_a_sandbox_launcher_changed_since_startup() {
+    use common::adapter_kit::{IndexOpts, Kit, Pkg};
+    use std::fs::{self, OpenOptions, Permissions};
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let package = Pkg::tool("plain", "0.1.0").package();
+    let kit = Kit::new();
+    kit.publish(&[&package], &IndexOpts::default());
+    let bin = lone_daemon_binary(kit.dir.path());
+    let launcher = bin.with_file_name("oxidepm-sandbox");
+    fs::copy(launcher_bin(), &launcher).unwrap();
+    fs::set_permissions(&launcher, Permissions::from_mode(0o755)).unwrap();
+    let env = kit.daemon_env();
+    let env: Vec<_> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let daemon = DaemonProc::spawn_binary(&bin, &kit.home, &env);
+    let status = daemon.rpc(json!({"type": "daemon_status"}));
+    assert_eq!(status["sandbox"]["launcher"], true, "{status}");
+    let imported = kit.run(&["adapter", "import", "plain"]);
+    assert_eq!(imported.code, 0, "{}", imported.all());
+
+    OpenOptions::new()
+        .append(true)
+        .open(&launcher)
+        .unwrap()
+        .write_all(b"updated")
+        .unwrap();
+    let run = kit.run(&[
+        "adapter",
+        "enable",
+        "plain",
+        "--accept",
+        &package.fingerprint(),
+        "--allow-unenforced",
+    ]);
+    assert_eq!(run.code, 1, "{}", run.all());
+    assert!(run.stderr.contains("digest"), "{}", run.all());
 }
 
 #[tokio::test]

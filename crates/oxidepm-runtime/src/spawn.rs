@@ -91,8 +91,8 @@ pub fn spawn_group(plan: &LaunchPlan, env: &ChildEnv) -> Result<GroupChild> {
 
 /// The sandbox launcher that stands between the daemon and an adapter.
 pub struct SandboxLaunch<'a> {
-    /// The launcher binary, `oxidepm-sandbox`.
-    pub launcher: &'a Path,
+    /// The opened and verified launcher binary, `oxidepm-sandbox`.
+    pub launcher: &'a std::fs::File,
     /// The profile it applies, as JSON.
     pub profile_json: &'a str,
     /// Go on when the kernel cannot enforce what the profile requires (the user accepted that).
@@ -136,9 +136,10 @@ const LAUNCHER_EXE_FD: std::os::fd::RawFd = 3;
 /// nothing. That works for an ELF executable, which is all import accepts (a `#!` script cannot be
 /// executed from a descriptor).
 pub fn spawn_adapter(launch: &AdapterLaunch<'_>) -> Result<GroupChild> {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     let fd = launch.exe.as_raw_fd();
+    let launcher_fd;
     let mut cmd = match &launch.sandbox {
         None => {
             let mut cmd = Command::new(format!("/proc/self/fd/{fd}"));
@@ -146,7 +147,19 @@ pub fn spawn_adapter(launch: &AdapterLaunch<'_>) -> Result<GroupChild> {
             cmd
         }
         Some(sandbox) => {
-            let mut cmd = Command::new(sandbox.launcher);
+            // Keep the launcher's descriptor clear of the slot reserved for the adapter.
+            let raw_fd = nix::fcntl::fcntl(
+                sandbox.launcher.as_raw_fd(),
+                nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(LAUNCHER_EXE_FD + 1),
+            )
+            .map_err(|e| {
+                Error::ProcessStartFailed(format!(
+                    "Cannot duplicate the sandbox launcher descriptor: {e}"
+                ))
+            })?;
+            // SAFETY: fcntl returned a new descriptor owned by this OwnedFd.
+            launcher_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let mut cmd = Command::new(format!("/proc/self/fd/{}", launcher_fd.as_raw_fd()));
             cmd.arg("run").arg("--profile").arg(sandbox.profile_json);
             if sandbox.allow_unenforced {
                 cmd.arg("--allow-unenforced");
