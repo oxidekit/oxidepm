@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use oxidepm_adapter_proto::signing::verify_bundle_checksums;
 use oxidepm_adapter_proto::{
-    manifest::Rule, official_keys, verify_index, Index, IndexKey, VerifiedIndex, INDEX_MAX_BYTES,
+    manifest::Rule, official_keys, verify_index, Index, IndexKey, SignedBy, VerifiedIndex,
+    INDEX_MAX_BYTES,
 };
 use oxidepm_core::release_bundle::{self, ReleaseBundle};
 use oxidepm_fetch::{fetch_bytes, FetchOpts};
@@ -124,6 +126,21 @@ pub fn bundle_dir() -> Result<PathBuf> {
 /// Read the release's local catalog after checking it against the bundle checksum list.
 pub fn bundled_index() -> Result<(ReleaseBundle, Index)> {
     read_bundled_index(bundle_dir()?)
+}
+
+pub(super) fn verify_bundle_signature(
+    bundle: &ReleaseBundle,
+    target: &str,
+) -> Result<SignedBy, String> {
+    let signature = bundle.read_signature().map_err(|e| e.to_string())?;
+    verify_bundle_checksums(
+        bundle.checksums_bytes(),
+        &signature,
+        concat!("v", env!("CARGO_PKG_VERSION")),
+        target,
+        &trusted_keys(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub(super) fn read_bundled_index(dir: PathBuf) -> Result<(ReleaseBundle, Index)> {

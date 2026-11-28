@@ -1802,6 +1802,10 @@ mod tests {
         let tarball = archive(&[
             ("oxidepm", &cli),
             ("share/oxidepm/adapters/SHA256SUMS", b"checksums"),
+            (
+                "share/oxidepm/adapters/SHA256SUMS.minisig",
+                b"bundle signature",
+            ),
             ("share/oxidepm/adapters/nested/adapter.tar.gz", b"archive"),
         ]);
         server.publish(
@@ -1816,6 +1820,7 @@ mod tests {
         let owner = fs::metadata(&fx.bin).unwrap().uid();
         for (path, mode) in [
             ("share/oxidepm/adapters/SHA256SUMS", 0o644),
+            ("share/oxidepm/adapters/SHA256SUMS.minisig", 0o644),
             ("share/oxidepm/adapters/nested/adapter.tar.gz", 0o644),
             ("share/oxidepm/adapters/nested", 0o755),
             ("share/oxidepm/adapters", 0o755),
@@ -1826,6 +1831,15 @@ mod tests {
             assert_eq!(metadata.mode() & 0o7777, mode, "{path}");
             assert_eq!(metadata.uid(), owner, "{path}");
         }
+        assert_eq!(
+            fs::read(
+                fx.dir
+                    .path()
+                    .join("share/oxidepm/adapters/SHA256SUMS.minisig")
+            )
+            .unwrap(),
+            b"bundle signature"
+        );
     }
 
     #[tokio::test]

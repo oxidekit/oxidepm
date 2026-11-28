@@ -56,6 +56,8 @@ pub enum SigError {
     Legacy,
     #[error("the signature's trusted comment does not describe this index: {0}")]
     CommentMismatch(String),
+    #[error("the bundle signature's trusted comment is {actual:?}, expected {expected:?}")]
+    BundleCommentMismatch { actual: String, expected: String },
 }
 
 /// The key id as minisign prints it: the eight bytes in reverse order, upper-case hex.
@@ -156,6 +158,30 @@ pub fn verify_minisign(
         key_id: key.key_id.clone(),
         trusted_comment: signature.trusted_comment().to_string(),
     })
+}
+
+/// The trusted comment for this release's adapter bundle on one target.
+pub fn bundle_trusted_comment(tag: &str, target: &str) -> String {
+    format!("oxidepm release bundle tag={tag} target={target}")
+}
+
+/// Verify the checksum list and its binding to the release tag and target.
+pub fn verify_bundle_checksums(
+    checksums: &[u8],
+    sig_text: &str,
+    tag: &str,
+    target: &str,
+    keys: &[IndexKey],
+) -> Result<SignedBy, SigError> {
+    let signed = verify_minisign(checksums, sig_text, keys)?;
+    let expected = bundle_trusted_comment(tag, target);
+    if signed.trusted_comment != expected {
+        return Err(SigError::BundleCommentMismatch {
+            actual: signed.trusted_comment,
+            expected,
+        });
+    }
+    Ok(signed)
 }
 
 /// The trusted comment a signature of this index must carry.

@@ -6,7 +6,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use oxidepm_adapter_proto::{host_target, Manifest, ValidateCtx, MANIFEST_MAX_BYTES};
+use oxidepm_adapter_proto::{
+    host_target, Manifest, Rule, SignedBy, ValidateCtx, MANIFEST_MAX_BYTES,
+};
 use oxidepm_core::release_bundle;
 use oxidepm_fetch::{
     extract_tar_gz, fetch_bytes, fetch_verified, hex, Expect, ExtractLimits, FetchError,
@@ -39,8 +41,8 @@ pub enum Source {
 pub enum Trust {
     /// The archive is covered by the index signature of this key.
     Signed { key_id: String },
-    /// The archive matches the checksum list shipped with the installed release.
-    Bundled,
+    /// The archive matches the installed bundle's checksum list.
+    Bundled { signature: Result<SignedBy, String> },
     /// The user pinned the sha256 of the archive.
     Pinned,
 }
@@ -215,8 +217,11 @@ fn open_archive(
     let bytes = read_manifest_bytes(staging.path())?;
     let manifest = Manifest::parse(&bytes).map_err(|e| coded(e.rule.error_code(), e.detail))?;
     let mut ctx = ValidateCtx::new(daemon_version());
-    ctx.signed_by_embedded_key = matches!(trust, Trust::Signed { .. });
-    ctx.allow_reserved_name = opts.allow_reserved_name || *trust == Trust::Bundled;
+    ctx.signed_by_embedded_key = matches!(
+        trust,
+        Trust::Signed { .. } | Trust::Bundled { signature: Ok(_) }
+    );
+    ctx.allow_reserved_name = opts.allow_reserved_name;
     fn strs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
@@ -232,7 +237,16 @@ fn open_archive(
     ctx.builtin_verbs = &builtin;
     manifest
         .validate(&ctx)
-        .map_err(|e| coded(e.rule.error_code(), e.detail))?;
+        .map_err(|mut e| {
+            if let (Rule::ReservedName, Trust::Bundled { signature: Err(reason) }) =
+                (e.rule, trust)
+            {
+                e.detail.push_str(&format!(
+                    ". Could not verify the bundle signature: {reason}. Use --allow-reserved-name to import explicitly"
+                ));
+            }
+            coded(e.rule.error_code(), e.detail)
+        })?;
     manifest
         .check_exec_file(staging.path())
         .map_err(|e| coded(e.rule.error_code(), e.detail))?;
@@ -328,7 +342,9 @@ async fn stage_indexed(name: &str, bundled: bool, opts: &StageOpts<'_>) -> Resul
             ));
         }
         (
-            Trust::Bundled,
+            Trust::Bundled {
+                signature: index_src::verify_bundle_signature(bundle, &target),
+            },
             format!("bundle {}", bundle.path().display()),
             "bundled",
         )
@@ -473,10 +489,16 @@ impl Staged {
                 "signed by key {key_id} (official). Archive sha256 {} verified. Program sha256 {}",
                 self.archive_sha256, self.exe_sha256
             ),
-            Trust::Bundled => format!(
-                "bundled with this release. Archive sha256 {} verified. Program sha256 {}",
-                self.archive_sha256, self.exe_sha256
-            ),
+            Trust::Bundled { signature } => {
+                let status = match signature {
+                    Ok(signed) => format!("Bundle signature verified with key {}", signed.key_id),
+                    Err(_) => "Bundle signature unverified".to_string(),
+                };
+                format!(
+                    "bundled with this release. Archive sha256 {} verified. Program sha256 {}. {status}",
+                    self.archive_sha256, self.exe_sha256
+                )
+            }
             Trust::Pinned => format!(
                 "pinned by you: sha256 {}. Program sha256 {}. No signature",
                 self.archive_sha256, self.exe_sha256

@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 
 pub const DIRECTORY: &str = "share/oxidepm/adapters";
 const CHECKSUMS: &str = "SHA256SUMS";
+const SIGNATURE: &str = "SHA256SUMS.minisig";
 const INDEX: &str = "index.json";
 const MAX_CHECKSUMS: u64 = 1024 * 1024;
+const MAX_SIGNATURE: u64 = 16 * 1024;
 
 pub fn directory(executable: &Path) -> io::Result<PathBuf> {
     let prefix = executable
@@ -133,6 +135,7 @@ pub struct ReleaseBundle {
     directory: File,
     uid: u32,
     checksums: BTreeMap<String, String>,
+    checksums_text: String,
 }
 
 impl ReleaseBundle {
@@ -170,11 +173,31 @@ impl ReleaseBundle {
             directory,
             uid,
             checksums,
+            checksums_text: text,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// The exact bytes from which the checksum list was parsed.
+    pub fn checksums_bytes(&self) -> &[u8] {
+        self.checksums_text.as_bytes()
+    }
+
+    /// Read the detached signature from the same checked directory as the checksums.
+    pub fn read_signature(&self) -> io::Result<String> {
+        let mut input = open_regular(&self.directory, &self.dir, SIGNATURE, Some(self.uid))?
+            .take(MAX_SIGNATURE + 1);
+        let mut text = String::new();
+        input
+            .read_to_string(&mut text)
+            .map_err(|e| io::Error::new(e.kind(), format!("cannot read {SIGNATURE}: {e}")))?;
+        if input.limit() == 0 {
+            return Err(invalid(format!("{SIGNATURE} is too large")));
+        }
+        Ok(text)
     }
 
     /// Copy the exact bytes checked against the release list. The caller discards the copy on error.
@@ -231,6 +254,51 @@ mod tests {
     fn read_index(dir: PathBuf) -> io::Result<()> {
         ReleaseBundle::read(dir)?.copy_verified("index.json", 1024, io::sink())?;
         Ok(())
+    }
+
+    #[test]
+    fn keeps_the_exact_checksums_read_from_the_bundle() {
+        let (_prefix, dir) = bundle();
+        let path = dir.join(CHECKSUMS);
+        let contents = format!("{:X} *index.json\r\n", Sha256::digest(b"{}"));
+        fs::write(&path, &contents).unwrap();
+        let bundle = ReleaseBundle::read(dir).unwrap();
+        fs::write(path, "").unwrap();
+        assert_eq!(bundle.checksums_bytes(), contents.as_bytes());
+        bundle
+            .copy_verified("index.json", 1024, io::sink())
+            .unwrap();
+    }
+
+    #[test]
+    fn reads_only_regular_bundle_signatures_with_safe_permissions_and_size() {
+        let (prefix, dir) = bundle();
+        let path = dir.join(SIGNATURE);
+        let bundle = ReleaseBundle::read(dir).unwrap();
+        assert_eq!(
+            bundle.read_signature().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+
+        let outside = prefix.path().join("signature");
+        fs::write(&outside, "detached signature").unwrap();
+        symlink(&outside, &path).unwrap();
+        let err = bundle.read_signature().unwrap_err();
+        assert!(err.to_string().contains(SIGNATURE), "{err}");
+        fs::remove_file(&path).unwrap();
+
+        fs::rename(outside, &path).unwrap();
+        assert_eq!(bundle.read_signature().unwrap(), "detached signature");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+        let err = bundle.read_signature().unwrap_err();
+        assert!(
+            err.to_string().contains("group or other write access"),
+            "{err}"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&path, "x".repeat(MAX_SIGNATURE as usize + 1)).unwrap();
+        let err = bundle.read_signature().unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 
     #[test]

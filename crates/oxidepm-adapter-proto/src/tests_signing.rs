@@ -4,8 +4,8 @@ use crate::codes;
 use crate::manifest::Rule;
 use crate::signing::testkeys::TestKey;
 use crate::signing::{
-    is_official_release_trust, official_keys, trusted_comment_for, verify_index, verify_minisign,
-    IndexKey, SigError,
+    bundle_trusted_comment, is_official_release_trust, official_keys, trusted_comment_for,
+    verify_bundle_checksums, verify_index, verify_minisign, IndexKey, SigError,
 };
 use crate::Index;
 
@@ -23,6 +23,69 @@ fn body(sequence: u64) -> Vec<u8> {
 
 fn key_of(k: &TestKey) -> IndexKey {
     IndexKey::parse(&k.public_base64()).unwrap()
+}
+
+#[test]
+fn bundle_signature_covers_checksums_tag_and_target() {
+    let signer = TestKey::generate();
+    let checksums = b"checksums as shipped\n";
+    let tag = "v1.2.3-rc.1";
+    let target = "x86_64-unknown-linux-gnu";
+    let comment = bundle_trusted_comment(tag, target);
+    assert_eq!(
+        comment,
+        "oxidepm release bundle tag=v1.2.3-rc.1 target=x86_64-unknown-linux-gnu"
+    );
+    let keys = [key_of(&signer)];
+    let sig = signer.sign(checksums, &comment);
+
+    let signed = verify_bundle_checksums(checksums, &sig, tag, target, &keys).unwrap();
+    assert_eq!(signed.key_id, signer.key_id());
+    assert_eq!(signed.trusted_comment, comment);
+    assert_eq!(
+        verify_bundle_checksums(b"changed checksums\n", &sig, tag, target, &keys),
+        Err(SigError::Invalid)
+    );
+    for (other_tag, other_target) in [("v1.2.3-rc.2", target), (tag, "aarch64-unknown-linux-gnu")] {
+        let expected = bundle_trusted_comment(other_tag, other_target);
+        assert_eq!(
+            verify_bundle_checksums(checksums, &sig, other_tag, other_target, &keys),
+            Err(SigError::BundleCommentMismatch {
+                actual: comment.clone(),
+                expected,
+            })
+        );
+    }
+}
+
+#[test]
+fn bundle_signature_requires_a_trusted_key_and_prehashed_mode() {
+    let signer = TestKey::generate();
+    let other = TestKey::generate();
+    let checksums = b"bundle checksums\n";
+    let tag = "v1.2.3";
+    let target = "aarch64-unknown-linux-gnu";
+    let comment = bundle_trusted_comment(tag, target);
+    assert_eq!(
+        verify_bundle_checksums(
+            checksums,
+            &other.sign(checksums, &comment),
+            tag,
+            target,
+            &[key_of(&signer)],
+        ),
+        Err(SigError::UnknownKey(other.key_id()))
+    );
+    assert_eq!(
+        verify_bundle_checksums(
+            checksums,
+            &signer.sign_legacy(checksums, &comment),
+            tag,
+            target,
+            &[key_of(&signer)],
+        ),
+        Err(SigError::Legacy)
+    );
 }
 
 #[test]

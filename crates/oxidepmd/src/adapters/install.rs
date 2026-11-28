@@ -26,7 +26,7 @@ use nix::unistd::{geteuid, unlinkat, UnlinkatFlags};
 use oxidepm_adapter_proto::manifest::Rule;
 use oxidepm_adapter_proto::messages::method;
 use oxidepm_adapter_proto::permissions::{HostLevel, HostScope};
-use oxidepm_adapter_proto::signing::is_official_release_trust;
+use oxidepm_adapter_proto::signing::{is_official_release_trust, verify_bundle_checksums};
 use oxidepm_adapter_proto::{
     host_target, Index, Invalid, Kind, Manifest, Permissions, ValidateCtx, VerifiedIndex,
     INDEX_MAX_BYTES,
@@ -393,6 +393,12 @@ fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
         return Err(std::io::Error::other("expected a regular file"));
     }
     Ok(file)
+}
+
+enum SourceSignature {
+    Pinned,
+    SignedIndex,
+    Bundle(std::result::Result<(), String>),
 }
 
 fn installed_release_bundle() -> Result<(ReleaseBundle, Index)> {
@@ -857,7 +863,7 @@ impl AdapterHost {
             .collect();
         let mut ctx = ValidateCtx::new(daemon_version());
         ctx.signed_by_embedded_key = signed;
-        ctx.allow_reserved_name = args.allow_reserved_name || args.source == "bundled";
+        ctx.allow_reserved_name = args.allow_reserved_name;
         ctx.reserved_adapters = &reserved_adapters;
         ctx.reserved_runtimes = &reserved_runtimes;
         ctx.reserved_verbs = &reserved_verbs;
@@ -903,17 +909,31 @@ impl AdapterHost {
                 Error::Internal(format!("the inspection of the staged adapter failed: {e}"))
             })??;
         // 3. where it comes from
-        let (trust, source, signed) = self.check_source(&args, &inspected, &incoming_path).await?;
+        let (trust, source, signature) =
+            self.check_source(&args, &inspected, &incoming_path).await?;
         let manifest = inspected.manifest;
         self.check_revocation(&store, &manifest.name, &inspected.exe_sha256)
             .await?;
 
         // 4. the manifest, with the reserved names and the verbs of the others
         let rows = store.repo().list().await?;
+        let signed = matches!(
+            signature,
+            SourceSignature::SignedIndex | SourceSignature::Bundle(Ok(()))
+        );
         self.with_validate_ctx(&rows, &manifest.name, signed, &args, |vctx| {
             manifest.validate(vctx)
         })
-        .map_err(manifest_error)?;
+        .map_err(|mut e| {
+            if let (Rule::ReservedName, SourceSignature::Bundle(Err(reason))) =
+                (e.rule, signature)
+            {
+                e.detail.push_str(&format!(
+                    ". Could not verify the bundle signature: {reason}. Use --allow-reserved-name to import explicitly"
+                ));
+            }
+            manifest_error(e)
+        })?;
 
         if let Some(old) = rows.iter().find(|r| r.name == manifest.name).cloned() {
             // an installed name is an update: the same rules apply whichever command asked
@@ -998,13 +1018,13 @@ impl AdapterHost {
         })
     }
 
-    /// Check where an adapter comes from: `(trust, source, signed by an embedded key)`.
+    /// Check where an adapter comes from and whether an embedded key signed its source.
     async fn check_source(
         &self,
         args: &InstallArgs,
         inspected: &Inspected,
         root: &Path,
-    ) -> Result<(String, String, bool)> {
+    ) -> Result<(String, String, SourceSignature)> {
         let manifest = &inspected.manifest;
         let exe_sha256 = &inspected.exe_sha256;
         match args.source.as_str() {
@@ -1102,9 +1122,9 @@ impl AdapterHost {
                 let root = root.to_path_buf();
                 let files = inspected.auxiliary_files.clone();
                 let artifact = artifact.clone();
-                let signed = bundle.is_none();
-                tokio::task::spawn_blocking(move || {
-                    if let Some(bundle) = bundle {
+                let bundle = bundle.map(|bundle| (bundle, self.cfg.index_keys.clone()));
+                let signature = tokio::task::spawn_blocking(move || -> Result<_> {
+                    let signature = if let Some((bundle, keys)) = bundle {
                         let name = release_bundle::archive_name(&artifact.url)
                             .map_err(|e| Error::AdapterInvalid(e.to_string()))?;
                         let actual = bundle
@@ -1115,12 +1135,29 @@ impl AdapterHost {
                                 "the bundle catalog has a different sha256 for {name}"
                             )));
                         }
-                    }
-                    verify_auxiliary_files(&root, &files, &artifact.file_sha256)
+                        let verified = bundle.read_signature().map_err(|e| e.to_string()).and_then(
+                            |signature| {
+                                verify_bundle_checksums(
+                                    bundle.checksums_bytes(),
+                                    &signature,
+                                    concat!("v", env!("CARGO_PKG_VERSION")),
+                                    &target,
+                                    &keys,
+                                )
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                            },
+                        );
+                        SourceSignature::Bundle(verified)
+                    } else {
+                        SourceSignature::SignedIndex
+                    };
+                    verify_auxiliary_files(&root, &files, &artifact.file_sha256)?;
+                    Ok(signature)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("the staged file check failed: {e}")))??;
-                Ok((trust, args.source.clone(), signed))
+                Ok((trust, args.source.clone(), signature))
             }
             other if other.starts_with("pinned:") => {
                 if other.len() > 600 || other.chars().any(char::is_control) {
@@ -1128,7 +1165,11 @@ impl AdapterHost {
                         "the source of a pinned adapter is not printable text".to_string(),
                     ));
                 }
-                Ok(("pinned".to_string(), other.to_string(), false))
+                Ok((
+                    "pinned".to_string(),
+                    other.to_string(),
+                    SourceSignature::Pinned,
+                ))
             }
             other => Err(Error::AdapterInvalid(format!("unknown source '{other}'"))),
         }

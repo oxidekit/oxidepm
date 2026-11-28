@@ -565,6 +565,100 @@ fn dry_run_import_downloads_verifies_and_leaves_no_trace() {
 // ---- the bundle ------------------------------------------------------------------------------
 
 #[test]
+fn bundled_reserved_names_require_a_release_signature() {
+    use oxidepm_adapter_proto::signing::{bundle_trusted_comment, testkeys::TestKey};
+
+    let node = Pkg::tool("runtime-node", "0.1.0").package();
+    let kit = kit_with(&[&node]);
+    let daemon = kit.daemon();
+    let args = ["adapter", "import", "--bundled", "runtime-node"];
+    let preview = ["--dry-run"].into_iter().chain(args).collect::<Vec<_>>();
+    let signature = kit.bundle.join("SHA256SUMS.minisig");
+    let checksums = std::fs::read(kit.bundle.join("SHA256SUMS")).unwrap();
+    let tag = concat!("v", env!("CARGO_PKG_VERSION"));
+    let target = target();
+    let other_target = if target == "x86_64-unknown-linux-gnu" {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    let comment = bundle_trusted_comment(tag, &target);
+    let valid = kit.key.sign(&checksums, &comment);
+
+    for (contents, mode, reason) in [
+        (None, 0o644, "SHA256SUMS.minisig"),
+        (
+            Some(kit.key.sign(b"different checksum list", &comment)),
+            0o644,
+            "does not match the signed data",
+        ),
+        (
+            Some(
+                kit.key
+                    .sign(&checksums, &bundle_trusted_comment("v0.0.0", &target)),
+            ),
+            0o644,
+            "trusted comment",
+        ),
+        (
+            Some(
+                kit.key
+                    .sign(&checksums, &bundle_trusted_comment(tag, other_target)),
+            ),
+            0o644,
+            "trusted comment",
+        ),
+        (
+            Some(TestKey::generate().sign(&checksums, &comment)),
+            0o644,
+            "which is not one of the keys this build trusts",
+        ),
+        (Some(valid.clone()), 0o664, "group or other write access"),
+    ] {
+        if let Some(contents) = contents {
+            std::fs::write(&signature, contents).unwrap();
+            std::fs::set_permissions(&signature, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let run = kit.run(&preview);
+        stage_by_hand(&kit, &node, "runtime-node");
+        let reply = raw_install(&daemon, "runtime-node", "bundled", None);
+        assert_eq!(run.code, 1, "{}", run.all());
+        assert!(run.stderr.contains("E_ADAPTER_INVALID"), "{}", run.all());
+        assert_eq!(reply["code"], "E_ADAPTER_INVALID", "{reply}");
+        for message in [run.stderr.as_str(), reply["message"].as_str().unwrap()] {
+            assert!(message.contains(reason), "{message}");
+            assert!(message.contains("--allow-reserved-name"), "{message}");
+        }
+    }
+    assert!(names_listed(&kit).is_empty());
+
+    let mut explicit_preview = preview.clone();
+    explicit_preview.push("--allow-reserved-name");
+    let run = kit.run(&explicit_preview);
+    assert_eq!(run.code, 0, "{}", run.all());
+    assert!(
+        run.stdout.contains("Bundle signature unverified"),
+        "{}",
+        run.all()
+    );
+
+    std::fs::write(&signature, valid).unwrap();
+    std::fs::set_permissions(&signature, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let run = kit.run(&preview);
+    assert_eq!(run.code, 0, "{}", run.all());
+    assert!(
+        run.stdout.contains("Bundle signature verified with key"),
+        "{}",
+        run.all()
+    );
+    let run = kit.run(&args);
+    assert_eq!(run.code, 0, "{}", run.all());
+    assert_eq!(info_json(&kit, "runtime-node")["source"], "bundled");
+    assert_eq!(kit.http.hits(), 0);
+    stop(daemon);
+}
+
+#[test]
 fn unsigned_release_bundle_installs_without_index_keys() {
     let adapter = alpha();
     let kit = kit_with(&[&adapter]);
