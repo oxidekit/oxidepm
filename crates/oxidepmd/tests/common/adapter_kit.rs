@@ -17,7 +17,7 @@ use oxidepm_adapter_proto::signing::testkeys::TestKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::fixture::fixture_bin;
+use super::fixture::{fixture_bin, launcher_bin, stage_binary};
 
 pub fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -59,7 +59,8 @@ pub fn cli_bin() -> &'static Path {
         );
         let bin = profile_dir.join("oxidepm");
         assert!(bin.is_file(), "the CLI was not built at {}", bin.display());
-        bin
+        let _ = launcher_bin();
+        stage_binary(&bin, "oxidepm")
     })
 }
 

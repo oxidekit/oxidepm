@@ -65,19 +65,53 @@ pub fn fixture_bin() -> &'static Path {
     })
 }
 
-/// The path of the sandbox launcher `oxidepm-sandbox`, built together with the fixture.
+/// A private `0700` per-run directory holding staged copies of the daemon, CLI, and sandbox
+/// launcher so tests do not depend on the permissions of the Cargo target directory.
+fn staged_bin_dir() -> &'static Path {
+    use std::os::unix::fs::PermissionsExt;
+    static DIR: OnceLock<TempDir> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = TempDir::new().expect("create private test binary directory");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod private test binary directory");
+        dir
+    })
+    .path()
+}
+
+/// Copy `src` into the private `0700` per-run directory as `name` with mode `0700`.
+pub fn stage_binary(src: &Path, name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = staged_bin_dir();
+    let dst = dir.join(name);
+    let tmp = dir.join(format!(".{name}.tmp.{}", std::process::id()));
+    std::fs::copy(src, &tmp).unwrap_or_else(|e| panic!("copy {} to {}: {e}", src.display(), tmp.display()));
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|e| panic!("chmod {}: {e}", tmp.display()));
+    std::fs::rename(&tmp, &dst)
+        .unwrap_or_else(|e| panic!("rename {} to {}: {e}", tmp.display(), dst.display()));
+    dst
+}
+
+/// The path of the sandbox launcher `oxidepm-sandbox`, built together with the fixture and staged
+/// into a private `0700` directory so the launcher check passes regardless of target directory
+/// permissions.
 pub fn launcher_bin() -> PathBuf {
-    let fixture = fixture_bin();
-    let launcher = fixture
-        .parent()
-        .expect("profile directory")
-        .join("oxidepm-sandbox");
-    assert!(
-        launcher.is_file(),
-        "the sandbox launcher was not built at {}",
-        launcher.display()
-    );
-    launcher
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let fixture = fixture_bin();
+        let launcher = fixture
+            .parent()
+            .expect("profile directory")
+            .join("oxidepm-sandbox");
+        assert!(
+            launcher.is_file(),
+            "the sandbox launcher was not built at {}",
+            launcher.display()
+        );
+        stage_binary(&launcher, "oxidepm-sandbox")
+    })
+    .clone()
 }
 
 /// A running fixture adapter, before or after it is handed to a connection.

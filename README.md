@@ -878,6 +878,8 @@ All data stored in `~/.oxidepm/` (the `OXIDEPM_HOME` environment variable names 
 
 Contributions welcome! Please open an issue or PR.
 
+Run `cargo test --workspace` to execute the test suite; the daemon tests copy `oxidepmd` and `oxidepm-sandbox` into a private `0700` temporary directory so they pass even when the Cargo target directory is group-writable.
+
 ## License
 
 Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.

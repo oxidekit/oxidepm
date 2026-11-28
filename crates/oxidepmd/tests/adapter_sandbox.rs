@@ -1376,11 +1376,15 @@ fn app_state(daemon: &DaemonProc, name: &str) -> (String, Option<u64>, u64) {
     )
 }
 
-/// A copy of the daemon binary in a directory with nothing next to it.
+/// A copy of the daemon binary in a private `0700` directory with nothing next to it.
 fn lone_daemon_binary(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("lone").join("oxidepmd");
-    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    let parent = bin.parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_oxidepmd"), &bin).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
     bin
 }
 

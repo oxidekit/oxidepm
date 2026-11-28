@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::daemon::{DaemonProc, Signal};
+use common::daemon::{daemon_bin, DaemonProc, Signal};
 use common::{saved_entries, saved_json};
 use serde_json::json;
 use tempfile::TempDir;
@@ -34,7 +34,7 @@ fn run_check(home: &std::path::Path) -> (Option<std::process::ExitStatus>, Strin
 
     std::fs::create_dir_all(home).expect("create home");
     let stderr_path = home.join("check.stderr");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_oxidepmd"))
+    let mut child = Command::new(daemon_bin())
         .arg("--check")
         .env("OXIDEPM_HOME", home)
         .env("HOME", home)
@@ -142,7 +142,7 @@ async fn autostart_refuses_a_group_writable_home_before_opening_the_log() {
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770)).unwrap();
     std::fs::write(home.join("oxidepm.db"), b"old schema").unwrap();
     let client =
-        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(env!("CARGO_BIN_EXE_oxidepmd"));
+        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
 
     let error = client
         .send_autostart(&Request::Status)
@@ -205,7 +205,7 @@ async fn autostart_with_legacy_db_prints_clear_error() {
     std::fs::write(&legacy, b"old schema").unwrap();
 
     let client =
-        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(env!("CARGO_BIN_EXE_oxidepmd"));
+        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
     let started = Instant::now();
     let err = client
         .send_autostart(&Request::Status)
@@ -320,7 +320,7 @@ async fn autostarted_daemon_is_its_own_session_leader() {
     let tmp = TempDir::new().expect("temp dir");
     let home = tmp.path().join("home");
     let client =
-        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(env!("CARGO_BIN_EXE_oxidepmd"));
+        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
 
     let response = client
         .send_autostart(&Request::Ping)

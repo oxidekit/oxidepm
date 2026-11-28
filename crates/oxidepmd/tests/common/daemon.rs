@@ -9,11 +9,21 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub use nix::sys::signal::Signal;
 
 const CAP: Duration = Duration::from_secs(10);
+
+/// The `oxidepmd` binary staged into a private `0700` per-run directory next to `oxidepm-sandbox`.
+pub fn daemon_bin() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let _ = super::fixture::launcher_bin();
+        super::fixture::stage_binary(Path::new(env!("CARGO_BIN_EXE_oxidepmd")), "oxidepmd")
+    })
+}
 
 pub struct DaemonProc {
     child: Child,
@@ -32,12 +42,7 @@ impl DaemonProc {
     /// Like [`spawn`](Self::spawn), with extra environment variables on the daemon process (the
     /// test process itself is not touched).
     pub fn spawn_with_env(home: &Path, env: &[(&str, &str)]) -> Self {
-        let mut daemon = Self::spawn_unready_inner(
-            Path::new(env!("CARGO_BIN_EXE_oxidepmd")),
-            home,
-            "daemon-test.stderr",
-            env,
-        );
+        let mut daemon = Self::spawn_unready_inner(daemon_bin(), home, "daemon-test.stderr", env);
         daemon.wait_for_socket();
         daemon
     }
@@ -59,12 +64,7 @@ impl DaemonProc {
     /// Like [`spawn_unready`](Self::spawn_unready), with the name of the stderr capture file (two
     /// daemons on one home need two).
     pub fn spawn_unready_with_stderr(home: &Path, stderr_name: &str) -> Self {
-        Self::spawn_unready_inner(
-            Path::new(env!("CARGO_BIN_EXE_oxidepmd")),
-            home,
-            stderr_name,
-            &[],
-        )
+        Self::spawn_unready_inner(daemon_bin(), home, stderr_name, &[])
     }
 
     fn spawn_unready_inner(
