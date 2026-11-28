@@ -206,7 +206,11 @@ impl EnforcedRecord {
         if self.caps.landlock_unix_connect || !required.contains(&Enforce::Network) {
             return reachable;
         }
-        let limitation = "The kernel cannot restrict connections to pathname Unix sockets";
+        let limitation = if self.enforced.contains(&Enforce::Network) {
+            "unix sockets: not restricted on this kernel"
+        } else {
+            "The kernel cannot restrict connections to pathname Unix sockets"
+        };
         Some(reachable.map_or_else(
             || limitation.to_string(),
             |note| format!("{note}. {limitation}"),
@@ -214,16 +218,40 @@ impl EnforcedRecord {
     }
 
     /// Record required network enforcement only when the Unix layer also held.
-    pub fn with_required_enforcement(mut self, required: &[Enforce]) -> Self {
-        if self.required_network_is_open(required) {
+    pub fn with_required_enforcement(self, required: &[Enforce]) -> Self {
+        self.with_unix_enforcement(required, false)
+    }
+
+    /// Apply Unix-socket requirements to measured network enforcement. The pathname exception
+    /// is limited to kernels without that restriction and leaves the other probes in effect.
+    pub fn with_unix_enforcement(
+        mut self,
+        required: &[Enforce],
+        allow_missing_unix_connect: bool,
+    ) -> Self {
+        if self.required_network_is_open(required, allow_missing_unix_connect) {
             self.enforced.retain(|item| *item != Enforce::Network);
         }
         self
     }
 
-    fn required_network_is_open(&self, required: &[Enforce]) -> bool {
-        required.contains(&Enforce::Network)
-            && (!self.caps.landlock_unix_connect || !self.unix_reachable.is_empty())
+    fn required_network_is_open(
+        &self,
+        required: &[Enforce],
+        allow_missing_unix_connect: bool,
+    ) -> bool {
+        if !required.contains(&Enforce::Network) {
+            return false;
+        }
+        if allow_missing_unix_connect && !self.caps.landlock_unix_connect {
+            return self.unix_reachable.iter().any(|service| {
+                !matches!(
+                    service.as_str(),
+                    attempt::DAEMON_SOCKET | attempt::SESSION_BUS | attempt::PATHNAME_SOCKET
+                )
+            });
+        }
+        !self.caps.landlock_unix_connect || !self.unix_reachable.is_empty()
     }
 
     /// Read a stored record; anything that does not parse means "nothing was accepted".
@@ -244,7 +272,7 @@ impl EnforcedRecord {
 
     /// Check the required items, including whether Unix services are restricted.
     pub fn check_with_unix_reachability(&self, required: &[Enforce]) -> Result<(), Vec<Enforce>> {
-        if self.allow_unenforced || !self.required_network_is_open(required) {
+        if self.allow_unenforced || !self.required_network_is_open(required, false) {
             return self.check(required);
         }
 
@@ -407,6 +435,42 @@ mod tests {
             record.check_with_unix_reachability(&[Enforce::Network]),
             Ok(())
         );
+    }
+
+    #[test]
+    fn the_pathname_exception_preserves_other_network_checks() {
+        let required = [Enforce::Network];
+        let old_kernel = EnforcedRecord::from_report(
+            &report(&[
+                (attempt::INET_SOCKET, NO),
+                (attempt::IO_URING, NO),
+                (attempt::PATHNAME_SOCKET, Outcome::Allowed),
+            ]),
+            SandboxCaps::default(),
+            false,
+            false,
+        );
+        let accepted = old_kernel.clone().with_unix_enforcement(&required, true);
+        assert_eq!(accepted.check(&required), Ok(()));
+        assert!(!accepted.caps.landlock_unix_connect);
+        assert_eq!(accepted.unix_reachable, [attempt::PATHNAME_SOCKET]);
+
+        let mut capable = old_kernel.clone();
+        capable.caps.landlock_unix_connect = true;
+        let mut abstract_reachable = old_kernel.clone();
+        abstract_reachable
+            .unix_reachable
+            .push(attempt::ABSTRACT_SOCKET.to_string());
+        let mut network_unenforced = old_kernel;
+        network_unenforced.enforced.clear();
+        for record in [capable, abstract_reachable, network_unenforced] {
+            assert_eq!(
+                record
+                    .with_unix_enforcement(&required, true)
+                    .check(&required),
+                Err(vec![Enforce::Network])
+            );
+        }
     }
 
     #[test]

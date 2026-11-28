@@ -1436,6 +1436,7 @@ fn yes_is_honoured_only_for_the_pure_class() {
         .perms(json!({"network": {"mode": "outbound", "hosts": ["example.org"]}}))
         .package();
     let kit = kit_with(&[&pure, &wide]);
+    sign_bundle(&kit);
     let daemon = kit.daemon();
     let bundled = kit.run(&["adapter", "import", "--bundled", "alpha"]);
     assert_eq!(bundled.code, 0, "{}", bundled.all());
@@ -2060,6 +2061,77 @@ fn a_third_party_adapter_can_enable_with_yes_when_unix_services_are_blocked() {
     }
 }
 
+#[test]
+fn unofficial_adapters_require_unix_socket_enforcement() {
+    let adapter = Pkg::tool("netless", "0.1.0")
+        .perms(json!({"requires_enforcement": ["network"]}))
+        .package();
+    let caps = oxidepm_sandbox::probe();
+
+    for source in ["bundled", "index", "pinned"] {
+        let kit = kit_with(&[&adapter]);
+        let _daemon = kit.daemon();
+        let imported = match source {
+            "bundled" => kit.run(&["adapter", "import", "--bundled", "netless"]),
+            "index" => kit.run(&["adapter", "import", "netless"]),
+            _ => {
+                let archive = kit.dir.path().join("netless.tar.gz");
+                std::fs::write(&archive, &adapter.archive).unwrap();
+                kit.run(&[
+                    "adapter",
+                    "import",
+                    archive.to_str().unwrap(),
+                    "--sha256",
+                    &adapter.archive_sha,
+                ])
+            }
+        };
+        assert_eq!(imported.code, 0, "{source}: {}", imported.all());
+
+        let explicit = enable_with_fingerprint(&kit, &adapter);
+        if caps.landlock_unix_connect {
+            assert_eq!(explicit.code, 0, "{source}: {}", explicit.all());
+            let info = info_json(&kit, "netless");
+            assert!(
+                info["enforced"]["enforced"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("network")),
+                "{source}: {info}"
+            );
+        } else {
+            assert_eq!(explicit.code, 1, "{source}: {}", explicit.all());
+            assert!(
+                explicit
+                    .stderr
+                    .contains("requires the sandbox to enforce network")
+                    && explicit.stderr.contains("--allow-unenforced"),
+                "{source}: {}",
+                explicit.all()
+            );
+            assert_eq!(info_json(&kit, "netless")["enabled"], false, "{source}");
+            let override_run = kit.run(&[
+                "adapter",
+                "enable",
+                "netless",
+                "--accept",
+                &adapter.fingerprint(),
+                "--allow-unenforced",
+            ]);
+            assert_eq!(override_run.code, 0, "{source}: {}", override_run.all());
+            let record = &info_json(&kit, "netless")["enforced"];
+            assert_eq!(record["allow_unenforced"], true, "{source}: {record}");
+            assert!(
+                !record["enforced"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("network")),
+                "{source}: {record}"
+            );
+        }
+    }
+}
+
 // ---- tampering, missing files ------------------------------------------------------------------
 
 #[test]
@@ -2396,6 +2468,7 @@ fn bundled_import_can_enable_the_pure_adapters_at_once() {
 fn bundled_runtime_import_can_enable_with_yes() {
     let runtime = Pkg::tool("runtime-demo", "0.1.0")
         .with("tags", json!(["runtime"]))
+        .perms(json!({"requires_enforcement": ["network"]}))
         .with(
             "provides",
             json!({"runtimes": ["demo"], "programs": ["demo"]}),
@@ -2424,6 +2497,36 @@ fn bundled_runtime_import_can_enable_with_yes() {
     let info = info_json(&kit, "runtime-demo");
     assert_eq!(info["trust"], "bundled:verified", "{info}");
     assert_eq!(info["enabled"], true, "{info}");
+    let record = &info["enforced"];
+    assert_eq!(record["allow_unenforced"], false, "{record}");
+    assert!(
+        record["enforced"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("network")),
+        "{record}"
+    );
+    let caps = oxidepm_sandbox::probe();
+    assert_eq!(
+        record["caps"]["landlock_unix_connect"], caps.landlock_unix_connect,
+        "{record}"
+    );
+    let note = "unix sockets: not restricted on this kernel";
+    if caps.landlock_unix_connect {
+        assert_eq!(record["unix_reachable"], json!([]), "{record}");
+        assert!(!run.stdout.contains(note), "{}", run.all());
+    } else {
+        assert!(
+            record["unix_reachable"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("pathname_socket")),
+            "{record}"
+        );
+        assert!(run.stdout.contains(note), "{}", run.all());
+        let info = kit.run(&["adapter", "info", "runtime-demo"]);
+        assert!(info.stdout.contains(note), "{}", info.all());
+    }
 }
 
 #[test]
@@ -2818,6 +2921,51 @@ fn bundled_update_by_name_keeps_an_enabled_adapter_enabled() {
     assert_eq!(info["source"], "bundled");
     assert_eq!(info["trust"], "bundled:verified");
     assert_eq!(info["enabled"], true);
+}
+
+#[test]
+fn update_checks_required_network_enforcement_after_a_trust_change() {
+    let package = |version| {
+        Pkg::tool("alpha", version)
+            .perms(json!({"requires_enforcement": ["network"]}))
+            .package()
+    };
+    let old = package("0.1.0");
+    let new = package("0.2.0");
+    let kit = kit_with(&[&old]);
+    sign_bundle(&kit);
+    let _daemon = kit.daemon();
+    let import = kit.run(&[
+        "adapter",
+        "import",
+        "--bundled",
+        "alpha",
+        "--enable",
+        "--yes",
+    ]);
+    assert_eq!(import.code, 0, "{}", import.all());
+    kit.publish(&[&new], &seq(2));
+    std::fs::remove_file(kit.bundle.join("SHA256SUMS.minisig")).unwrap();
+
+    let update = run_without_index(&kit, &["adapter", "update", "alpha", "--switch-source"]);
+    let info = info_json(&kit, "alpha");
+    assert_eq!(info["enabled"], true, "{info}");
+    if oxidepm_sandbox::probe().landlock_unix_connect {
+        assert_eq!(update.code, 0, "{}", update.all());
+        assert_eq!(info["version"], "0.2.0");
+        assert_eq!(info["trust"], "bundled");
+    } else {
+        assert_eq!(update.code, 1, "{}", update.all());
+        assert!(
+            update
+                .stderr
+                .contains("requires the sandbox to enforce network"),
+            "{}",
+            update.all()
+        );
+        assert_eq!(info["version"], "0.1.0");
+        assert_eq!(info["trust"], "bundled:verified");
+    }
 }
 
 #[test]

@@ -25,7 +25,7 @@ use nix::sys::stat::Mode;
 use nix::unistd::{geteuid, unlinkat, UnlinkatFlags};
 use oxidepm_adapter_proto::manifest::Rule;
 use oxidepm_adapter_proto::messages::method;
-use oxidepm_adapter_proto::permissions::{HostLevel, HostScope};
+use oxidepm_adapter_proto::permissions::{Enforce, HostLevel, HostScope};
 use oxidepm_adapter_proto::signing::{
     is_official_release_trust, verify_bundle_checksums, BUNDLED_UNVERIFIED_TRUST,
     BUNDLED_VERIFIED_TRUST,
@@ -1295,7 +1295,7 @@ impl AdapterHost {
             .measure_enforcement(&paths, &row, &grant, args.allow_unenforced)
             .await?;
         let enforcement_note = record.enforcement_note(&grant.requires_enforcement);
-        if let Err(missing) = record.check_with_unix_reachability(&grant.requires_enforcement) {
+        if let Err(missing) = record.check(&grant.requires_enforcement) {
             let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
             let unix_note = enforcement_note.map_or(String::new(), |note| format!(". {note}"));
             return Err(Error::AdapterInvalid(format!(
@@ -1421,7 +1421,10 @@ impl AdapterHost {
         let read_any = grant.fs.read.iter().any(|p| p == "any");
         Ok(
             EnforcedRecord::from_report(&report, caps, allow_unenforced, read_any)
-                .with_required_enforcement(&grant.requires_enforcement),
+                .with_unix_enforcement(
+                    &grant.requires_enforcement,
+                    is_official_release_trust(&row.trust),
+                ),
         )
     }
 
@@ -1778,19 +1781,23 @@ impl AdapterHost {
                 grant.host.scope = grant.host.scope.min(old_grant.host.scope);
             }
             check_enabled_set(&store.repo().list().await?, &manifest, &grant)?;
-            if grant != old_grant {
+            let official_release_changed =
+                is_official_release_trust(&old.trust) != is_official_release_trust(&trust);
+            if grant != old_grant
+                || (official_release_changed
+                    && grant.requires_enforcement.contains(&Enforce::Network))
+            {
                 let allow = EnforcedRecord::parse(old.enforced_json.as_deref())
                     .is_some_and(|r| r.allow_unenforced);
                 let probe_row = AdapterRow {
                     version: manifest.version.clone(),
+                    trust: trust.clone(),
                     ..old.clone()
                 };
                 let record = self
                     .measure_enforcement(paths, &probe_row, &grant, allow)
                     .await?;
-                if let Err(missing) =
-                    record.check_with_unix_reachability(&grant.requires_enforcement)
-                {
+                if let Err(missing) = record.check(&grant.requires_enforcement) {
                     let names: Vec<&str> = missing.iter().map(|e| enforce_name(*e)).collect();
                     let unix_note = record
                         .enforcement_note(&grant.requires_enforcement)
