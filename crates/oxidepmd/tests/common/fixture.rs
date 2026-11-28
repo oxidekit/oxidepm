@@ -85,7 +85,8 @@ pub fn stage_binary(src: &Path, name: &str) -> PathBuf {
     let dir = staged_bin_dir();
     let dst = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp.{}", std::process::id()));
-    std::fs::copy(src, &tmp).unwrap_or_else(|e| panic!("copy {} to {}: {e}", src.display(), tmp.display()));
+    std::fs::copy(src, &tmp)
+        .unwrap_or_else(|e| panic!("copy {} to {}: {e}", src.display(), tmp.display()));
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))
         .unwrap_or_else(|e| panic!("chmod {}: {e}", tmp.display()));
     std::fs::rename(&tmp, &dst)

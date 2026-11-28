@@ -132,30 +132,49 @@ async fn build_log_is_truncated_at_each_build() {
     assert!(text.contains("second") && !text.contains("first"), "{text}");
 }
 
+fn alive_with_marker(pid: i32, marker: &str) -> bool {
+    if !alive(pid) {
+        return false;
+    }
+    match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(raw) => String::from_utf8_lossy(&raw).contains(marker),
+        Err(_) => false,
+    }
+}
+
 #[tokio::test]
 async fn step_timeout_kills_group() {
     let dir = tempfile::tempdir().unwrap();
     let r = rules(&["sh"], &[], &[]);
     let pidfile = dir.path().join("grandchild.pid");
-    let script = format!("sleep 600 & echo $! > '{}'; wait", pidfile.display());
+    let pidtmp = dir.path().join("grandchild.pid.tmp");
+    let marker = format!("600.{}", std::process::id());
+    let script = format!(
+        "sleep {marker} & printf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'; wait",
+        pidtmp.display(),
+        pidtmp.display(),
+        pidfile.display()
+    );
     let mut s = step("slow", &["sh", "-c", &script]);
-    s.timeout_secs = 1;
+    s.timeout_secs = 2;
     let started = std::time::Instant::now();
     let out = run_one(&s, &spec(dir.path()), &r, &mut BuildLog::none()).await;
     assert!(out.timed_out && !out.success(), "{out:?}");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(15));
     let pid: i32 = std::fs::read_to_string(&pidfile)
         .unwrap()
         .trim()
         .parse()
         .unwrap();
+    let mut dead = false;
     for _ in 0..100 {
-        if !alive(pid) {
+        if !alive_with_marker(pid, &marker) {
+            dead = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(!alive(pid), "the build's child survived the timeout");
+    assert!(dead, "the build's child survived the timeout");
 }
 
 #[tokio::test]

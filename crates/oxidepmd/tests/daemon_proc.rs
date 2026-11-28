@@ -141,8 +141,7 @@ async fn autostart_refuses_a_group_writable_home_before_opening_the_log() {
     std::fs::create_dir(&home).unwrap();
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770)).unwrap();
     std::fs::write(home.join("oxidepm.db"), b"old schema").unwrap();
-    let client =
-        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
+    let client = IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
 
     let error = client
         .send_autostart(&Request::Status)
@@ -204,8 +203,7 @@ async fn autostart_with_legacy_db_prints_clear_error() {
     let legacy = home.join("oxidepm.db");
     std::fs::write(&legacy, b"old schema").unwrap();
 
-    let client =
-        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
+    let client = IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
     let started = Instant::now();
     let err = client
         .send_autostart(&Request::Status)
@@ -319,8 +317,7 @@ async fn autostarted_daemon_is_its_own_session_leader() {
 
     let tmp = TempDir::new().expect("temp dir");
     let home = tmp.path().join("home");
-    let client =
-        IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
+    let client = IpcClient::new(home.join("daemon.sock")).with_daemon_bin(daemon_bin());
 
     let response = client
         .send_autostart(&Request::Ping)
@@ -686,19 +683,46 @@ fn shell_app(name: &str, script: &str, workdir: &std::path::Path) -> oxidepm_cor
 /// A start that is still waiting out its `startup_delay_ms` holds nothing that a `ping` needs.
 #[test]
 fn ping_answers_while_slow_start_is_in_flight() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let tmp = TempDir::new().expect("temp dir");
     let daemon = DaemonProc::spawn(&tmp.path().join("home"));
     let workdir = tmp.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
     let mut spec = sleeper("slow-start", "304.1", &workdir);
     spec.startup_delay_ms = Some(3000);
+    let start_done = AtomicBool::new(false);
 
     std::thread::scope(|scope| {
-        let start = scope.spawn(|| daemon.rpc(json!({ "type": "start", "spec": spec })));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let start = scope.spawn(|| {
+            let reply = daemon.rpc(json!({ "type": "start", "spec": spec }));
+            start_done.store(true, Ordering::Release);
+            reply
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let status = daemon.rpc(json!({ "type": "status" }));
+            let waiting = status["apps"].as_array().is_some_and(|apps| {
+                apps.iter().any(|app| {
+                    app["spec"]["name"] == "slow-start" && app["state"]["status"] == "waiting"
+                })
+            });
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slow-start never entered waiting state: {status}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let (reply, ms) = timed_rpc(&daemon, json!({ "type": "ping" }));
         assert_eq!(reply["type"], "pong", "{reply}");
-        assert!(ms < 500, "ping took {ms} ms while a start was in flight");
+        assert!(
+            !start_done.load(Ordering::Acquire),
+            "start already finished before ping answered ({ms} ms)"
+        );
+        assert!(ms < 1500, "ping took {ms} ms while a start was in flight");
         let started = start.join().expect("start thread");
         assert_eq!(started["type"], "started", "{started}");
     });

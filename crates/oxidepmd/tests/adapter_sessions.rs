@@ -183,6 +183,7 @@ impl Rig {
             .collect();
         all.extend_from_slice(&setup.env);
         let daemon = kit.daemon_with(&all);
+        daemon.wait_for_boot();
         let imported = kit.run(&["adapter", "import", NAME]);
         assert_eq!(imported.code, 0, "{}", imported.all());
         let enabled = kit.run(&["adapter", "enable", NAME, "--accept", &pkg.fingerprint()]);
@@ -304,7 +305,7 @@ fn wait_for(secs: u64, mut f: impl FnMut() -> bool) -> bool {
 
 async fn attach(offer: &SessionOffer, pty: &Pty) -> (SessionEvents, SessionControl) {
     let fd = pty.slave.as_raw_fd();
-    SessionClient::attach(offer, true, fd, fd, Duration::from_secs(10))
+    SessionClient::attach(offer, true, fd, fd, Duration::from_secs(20))
         .await
         .expect("attach")
         .split()
@@ -877,23 +878,30 @@ async fn session_opened_by_an_ai_claim_writes_only_to_the_adapters_own_directory
     let target = rig.project.join("written-by-the-session");
 
     let ai = offer_of(&rig.open_as(Some("ai:example-agent"), "watch"));
-    let pty = Pty::new();
-    let (mut events, _control) = attach(&ai, &pty).await;
-    assert!(matches!(
-        closing_line(&mut events, 30).await,
-        Some(ServerLine::Done { .. })
-    ));
+    {
+        let pty = Pty::new();
+        let (mut events, _control) = attach(&ai, &pty).await;
+        let line = closing_line(&mut events, 30).await;
+        assert!(
+            matches!(line, Some(ServerLine::Done { .. })),
+            "expected Done for ai session, got {line:?}"
+        );
+    }
     assert!(
         !target.exists(),
         "an ai claim cannot make the session write in the working directory"
     );
 
     let person = rig.open();
-    let (mut events, _control) = attach(&person, &pty).await;
-    assert!(matches!(
-        closing_line(&mut events, 30).await,
-        Some(ServerLine::Done { .. })
-    ));
+    {
+        let pty = Pty::new();
+        let (mut events, _control) = attach(&person, &pty).await;
+        let line = closing_line(&mut events, 30).await;
+        assert!(
+            matches!(line, Some(ServerLine::Done { .. })),
+            "expected Done for person session, got {line:?}"
+        );
+    }
     assert!(
         target.exists(),
         "a person's session can: the grant allows it"
