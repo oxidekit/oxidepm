@@ -343,7 +343,7 @@ impl ConfigFile {
     /// Parse YAML config content
     pub fn from_yaml(content: &str) -> Result<Self> {
         Self::reject_removed(content, ConfigFormat::Yaml)?;
-        serde_yaml::from_str(content).map_err(|e| Error::ConfigError(format!("YAML: {}", e)))
+        yaml_serde::from_str(content).map_err(|e| Error::ConfigError(format!("YAML: {}", e)))
     }
 
     /// Parse JSON config content
@@ -359,7 +359,7 @@ impl ConfigFile {
     fn reject_removed(content: &str, format: ConfigFormat) -> Result<()> {
         let doc: Option<serde_json::Value> = match format {
             ConfigFormat::Toml => toml::from_str(content).ok(),
-            ConfigFormat::Yaml => serde_yaml::from_str(content).ok(),
+            ConfigFormat::Yaml => yaml_serde::from_str(content).ok(),
             ConfigFormat::Json => serde_json::from_str(content).ok(),
         };
         let Some(apps) = doc
