@@ -43,6 +43,32 @@ exec "$TEST_BUNDLE_MINISIGN" "$@"
 MOCK
     chmod +x "$work/signing-bin/minisign"
 
+    if ! dpkg_deb=$(command -v dpkg-deb); then
+        printf '%s\n' 'note - dpkg-deb is unavailable; checking Debian package contents with a tar fixture'
+        dpkg_deb="$work/signing-bin/dpkg-deb"
+        cat > "$dpkg_deb" <<'MOCK'
+#!/bin/sh
+set -eu
+case "$1" in
+    --root-owner-group)
+        test "$#" -eq 4 && test "$2" = --build || exit 2
+        tar -cf "$4" -C "$3" .
+        ;;
+    -f)
+        test "$#" -eq 3 || exit 2
+        case "$3" in Version|Architecture) ;; *) exit 2 ;; esac
+        tar -xOf "$2" ./DEBIAN/control | sed -n "s/^$3: //p"
+        ;;
+    -x)
+        test "$#" -eq 3 || exit 2
+        tar --no-same-owner -xf "$2" -C "$3"
+        ;;
+    *) exit 2 ;;
+esac
+MOCK
+        chmod +x "$dpkg_deb"
+    fi
+
     for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
         input="$inputs/oxidepm-$target"
         mkdir -p "$input/adapters"
@@ -77,8 +103,8 @@ MOCK
         mkdir "$full" "$adapters" "$deb"
         tar --no-same-owner -xzf "$input/oxidepm-$target.tar.gz" -C "$full"
         tar --no-same-owner -xzf "$input/oxidepm-adapters-$target.tar.gz" -C "$adapters"
-        dpkg-deb -x "$package" "$deb"
-        test "$(dpkg-deb -f "$package" Architecture)" = "$arch"
+        "$dpkg_deb" -x "$package" "$deb"
+        test "$("$dpkg_deb" -f "$package" Architecture)" = "$arch"
         for dir in "$full/share/oxidepm/adapters" "$adapters" "$deb/usr/share/oxidepm/adapters"; do
             (cd "$dir" && sha256sum --check --strict SHA256SUMS)
             comment=$(minisign -V -H -Q -P "$TEST_BUNDLE_KEY" \
