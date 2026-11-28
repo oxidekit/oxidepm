@@ -872,8 +872,11 @@ fn repo_file(path: &str) -> String {
 fn every_install_path_carries_the_adapters_of_the_release() {
     // the runtimes are adapters, so a path that left them out would install a daemon that cannot
     // start a node app; each path puts share/oxidepm/adapters in place and says how to import
-    let release = repo_file(".github/workflows/release.yml");
-    assert!(release.contains("bash ../oxidepm/scripts/build-adapter-bundle.sh"));
+    let workflow = repo_file(".github/workflows/release.yml");
+    let (build, release) = workflow.split_once("\n  release:\n").unwrap();
+    assert!(build.contains("bash ../oxidepm/scripts/build-adapter-bundle.sh"));
+    assert!(!build.contains("OXIDEPM_MINISIGN_KEY"));
+    assert!(release.contains(r#"bash scripts/package-release-bundles.sh bundles "$key_file""#));
     let bundle = repo_file("scripts/build-adapter-bundle.sh");
     for name in [
         "check",
@@ -896,16 +899,18 @@ fn every_install_path_carries_the_adapters_of_the_release() {
         );
     }
     assert!(bundle.contains("sha256sum -c SHA256SUMS"));
+    let packaging = repo_file("scripts/package-release-bundles.sh");
     assert!(
-        release.contains(r#"-C "$PWD" share"#),
-        "the release archives hold share/"
+        packaging.contains(r#"-C "$pkg/usr" share/oxidepm"#),
+        "the release archives hold share/oxidepm"
     );
     assert!(
-        release.contains(r#"cp -R share/oxidepm/adapters "$pkg/usr/share/oxidepm/""#),
+        packaging
+            .contains(r#"install -m0644 "$input/adapters/"* "$pkg/usr/share/oxidepm/adapters/""#),
         "the .deb holds the adapters"
     );
     assert!(
-        release.contains("oxidepm-adapters-$TARGET.tar.gz"),
+        packaging.contains("oxidepm-adapters-$target.tar.gz"),
         "the bundle is a release file of its own too"
     );
 
@@ -929,7 +934,7 @@ fn every_install_path_carries_the_adapters_of_the_release() {
     assert!(repo_file("dist/aur/oxidepm.install").contains(IMPORT_RUNTIMES));
 
     // and the notes a package prints name the same command
-    assert!(release.contains(IMPORT_RUNTIMES));
+    assert!(packaging.contains(IMPORT_RUNTIMES));
 }
 
 #[test]
