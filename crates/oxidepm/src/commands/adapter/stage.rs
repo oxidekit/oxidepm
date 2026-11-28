@@ -404,7 +404,7 @@ async fn stage_indexed(name: &str, bundled: bool, opts: &StageOpts<'_>) -> Resul
 
 /// Ask the human to type the first 12 digits of the hash (on a terminal only).
 fn confirm_hash_typed(actual: &str) -> Result<bool> {
-    if !atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout) {
+    if !super::ops::interactive() {
         return Ok(false);
     }
     let typed: String = dialoguer::Input::new()

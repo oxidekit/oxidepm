@@ -37,7 +37,6 @@ dirs = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
 dialoguer = { workspace = true }
-atty = { workspace = true }
 libc = "0.2"
 tempfile = { workspace = true }
 clap_complete = { workspace = true }

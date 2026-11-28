@@ -79,7 +79,6 @@ dirs = "5.0"
 which = "6.0"
 nix = { version = "0.28", features = ["signal", "process", "fs", "user"] }
 regex = "1.10"
-atty = "0.2"
 subtle = "2"
 sha2 = "0.10"
 

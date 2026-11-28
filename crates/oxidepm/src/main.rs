@@ -3,6 +3,8 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("OxidePM supports Linux only");
 
+use std::io::{self, IsTerminal};
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -73,8 +75,8 @@ async fn main() -> Result<()> {
             // Logs go to stderr so stdout stays clean for --json and pipes.
             tracing_subscriber::fmt::layer()
                 .without_time()
-                .with_writer(std::io::stderr)
-                .with_ansi(atty::is(atty::Stream::Stderr)),
+                .with_writer(io::stderr)
+                .with_ansi(io::stderr().is_terminal()),
         )
         .init();
 

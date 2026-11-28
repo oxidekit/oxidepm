@@ -1,6 +1,8 @@
 //! The adapter commands that talk to the daemon: install what was staged, enable with a grant,
 //! disable, remove, list and describe what is installed.
 
+use std::io::{self, IsTerminal};
+
 use anyhow::{bail, Result};
 use colored::Colorize;
 use oxidepm_adapter_proto::signing::{
@@ -52,7 +54,7 @@ fn print_warnings(warnings: &[String]) {
 
 /// Is a person at a terminal?
 pub fn interactive() -> bool {
-    atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout)
+    io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
 /// Ask the daemon to check the index against its history before using it. A dry run checks
