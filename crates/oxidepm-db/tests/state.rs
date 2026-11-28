@@ -552,6 +552,41 @@ async fn migration2_adds_marker_columns_and_keeps_rows() {
 }
 
 #[tokio::test]
+async fn migrates_state_file_written_by_older_sqlite() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("state.db");
+    // This schema v1 fixture was written with SQLite 3.44.0.
+    std::fs::write(&path, include_bytes!("fixtures/state-v1.db")).unwrap();
+
+    let db = Database::new(&path).await.unwrap();
+    assert_eq!(user_version(db.pool()).await.unwrap(), 2);
+    let app = db.apps().record_by_name("web").await.unwrap().unwrap();
+    let AppRecord::Ok {
+        spec,
+        desired,
+        parent_id,
+    } = app
+    else {
+        panic!("the stored app could not be read: {app:?}");
+    };
+    assert_eq!(spec.id, 1);
+    assert_eq!(spec.command, "sleep");
+    assert_eq!(spec.args, ["300"]);
+    assert_eq!(spec.cwd, Path::new("/srv/web"));
+    assert_eq!(desired, Desired::Stopped);
+    assert_eq!(parent_id, None);
+    assert!(!spec.protected && !spec.ai_control);
+    db.close().await;
+
+    let backup = Database::open(&backup_path(&path, 2), &oxidepm_db::schema::MIGRATIONS[..1])
+        .await
+        .unwrap();
+    assert_eq!(user_version(backup.pool()).await.unwrap(), 1);
+    assert_eq!(names(&backup).await, ["web"]);
+    backup.close().await;
+}
+
+#[tokio::test]
 async fn markers_roundtrip() {
     let tmp = tempdir().unwrap();
     let db = Database::new(&tmp.path().join("state.db")).await.unwrap();

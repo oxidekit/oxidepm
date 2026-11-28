@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use oxidepm_core::{Error, Result};
 use sqlx::sqlite::SqlitePool;
-use sqlx::Row;
+use sqlx::{Executor, Row};
 use tracing::info;
 
 /// One schema step. `up` may hold several statements.
@@ -87,8 +87,8 @@ impl<'a> Migrator<'a> {
 
         for m in pending {
             let mut tx = pool.begin().await.map_err(db_err)?;
-            sqlx::query(m.up)
-                .execute(&mut *tx)
+            tx.as_mut()
+                .execute(sqlx::raw_sql(m.up))
                 .await
                 .map_err(|e| db_err(format!("migration to v{} failed: {}", m.version, e)))?;
             sqlx::query(&format!("PRAGMA user_version = {}", m.version))
