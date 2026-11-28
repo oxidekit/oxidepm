@@ -159,8 +159,10 @@ interpreters work, as do virtual environments linked to the Python selected by a
 shim on the app's `PATH`. A runtime adapter can also select an in-project environment configured
 by the app's `VIRTUAL_ENV` setting. A cargo project is built with the app's environment and a time
 limit, and `cargo metadata` names the binary and the target directory, so workspaces and an
-in-project `target-dir` setting work. The build shows as `building`. A script that does not
-exist is reported by the program that runs it, in the app's log.
+in-project `target-dir` setting work. The build shows as `building`. The daemon rechecks the
+digest of a built native executable before launching it from its on-disk file. This preserves
+`/proc/self/exe` and `$ORIGIN`-relative library paths. A script that does not exist is reported by
+the program that runs it, in the app's log.
 
 ## Optional adapters
 

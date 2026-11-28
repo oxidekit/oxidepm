@@ -1374,6 +1374,126 @@ fn check_python_venv(mode: &str) {
 }
 
 #[test]
+fn a_built_binary_finds_its_origin_relative_library() {
+    let rig = runtime_rig(
+        |work| {
+            std::fs::create_dir(work.join("lib")).unwrap();
+            std::fs::write(work.join("answer.c"), "int answer(void) { return 42; }").unwrap();
+            std::fs::write(
+                work.join("main.c"),
+                r#"#include <stdio.h>
+#include <unistd.h>
+int answer(void);
+int main(void) {
+    FILE *ready = fopen("answer", "w");
+    if (!ready) return 1;
+    fprintf(ready, "%d", answer());
+    fclose(ready);
+    sleep(120);
+    return 0;
+}"#,
+            )
+            .unwrap();
+            script(
+                json!([
+                    step(
+                        "library",
+                        json!([
+                            "cc",
+                            "-shared",
+                            "-fPIC",
+                            "-o",
+                            "lib/libanswer.so",
+                            "answer.c"
+                        ]),
+                        30
+                    ),
+                    step(
+                        "build",
+                        json!([
+                            "cc",
+                            "main.c",
+                            "-Llib",
+                            "-lanswer",
+                            "-Wl,-rpath,$ORIGIN/lib",
+                            "-o",
+                            "app"
+                        ]),
+                        30
+                    ),
+                ]),
+                native_app_plan(work),
+            )
+        },
+        &["cc"],
+        &[],
+        &[FAST],
+    );
+    let reply = rig.start("origin-app", json!({}));
+    assert_eq!(reply["type"], "started", "{reply}");
+    assert!(
+        wait_for(5, || {
+            std::fs::read_to_string(rig.work.join("answer"))
+                .as_deref()
+                .ok()
+                == Some("42")
+        }),
+        "{}",
+        rig.daemon().stderr()
+    );
+    rig.stop("origin-app");
+}
+
+#[test]
+fn a_built_binary_sees_its_on_disk_executable_path() {
+    let rig = runtime_rig(
+        |work| {
+            std::fs::write(
+                work.join("main.c"),
+                r#"#include <stdio.h>
+#include <unistd.h>
+int main(void) {
+    char path[4096];
+    ssize_t length = readlink("/proc/self/exe", path, sizeof(path));
+    if (length < 0 || length == sizeof(path)) return 1;
+    FILE *ready = fopen("exe-path", "w");
+    if (!ready) return 2;
+    fwrite(path, 1, length, ready);
+    fclose(ready);
+    sleep(120);
+    return 0;
+}"#,
+            )
+            .unwrap();
+            script(
+                json!([step("build", json!(["cc", "main.c", "-o", "app"]), 30)]),
+                native_app_plan(work),
+            )
+        },
+        &["cc"],
+        &[],
+        &[FAST],
+    );
+    let reply = rig.start("exe-app", json!({}));
+    assert_eq!(reply["type"], "started", "{reply}");
+    let path = rig.work.join("exe-path");
+    let expected = rig.work.join("app");
+    assert!(
+        wait_for(5, || {
+            std::fs::read_to_string(&path).as_deref().ok() == expected.to_str()
+        }),
+        "executable path was {:?}",
+        std::fs::read_to_string(&path)
+    );
+    rig.stop("exe-app");
+}
+
+fn native_app_plan(work: &Path) -> Value {
+    let program = work.join("app");
+    json!({ "program": program, "args": [], "cwd": work, "binary_path": program })
+}
+
+#[test]
 fn a_stored_built_program_must_match_its_saved_digest() {
     let m = marker();
     let mut rig = runtime_rig(

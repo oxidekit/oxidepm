@@ -9,12 +9,13 @@
 //! ([`AdapterRunner::consult`]), so a hung adapter holds up the apps of its runtime and no
 //! other; the circuit breaker of the entry makes every later call fail at once.
 
-use std::fs::File;
+use std::collections::BTreeMap;
+use std::fs::{File, Metadata};
 use std::io::{self, Read, Seek};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -244,7 +245,7 @@ pub struct AdapterRunner {
     origin: Origin,
     reuse_plan: bool,
     state: Mutex<Consulted>,
-    pinned: Mutex<Option<PinnedBinary>>,
+    pinned: Mutex<Option<Arc<PinnedBinary>>>,
 }
 
 /// What `consult` found out, for `prepare`.
@@ -283,27 +284,31 @@ struct ValidatedPlan {
     pinned: Option<PinnedBinary>,
 }
 
-/// A sealed copy keeps the executable's verified contents stable until the child runs.
+/// Native binaries keep their on-disk identity. Scripts use a sealed copy, which the
+/// interpreter can still open after the kernel has started it.
 struct PinnedBinary {
     file: File,
     digest: [u8; 32],
+    disk_path: Option<PathBuf>,
 }
 
+// The runner owns each descriptor. The launch plan carries its pathname to the spawn site.
+static PINNED_BINARIES: Mutex<BTreeMap<RawFd, Weak<PinnedBinary>>> = Mutex::new(BTreeMap::new());
+
 impl PinnedBinary {
-    fn new(mut source: &File) -> io::Result<Self> {
-        let before = source.metadata()?;
+    fn new(source: &File, path: &Path) -> io::Result<Self> {
+        if can_run_from_disk(source)? {
+            return Ok(Self {
+                file: source.try_clone()?,
+                digest: executable_digest(source)?,
+                disk_path: Some(path.to_path_buf()),
+            });
+        }
+
         let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
         let mut file = File::from(memfd_create(c"oxidepm-app", flags)?);
         file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
-        let copied = io::copy(&mut source.by_ref().take(before.len()), &mut file)?;
-        let after = source.metadata()?;
-        if copied != before.len()
-            || (before.ctime(), before.ctime_nsec()) != (after.ctime(), after.ctime_nsec())
-        {
-            return Err(io::Error::other(
-                "the built executable changed while being read",
-            ));
-        }
+        read_executable(source, &mut file)?;
         fcntl(
             file.as_raw_fd(),
             FcntlArg::F_ADD_SEALS(
@@ -319,12 +324,98 @@ impl PinnedBinary {
         Ok(Self {
             file,
             digest: digest.finalize().into(),
+            disk_path: None,
         })
+    }
+
+    fn register(self) -> Arc<Self> {
+        let pin = Arc::new(self);
+        PINNED_BINARIES
+            .lock()
+            .insert(pin.file.as_raw_fd(), Arc::downgrade(&pin));
+        pin
+    }
+
+    fn verify(&self, invocation: Option<&Path>) -> io::Result<Option<Metadata>> {
+        let Some(path) = &self.disk_path else {
+            return Ok(None);
+        };
+        let before = self.file.metadata()?;
+        if !can_run_from_disk(&self.file)? || executable_digest(&self.file)? != self.digest {
+            return Err(executable_changed());
+        }
+        let meta = self.file.metadata()?;
+        let same_file = |other: Metadata| (meta.dev(), meta.ino()) == (other.dev(), other.ino());
+        if file_stamp(&before) != file_stamp(&meta)
+            || !path.symlink_metadata().is_ok_and(same_file)
+            || invocation.is_some_and(|invocation| !invocation.metadata().is_ok_and(same_file))
+        {
+            return Err(executable_changed());
+        }
+        Ok(Some(meta))
     }
 
     fn path(&self) -> PathBuf {
         pinned_directory().join(self.file.as_raw_fd().to_string())
     }
+}
+
+impl Drop for PinnedBinary {
+    fn drop(&mut self) {
+        PINNED_BINARIES.lock().remove(&self.file.as_raw_fd());
+    }
+}
+
+fn executable_changed() -> io::Error {
+    io::Error::other("the verified executable changed")
+}
+
+fn file_stamp(meta: &Metadata) -> (u64, i64, i64) {
+    (meta.len(), meta.ctime(), meta.ctime_nsec())
+}
+
+fn can_run_from_disk(file: &File) -> io::Result<bool> {
+    let mut magic = [0; 4];
+    if file.read_at(&mut magic, 0)? != magic.len() || &magic != b"\x7fELF" {
+        return Ok(false);
+    }
+    // A sealed copy drops set-ID bits and file capabilities. Preserve that property.
+    if file.metadata()?.mode() & 0o6000 != 0 {
+        return Ok(false);
+    }
+    use nix::{errno::Errno, libc};
+    // SAFETY: a null buffer and size zero query only the length of the attribute.
+    let size = unsafe {
+        libc::fgetxattr(
+            file.as_raw_fd(),
+            c"security.capability".as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    match (size, Errno::last()) {
+        (size, _) if size >= 0 => Ok(false),
+        (_, Errno::ENODATA | Errno::EOPNOTSUPP) => Ok(true),
+        (_, error) => Err(error.into()),
+    }
+}
+
+fn read_executable(source: &File, dest: &mut impl io::Write) -> io::Result<()> {
+    // Open an independent read cursor so verification can reuse the pinned descriptor.
+    let file = File::open(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
+    let before = file.metadata()?;
+    let copied = io::copy(&mut (&file).take(before.len()), dest)?;
+    let after = file.metadata()?;
+    if copied != before.len() || file_stamp(&before) != file_stamp(&after) {
+        return Err(executable_changed());
+    }
+    Ok(())
+}
+
+fn executable_digest(file: &File) -> io::Result<[u8; 32]> {
+    let mut digest = Sha256::new();
+    read_executable(file, &mut digest)?;
+    Ok(digest.finalize().into())
 }
 
 fn pinned_directory() -> PathBuf {
@@ -358,10 +449,47 @@ pub(crate) fn spawn_runtime(
         cmd.env_clear();
     }
     cmd.envs(env.vars.iter().map(|(k, v)| (k, v)));
-    GroupChild::spawn(&mut cmd).map_err(|e| {
+    let failed = |e: io::Error| {
         let program = invocation.unwrap_or(&plan.program);
         Error::ProcessStartFailed(format!("Failed to start '{}': {e}", program.display()))
-    })
+    };
+    let _pin = if uses_pinned_binary(plan) {
+        let invocation = invocation.ok_or_else(|| failed(executable_changed()))?;
+        let fd = plan
+            .program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<RawFd>().ok())
+            .ok_or_else(|| failed(executable_changed()))?;
+        let pin = PINNED_BINARIES
+            .lock()
+            .get(&fd)
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| failed(executable_changed()))?;
+        if let Some(verified) = pin.verify(Some(invocation)).map_err(failed)? {
+            let expected = file_stamp(&verified);
+            // SAFETY: fstat is async-signal-safe, the descriptor stays open through spawn,
+            // and the closure touches only integers and returns an errno on failure.
+            unsafe {
+                cmd.pre_exec(move || {
+                    let current = nix::sys::stat::fstat(fd)?;
+                    if (
+                        current.st_size as u64,
+                        current.st_ctime,
+                        current.st_ctime_nsec,
+                    ) != expected
+                    {
+                        return Err(io::Error::from_raw_os_error(nix::libc::ESTALE));
+                    }
+                    Ok(())
+                });
+            }
+        }
+        Some(pin)
+    } else {
+        None
+    };
+    GroupChild::spawn(&mut cmd).map_err(failed)
 }
 
 /// The errors that mean the adapter could not be asked (not that it said no, and not that it is
@@ -500,7 +628,7 @@ impl AdapterRunner {
     fn pin_binary(plan: &CheckedPlan) -> Result<Option<PinnedBinary>> {
         plan.executable
             .as_deref()
-            .map(PinnedBinary::new)
+            .map(|file| PinnedBinary::new(file, &plan.launch.program))
             .transpose()
             .map_err(|e| {
                 Error::AdapterInvalid(format!(
@@ -517,7 +645,7 @@ impl AdapterRunner {
         let mut launch = plan.launch;
         result.binary_path = if let Some(pinned) = pinned {
             let program = std::mem::replace(&mut launch.program, pinned.path());
-            *self.pinned.lock() = Some(pinned);
+            *self.pinned.lock() = Some(pinned.register());
             Some(plan.invocation.unwrap_or(program))
         } else {
             plan.invocation
@@ -787,7 +915,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifact");
         std::fs::write(&path, b"first build").unwrap();
-        let pinned = PinnedBinary::new(&File::open(&path).unwrap()).unwrap();
+        let pinned = PinnedBinary::new(&File::open(&path).unwrap(), &path).unwrap();
         std::fs::write(&path, b"second build").unwrap();
 
         assert_eq!(
@@ -796,6 +924,53 @@ mod tests {
         );
         assert_eq!(std::fs::read(pinned.path()).unwrap(), b"first build");
         assert!(pinned.file.set_len(0).is_err());
+    }
+
+    #[test]
+    fn a_native_binary_must_keep_its_digest_until_spawn() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("app");
+        std::fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+        let pinned = PinnedBinary::new(&File::open(&program).unwrap(), &program).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&program)
+            .unwrap()
+            .write_all(b"updated build")
+            .unwrap();
+        assert!(pinned.verify(Some(&program)).is_err());
+    }
+
+    #[test]
+    fn a_replaced_native_binary_is_refused_before_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("app");
+        std::fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+        let pinned = PinnedBinary::new(&File::open(&program).unwrap(), &program)
+            .unwrap()
+            .register();
+        let replacement = dir.path().join("replacement");
+        std::fs::copy(&program, &replacement).unwrap();
+        std::fs::rename(&replacement, &program).unwrap();
+        let plan = LaunchPlan {
+            program: pinned.path(),
+            args: vec!["--list".into()],
+            cwd: dir.path().to_path_buf(),
+            extra_env: Vec::new(),
+        };
+        let spec = AppSpec::new(
+            "native-app".into(),
+            Runtime::CMD,
+            "app".into(),
+            plan.cwd.clone(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        assert!(matches!(
+            spawn_runtime(&plan, Some(&program), &spec),
+            Err(Error::ProcessStartFailed(message)) if message.contains("changed")
+        ));
     }
 
     #[test]
