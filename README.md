@@ -154,10 +154,13 @@ soon as the runtimes are imported.
 
 What the adapters do differently from the runners they replaced: `npm run` gets `--` before the
 arguments, so `--port 80` reaches the script; a python command of several words is split the way a
-shell splits it and the interpreter is the project's `venv` or `.venv` when there is one; a cargo
-project is built with the app's environment and a time limit, and `cargo metadata` names the binary
-and the target directory, so workspaces and a `target-dir` setting work; the build shows as
-`building`. A script that does not exist is reported by the program that runs it, in the app's log.
+shell splits it and the interpreter is the project's `venv` or `.venv` when there is one. Copied
+interpreters work, as do virtual environments linked to the Python selected by a version-manager
+shim on the app's `PATH`. A runtime adapter can also select an in-project environment configured
+by the app's `VIRTUAL_ENV` setting. A cargo project is built with the app's environment and a time
+limit, and `cargo metadata` names the binary and the target directory, so workspaces and an
+in-project `target-dir` setting work. The build shows as `building`. A script that does not
+exist is reported by the program that runs it, in the app's log.
 
 ## Optional adapters
 
@@ -483,7 +486,7 @@ takes the new spec).
 (default `true`, see [AI-SAFETY](docs/AI-SAFETY.md)) and `reuse_plan` (default `true`). On
 resurrection or automatic relaunch, the daemon can reuse an adapter's saved plan when the
 adapter's view of the app is unchanged, the same adapter is enabled with the same version and
-executable, and the plan passes current validation. A built executable must still match its
+executable, and the plan passes current validation. A pinned executable must still match its
 saved digest. The daemon uses a valid plan with no build steps immediately. For a plan with
 build steps, the daemon consults the adapter first and warns if an outage leads it to use the
 saved plan. Set `reuse_plan = false` to require fresh preparation on every launch. A manual

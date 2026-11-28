@@ -4,8 +4,7 @@
 //! An adapter returns data and never runs anything. The core limits what it runs on the
 //! adapter's word: only programs the manifest lists in `provides.programs`, only environment
 //! keys the manifest lists in `env_set`, never a key on the fixed deny list, and nothing that
-//! overrides the app's own `env`. Everything here is a pure check or a bounded runner, and
-//! none of it knows the name of a language.
+//! overrides the app's own `env`. Programs are checked before running in their own group.
 
 use crate::resolve::{absolute_search_path, anchor_runtime_path, daemon_vars};
 use crate::spawn::{ChildEnv, GroupChild};
@@ -18,8 +17,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -394,8 +393,10 @@ pub struct CheckedPlan {
     /// The invocation path for a program executed via its canonical path.
     pub invocation: Option<PathBuf>,
     pub binary_path: Option<PathBuf>,
-    /// The open source file when the plan runs the build's executable.
-    pub built_binary: Option<Arc<File>>,
+    /// A plan that runs a build output needs a successful build step.
+    pub requires_build: bool,
+    /// The open source file for an executable that needs a digest.
+    pub executable: Option<Arc<File>>,
     /// Keys of `extra_env` left out because the app's own `env` sets them.
     pub dropped_env: Vec<String>,
 }
@@ -415,6 +416,82 @@ pub fn validate_plan_with(
     spec: &AppSpec,
     rules: &RuntimeRules,
     daemon_env: &[(String, String)],
+) -> Result<CheckedPlan> {
+    validate_plan_with_venv(plan, spec, rules, daemon_env, &mut VenvProbe::default())
+}
+
+#[derive(Default)]
+struct VenvProbe {
+    target: Option<PathBuf>,
+    identity: Option<(u64, u64)>,
+}
+
+/// Validate a plan, consulting the declared Python on PATH if a virtualenv links to its
+/// version-managed interpreter. The probe is fixed by the daemon and its output stays here.
+pub async fn validate_runtime_plan(
+    plan: &PlanResult,
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+) -> Result<CheckedPlan> {
+    let daemon_env = daemon_vars();
+    let mut venv = VenvProbe::default();
+    let first = validate_plan_with_venv(plan, spec, rules, &daemon_env, &mut venv);
+    if first.is_ok() || venv.target.is_none() {
+        return first;
+    }
+    for name in ["python3", "python"] {
+        let probe = Step {
+            id: "python-identity".into(),
+            argv: [
+                name,
+                "-I",
+                "-S",
+                "-c",
+                "import os; s = os.stat('/proc/self/exe'); print(s.st_dev, s.st_ino)",
+            ]
+            .map(str::to_owned)
+            .into(),
+            cwd: None,
+            env_add: Default::default(),
+            timeout_secs: 5,
+            capture: Capture::Stdout,
+            capture_max: Some(128),
+            optional: true,
+            description: "Identify the Python interpreter".into(),
+        };
+        let Ok(steps) = validate_steps_with(&[probe], spec, rules, &daemon_env) else {
+            continue;
+        };
+        let Ok(outcome) = run_step(&steps[0], &mut BuildLog::none()).await else {
+            continue;
+        };
+        if !outcome.success() {
+            continue;
+        }
+        let Some((device, inode)) = outcome
+            .stdout
+            .as_deref()
+            .and_then(|line| line.trim_end().split_once(' '))
+        else {
+            continue;
+        };
+        let (Ok(device), Ok(inode)) = (device.parse::<u64>(), inode.parse::<u64>()) else {
+            continue;
+        };
+        venv.identity = Some((device, inode));
+        if let Ok(checked) = validate_plan_with_venv(plan, spec, rules, &daemon_env, &mut venv) {
+            return Ok(checked);
+        }
+    }
+    first
+}
+
+fn validate_plan_with_venv(
+    plan: &PlanResult,
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+    daemon_env: &[(String, String)],
+    venv: &mut VenvProbe,
 ) -> Result<CheckedPlan> {
     let what = "plan";
     if has_nul(&plan.program)
@@ -446,9 +523,21 @@ pub fn validate_plan_with(
     let app_dir = canonical_app_dir(&spec.cwd)?;
     let cwd = checked_cwd(&app_dir, &cwd)?;
     let (extra, dropped_env) = check_env(&plan.extra_env, spec, rules, what)?;
-    let (program, invocation, built_binary) = if built {
+    let binary_path = match &plan.binary_path {
+        Some(p) if !Path::new(p).is_absolute() => {
+            return invalid(format!("plan: binary_path '{p}' is not absolute"))
+        }
+        Some(p) => Some(PathBuf::from(p)),
+        None => None,
+    };
+    let (program, invocation, executable) = if built {
         let (path, source) = check_built_binary(&plan.program, &spec.cwd, &app_dir)?;
         (path, None, Some(Arc::new(source)))
+    } else if let Some((path, invocation, file)) =
+        python_venv_path(&plan.program, spec, rules, &app_dir)
+            .and_then(|path| open_python_venv(&app_dir, path, venv).ok())
+    {
+        (path, Some(invocation), Some(Arc::new(file)))
     } else {
         let (program, invocation) = resolve_program(
             &plan.program,
@@ -460,13 +549,6 @@ pub fn validate_plan_with(
         )?;
         (program, invocation, None)
     };
-    let binary_path = match &plan.binary_path {
-        Some(p) if !Path::new(p).is_absolute() => {
-            return invalid(format!("plan: binary_path '{p}' is not absolute"))
-        }
-        Some(p) => Some(PathBuf::from(p)),
-        None => None,
-    };
     Ok(CheckedPlan {
         launch: LaunchPlan {
             program,
@@ -476,9 +558,103 @@ pub fn validate_plan_with(
         },
         invocation,
         binary_path,
-        built_binary,
+        requires_build: built,
+        executable,
         dropped_env,
     })
+}
+
+/// Only the app owner can select another environment directory through `VIRTUAL_ENV`.
+fn python_venv_path(
+    program: &str,
+    spec: &AppSpec,
+    rules: &RuntimeRules,
+    app_dir: &Path,
+) -> Option<PathBuf> {
+    let path = Path::new(program);
+    let name = path.file_name()?.to_str()?;
+    if !path.is_absolute()
+        || !matches!(name, "python" | "python3")
+        || !rules.programs.iter().any(|declared| declared == name)
+    {
+        return None;
+    }
+    let relative = path
+        .strip_prefix(app_dir)
+        .or_else(|_| path.strip_prefix(&spec.cwd))
+        .ok()?;
+    if !relative
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    let bin = relative.parent()?;
+    let venv = bin.parent()?;
+    let configured = spec
+        .env
+        .get("VIRTUAL_ENV")
+        .filter(|p| !p.is_empty())
+        .map(Path::new);
+    let configured = configured.map(|p| {
+        p.strip_prefix(app_dir)
+            .or_else(|_| p.strip_prefix(&spec.cwd))
+            .unwrap_or(p)
+    });
+    if bin.file_name()? != "bin"
+        || venv.as_os_str().is_empty()
+        || (!matches!(venv.to_str(), Some(".venv" | "venv")) && configured != Some(venv))
+    {
+        return None;
+    }
+    Some(app_dir.join(relative))
+}
+
+fn open_python_venv(
+    app_dir: &Path,
+    invocation: PathBuf,
+    probe: &mut VenvProbe,
+) -> std::io::Result<(PathBuf, PathBuf, File)> {
+    let invalid = || std::io::Error::other("cannot verify the virtual environment's interpreter");
+    let directory = open_app_dir(app_dir)?;
+    let bin = invocation
+        .strip_prefix(app_dir)
+        .ok()
+        .and_then(Path::parent)
+        .ok_or_else(invalid)?;
+    let config = bin.with_file_name("pyvenv.cfg");
+    if !open_beneath(&directory, &config, 0)?.metadata()?.is_file() {
+        return Err(invalid());
+    }
+    open_beneath(&directory, bin, libc::O_DIRECTORY)?;
+    let actual = invocation.canonicalize()?;
+    let handle = if let Ok(local) = actual.strip_prefix(app_dir.join(bin)) {
+        open_beneath(&directory, &bin.join(local), 0)?
+    } else {
+        let Some((device, inode)) = probe.identity else {
+            if !actual.starts_with(app_dir) {
+                probe.target = Some(actual);
+            }
+            return Err(invalid());
+        };
+        if probe.target.as_deref() != Some(&actual) {
+            return Err(invalid());
+        }
+        let root = open_app_dir(Path::new("/"))?;
+        let handle = open_beneath(&root, actual.strip_prefix("/").map_err(|_| invalid())?, 0)?;
+        let meta = handle.metadata()?;
+        if (meta.dev(), meta.ino()) != (device, inode) {
+            return Err(invalid());
+        }
+        handle
+    };
+    let file = readable_executable(&handle)?;
+    let mut magic = [0; 4];
+    file.read_exact_at(&mut magic, 0)?;
+    if &magic != b"\x7fELF" {
+        return Err(invalid());
+    }
+    Ok((actual, invocation, file))
 }
 
 /// Open the app's executable without following links below the app directory.
@@ -517,17 +693,21 @@ fn check_built_binary(program: &str, app_dir: &Path, root: &Path) -> Result<(Pat
             "plan: '{program}' is not owned by the user the daemon runs as"
         ));
     }
+    let source = readable_executable(&handle).map_err(|_| not_executable())?;
+    Ok((actual, source))
+}
+
+fn readable_executable(handle: &File) -> std::io::Result<File> {
+    let meta = handle.metadata()?;
     use nix::sys::statvfs::{fstatvfs, FsFlags};
-    if fstatvfs(&handle)
-        .map_err(std::io::Error::from)?
-        .flags()
-        .contains(FsFlags::ST_NOEXEC)
+    if !meta.is_file()
+        || meta.mode() & 0o100 == 0
+        || fstatvfs(handle)?.flags().contains(FsFlags::ST_NOEXEC)
     {
-        return Err(not_executable());
+        return Err(std::io::Error::other("not an executable file"));
     }
     // Reopen the handle for reading after verifying the file type and owner.
-    let source = File::open(format!("/proc/self/fd/{}", handle.as_raw_fd()))?;
-    Ok((actual, source))
+    File::open(format!("/proc/self/fd/{}", handle.as_raw_fd()))
 }
 
 fn open_app_dir(path: &Path) -> std::io::Result<File> {

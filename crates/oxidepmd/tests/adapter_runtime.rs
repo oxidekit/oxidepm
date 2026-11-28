@@ -153,7 +153,7 @@ fn runtime_rig(
     env_set: &[&str],
     env: &[(&str, &str)],
 ) -> Rt {
-    runtime_rig_with(script, programs, env_set, env, "")
+    runtime_rig_with(script, programs, env_set, env, "", &[])
 }
 
 /// [`runtime_rig`] with the text of the daemon's `daemon.toml`.
@@ -163,13 +163,14 @@ fn runtime_rig_with(
     env_set: &[&str],
     env: &[(&str, &str)],
     daemon_toml: &str,
+    capture_programs: &[&str],
 ) -> Rt {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let work = tmp.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let work = std::fs::canonicalize(work).unwrap();
-    let provides = json!({ "runtimes": [RT], "programs": programs, "env_set": env_set, "capture_programs": [] });
+    let provides = json!({ "runtimes": [RT], "programs": programs, "env_set": env_set, "capture_programs": capture_programs });
     let rt = tokio::runtime::Runtime::new().unwrap();
     let inst = rt.block_on(install(
         &home,
@@ -850,6 +851,7 @@ fn hung_runtime_adapter_does_not_delay_cmd_launches() {
         &[],
         &[FAST],
         "launch_concurrency = 2\n",
+        &[],
     );
     let codes = std::thread::scope(|scope| {
         let starters: Vec<_> = (0..20)
@@ -1296,6 +1298,82 @@ fn reboot_with_adapter_down_uses_the_persisted_plan_for_an_unchanged_spec() {
 }
 
 #[test]
+fn a_python_venv_works_with_only_a_shim_on_the_search_path() {
+    check_python_venv("--symlinks");
+}
+
+#[test]
+fn a_python_venv_works_with_a_copied_interpreter() {
+    check_python_venv("--copies");
+}
+
+fn check_python_venv(mode: &str) {
+    let python = std::process::Command::new("python3")
+        .args(["-I", "-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("python3 is required to test virtual environments");
+    assert!(python.status.success(), "{python:?}");
+    let python = PathBuf::from(String::from_utf8(python.stdout).unwrap().trim());
+
+    let mut rig = runtime_rig_with(
+        |work| {
+            let venv = work.join(".venv");
+            let made = std::process::Command::new(&python)
+                .args(["-m", "venv", "--without-pip", mode])
+                .arg(&venv)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+            let shims = work.join("shims");
+            std::fs::create_dir(&shims).unwrap();
+            let shim = shims.join("python3");
+            std::fs::write(
+                &shim,
+                format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", python.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script(
+                json!([]),
+                json!({
+                    "program": venv.join("bin/python"),
+                    "args": ["-c", "import sys, time; open('prefix', 'w').write(sys.prefix); time.sleep(120)"],
+                    "cwd": work,
+                }),
+            )
+        },
+        &["python", "python3"],
+        &[],
+        &[FAST],
+        "",
+        &["python", "python3"],
+    );
+    let name = "venv-app";
+    let extra = json!({ "env": { "PATH": rig.work.join("shims") } });
+    let reply = rig.start(name, extra);
+    assert_eq!(reply["type"], "started", "{mode}: {reply}");
+    let prefix = rig.work.join("prefix");
+    let expected = rig.work.join(".venv");
+    let in_venv = |path: &Path| std::fs::read_to_string(path).ok().as_deref() == expected.to_str();
+    assert!(
+        wait_for(10, || in_venv(&prefix)),
+        "{mode}: {}",
+        last_error(&rig, name)
+    );
+
+    std::fs::remove_file(&prefix).unwrap();
+    rig.set_script(hanging());
+    rig.reboot();
+    assert!(
+        wait_for(10, || in_venv(&prefix)),
+        "{mode}: {}",
+        last_error(&rig, name)
+    );
+    assert_eq!(rig.calls("runtime.plan").len(), 1);
+    rig.stop(name);
+}
+
+#[test]
 fn a_stored_built_program_must_match_its_saved_digest() {
     let m = marker();
     let mut rig = runtime_rig(
@@ -1515,6 +1593,7 @@ fn reuse_plan_false_turns_the_stored_plan_off() {
         &[],
         &[FAST],
         "reuse_plan = false\n",
+        &[],
     );
     assert_eq!(rig.start("rp-app", json!({}))["type"], "started");
     rig.reboot();
@@ -1540,6 +1619,7 @@ fn automatic_relaunch_asks_the_adapter_when_reuse_is_off() {
         &[],
         &[FAST],
         "reuse_plan = false\n",
+        &[],
     );
     let name = "fresh-relaunch";
     let reply = rig.start(name, json!({}));

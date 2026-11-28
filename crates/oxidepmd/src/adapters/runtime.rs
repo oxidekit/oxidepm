@@ -28,7 +28,7 @@ use oxidepm_adapter_proto::{from_params, to_params};
 use oxidepm_core::{runtime_hints, scrub_text, AppSpec, Error, Result, Runtime};
 use oxidepm_runtime::resolve::{absolute_search_path, anchor_runtime_path};
 use oxidepm_runtime::step::{
-    canonical_app_dir, open_runtime_cwd, run_step, validate_plan, validate_steps, BuildLog,
+    canonical_app_dir, open_runtime_cwd, run_step, validate_runtime_plan, validate_steps, BuildLog,
     CheckedPlan, CheckedStep, STEP_TAIL_BYTES,
 };
 use oxidepm_runtime::{
@@ -265,8 +265,12 @@ struct SavedPlan {
     adapter_version: String,
     #[serde(flatten)]
     reply: PlanResult,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    built_sha256: Option<[u8; 32]>,
+    #[serde(
+        rename = "built_sha256",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    executable_sha256: Option<[u8; 32]>,
 }
 
 struct Stored {
@@ -447,14 +451,15 @@ impl AdapterRunner {
         })
     }
 
-    fn check_stored(&self, spec: &AppSpec, stored: &Stored) -> Option<ValidatedPlan> {
-        let plan = validate_plan(&stored.saved.reply, spec, &self.rules).ok()?;
-        if plan.built_binary.is_some() && (!stored.had_steps || stored.saved.built_sha256.is_none())
-        {
+    async fn check_stored(&self, spec: &AppSpec, stored: &Stored) -> Option<ValidatedPlan> {
+        let plan = validate_runtime_plan(&stored.saved.reply, spec, &self.rules)
+            .await
+            .ok()?;
+        if plan.requires_build && !stored.had_steps {
             return None;
         }
         let pinned = Self::pin_binary(&plan).ok()?;
-        if pinned.as_ref().map(|binary| binary.digest) != stored.saved.built_sha256 {
+        if pinned.as_ref().map(|binary| binary.digest) != stored.saved.executable_sha256 {
             return None;
         }
         Some(ValidatedPlan { plan, pinned })
@@ -473,7 +478,7 @@ impl AdapterRunner {
         )))
     }
 
-    /// Remember the plan and the digest of any build executable it uses.
+    /// Remember the plan and the digest of any executable it pins.
     async fn store_plan(&self, spec: &AppSpec, digest: String, saved: &SavedPlan, had_steps: bool) {
         let Some(store) = self.host.store.lock().clone() else {
             return;
@@ -493,13 +498,13 @@ impl AdapterRunner {
     }
 
     fn pin_binary(plan: &CheckedPlan) -> Result<Option<PinnedBinary>> {
-        plan.built_binary
+        plan.executable
             .as_deref()
             .map(PinnedBinary::new)
             .transpose()
             .map_err(|e| {
                 Error::AdapterInvalid(format!(
-                    "plan: cannot pin the built executable '{}': {e}",
+                    "plan: cannot pin the executable '{}': {e}",
                     plan.launch.program.display()
                 ))
             })
@@ -511,9 +516,9 @@ impl AdapterRunner {
         let mut result = PrepareResult::success("");
         let mut launch = plan.launch;
         result.binary_path = if let Some(pinned) = pinned {
-            let invocation = std::mem::replace(&mut launch.program, pinned.path());
+            let program = std::mem::replace(&mut launch.program, pinned.path());
             *self.pinned.lock() = Some(pinned);
-            Some(invocation)
+            Some(plan.invocation.unwrap_or(program))
         } else {
             plan.invocation
         };
@@ -573,14 +578,12 @@ impl Runner for AdapterRunner {
         let view = spec_view(spec, self.entry.name());
         let stored = self.load_stored(spec, &spec_digest(&view)).await;
         self.ensure_current()?;
-        if let Some(selected) = stored
-            .as_ref()
-            .filter(|stored| !stored.had_steps)
-            .and_then(|stored| self.check_stored(spec, stored))
-        {
-            info!("{} starts from its stored launch plan", spec.name);
-            self.state.lock().selected = Some(selected);
-            return Ok(());
+        if let Some(saved) = stored.as_ref().filter(|stored| !stored.had_steps) {
+            if let Some(selected) = self.check_stored(spec, saved).await {
+                info!("{} starts from its stored launch plan", spec.name);
+                self.state.lock().selected = Some(selected);
+                return Ok(());
+            }
         }
         // The adapter runs in its own working directory. Resolve relative PATH entries against
         // the app's directory before passing the lookup hint.
@@ -608,7 +611,7 @@ impl Runner for AdapterRunner {
                 let Some(stored) = stored else {
                     return Err(e);
                 };
-                let Some(selected) = self.check_stored(spec, &stored) else {
+                let Some(selected) = self.check_stored(spec, &stored).await else {
                     return Err(e);
                 };
                 let warning = self.stored_warning(&e, stored.had_steps);
@@ -705,26 +708,29 @@ impl Runner for AdapterRunner {
             Ok(reply) => reply,
             Err(e) if is_outage(&e) => {
                 self.ensure_current()?;
-                let Some(selected) = stored
-                    .as_ref()
-                    .and_then(|stored| self.check_stored(spec, stored))
-                else {
+                let Some(stored) = stored.as_ref() else {
                     return Err(e);
                 };
+                let Some(selected) = self.check_stored(spec, stored).await else {
+                    return Err(e);
+                };
+                self.ensure_current()?;
                 warnings.push(self.stored_warning(&e, false));
                 return Ok(self.prepared_plan(selected, warnings));
             }
             Err(e) => return Err(e),
         };
-        let checked = validate_plan(&reply, spec, &self.rules).and_then(|checked| {
-            if checked.built_binary.is_some() && !built {
-                return Err(Error::AdapterInvalid(
-                    "plan: a built executable requires a successful build step".into(),
-                ));
-            }
-            let pinned = Self::pin_binary(&checked)?;
-            Ok((checked, pinned))
-        });
+        let checked = validate_runtime_plan(&reply, spec, &self.rules)
+            .await
+            .and_then(|checked| {
+                if checked.requires_build && !built {
+                    return Err(Error::AdapterInvalid(
+                        "plan: a built executable requires a successful build step".into(),
+                    ));
+                }
+                let pinned = Self::pin_binary(&checked)?;
+                Ok((checked, pinned))
+            });
         let (checked, pinned) = match checked {
             Ok(checked) => checked,
             Err(e) => {
@@ -742,7 +748,7 @@ impl Runner for AdapterRunner {
         let saved = SavedPlan {
             adapter_version: self.entry.version().to_string(),
             reply,
-            built_sha256: pinned.as_ref().map(|binary| binary.digest),
+            executable_sha256: pinned.as_ref().map(|binary| binary.digest),
         };
         self.store_plan(spec, digest, &saved, had_steps).await;
         self.ensure_current()?;

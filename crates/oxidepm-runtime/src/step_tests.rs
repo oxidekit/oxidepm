@@ -502,6 +502,34 @@ fn an_absolute_plan_keeps_its_declared_invocation_name() {
 }
 
 #[test]
+fn a_configured_python_venv_requires_a_declared_interpreter() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join("environments/app");
+    let bin = env.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(env.join("pyvenv.cfg"), "").unwrap();
+    let interpreter = bin.join("python");
+    std::fs::copy(std::env::current_exe().unwrap(), &interpreter).unwrap();
+    let mut app = spec(dir.path());
+    let launch = plan(interpreter.to_str().unwrap(), dir.path());
+    let python = rules(&["python"], &[], &[]);
+
+    is_invalid(validate_plan_with(&launch, &app, &python, &[]));
+    app.env
+        .insert("VIRTUAL_ENV".into(), "environments/app".into());
+    is_invalid(validate_plan_with(
+        &launch,
+        &app,
+        &rules(&["python3"], &[], &[]),
+        &[],
+    ));
+    let checked = validate_plan_with(&launch, &app, &python, &[]).unwrap();
+    assert_eq!(checked.invocation.as_deref(), Some(interpreter.as_path()));
+    assert!(checked.executable.is_some());
+    assert!(!checked.requires_build);
+}
+
+#[test]
 fn a_relative_search_path_is_based_on_the_app_directory() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
