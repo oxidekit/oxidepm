@@ -25,13 +25,10 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            deb_arch: amd64
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            deb_arch: arm64
     env:
       TARGET: ${{ matrix.target }}
-      DEB_ARCH: ${{ matrix.deb_arch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,72 +56,11 @@ jobs:
           bash ../oxidepm/scripts/build-adapter-bundle.sh "$TARGET" ../oxidepm/share/oxidepm/adapters \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER"
 
-      - name: Package archives
-        working-directory: oxidepm
-        run: |
-          tar --owner=0 --group=0 --numeric-owner -czf "oxidepm-$TARGET.tar.gz" \
-            -C "$PWD/target/$TARGET/release" oxidepm oxidepmd oxidepm-sandbox \
-            -C "$PWD" share LICENSE-MIT LICENSE-APACHE
-          tar --owner=0 --group=0 --numeric-owner -czf "oxidepm-adapters-$TARGET.tar.gz" -C share/oxidepm/adapters .
-
-      - name: Build Debian package
-        working-directory: oxidepm
-        run: |
-          version=$(sh scripts/deb-version.sh "$GITHUB_REF_NAME")
-          release_version=${GITHUB_REF_NAME#v}
-          pkg="oxidepm_${release_version//-/.}_${DEB_ARCH}"
-          install -dm755 "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/lib/systemd/user" \
-            "$pkg/usr/share/oxidepm" "$pkg/usr/share/doc/oxidepm"
-          cp "target/$TARGET/release/"{oxidepm,oxidepmd,oxidepm-sandbox} "$pkg/usr/bin/"
-          cp -R share/oxidepm/adapters "$pkg/usr/share/oxidepm/"
-          cp LICENSE-MIT LICENSE-APACHE "$pkg/usr/share/doc/oxidepm/"
-
-          cat > "$pkg/DEBIAN/control" << EOF
-          Package: oxidepm
-          Version: $version
-          Section: utils
-          Priority: optional
-          Architecture: $DEB_ARCH
-          Maintainer: Nayiem Willems <nayiem@mono-labs.org>
-          Description: Process manager written in Rust with adapter support
-           OxidePM supervises processes, handles restart and health policies, and
-           supports optional runtime and tooling adapters.
-          Homepage: https://github.com/$GITHUB_REPOSITORY
-          EOF
-
-          cat > "$pkg/DEBIAN/postinst" << 'EOF'
-          #!/bin/sh
-          if [ "$1" = configure ]; then
-              echo "Import the bundled runtimes with: oxidepm adapter import --bundled --tag runtime --enable --yes"
-          fi
-          EOF
-          chmod 755 "$pkg/DEBIAN/postinst"
-
-          cat > "$pkg/usr/lib/systemd/user/oxidepmd.service" << 'EOF'
-          [Unit]
-          Description=OxidePM Process Manager Daemon
-          After=network.target
-
-          [Service]
-          Type=simple
-          ExecStart=/usr/bin/oxidepmd
-          Restart=on-failure
-          RestartSec=5
-          TimeoutStopSec=160
-          KillMode=mixed
-
-          [Install]
-          WantedBy=default.target
-          EOF
-          dpkg-deb --root-owner-group --build "$pkg"
-          test "$(dpkg-deb -f "$pkg.deb" Version)" = "$version"
-
-      - name: Stage packages and adapter archives
+      - name: Stage binaries and adapter bundle
         working-directory: oxidepm
         run: |
           mkdir release-input
-          mv "oxidepm-$TARGET.tar.gz" "oxidepm-adapters-$TARGET.tar.gz" release-input/
-          mv ./*.deb release-input/
+          cp "target/$TARGET/release/"{oxidepm,oxidepmd,oxidepm-sandbox} LICENSE-MIT LICENSE-APACHE release-input/
           cp -R share/oxidepm/adapters release-input/adapters
 
       - uses: actions/upload-artifact@v4
@@ -154,6 +90,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y minisign
+      - name: Sign and package release bundles
+        env:
+          OXIDEPM_MINISIGN_KEY: ${{ secrets.OXIDEPM_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          set +x
+          : "${OXIDEPM_MINISIGN_KEY:?Missing release signing key}"
+          umask 077
+          key_dir=$(mktemp -d "$RUNNER_TEMP/oxidepm-sign.XXXXXXXX")
+          trap 'rm -f -- "$key_dir/minisign.key" && rmdir -- "$key_dir"' EXIT
+          key_file="$key_dir/minisign.key"
+          printf '%s\n' "$OXIDEPM_MINISIGN_KEY" > "$key_file"
+          unset OXIDEPM_MINISIGN_KEY
+
+          bash scripts/package-release-bundles.sh bundles "$key_file"
       - name: Prepare release assets
         shell: bash
         run: |

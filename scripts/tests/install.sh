@@ -33,9 +33,10 @@ bundle=share/oxidepm/adapters
 mkdir -p "$work/files/$bundle/nested"
 printf '%s\n' '{}' > "$work/files/$bundle/index.json"
 printf '%s\n' 'checksums' > "$work/files/$bundle/SHA256SUMS"
+printf '%s\n' 'test bundle signature' > "$work/files/$bundle/SHA256SUMS.minisig"
 printf '%s\n' 'archive' > "$work/files/$bundle/nested/adapter.tar.gz"
 chmod 700 "$work/files/$bundle" "$work/files/$bundle/nested"
-chmod 600 "$work/files/$bundle/index.json" "$work/files/$bundle/SHA256SUMS"
+chmod 600 "$work/files/$bundle/index.json" "$work/files/$bundle/SHA256SUMS" "$work/files/$bundle/SHA256SUMS.minisig"
 chmod 700 "$work/files/$bundle/nested/adapter.tar.gz"
 archive=oxidepm-x86_64-unknown-linux-gnu.tar.gz
 tar --owner=42424 --group=42425 -czf "$work/release/$archive" -C "$work/files" \
@@ -139,7 +140,7 @@ for mode in user root sudo; do
             exit 1
         }
     done
-    for file in index.json SHA256SUMS nested/adapter.tar.gz; do
+    for file in index.json SHA256SUMS SHA256SUMS.minisig nested/adapter.tar.gz; do
         cmp -s "$work/files/$bundle/$file" "$work/$mode/$bundle/$file"
         test "$(stat -c '%a %u %g' "$work/$mode/$bundle/$file")" = "644 $(id -u) $(id -g)" || {
             printf 'Unexpected permissions or ownership on %s in %s install\n' "$file" "$mode" >&2
@@ -155,7 +156,7 @@ for mode in user root sudo; do
     if [ "$mode" = sudo ]; then
         test "$(grep -c '^sudo install -m 0755$' "$work/install-args")" -eq 2
         test "$(grep -c '^sudo install -d -m$' "$work/install-args")" -eq 2
-        test "$(grep -c '^sudo install -m 0644$' "$work/install-args")" -eq 3
+        test "$(grep -c '^sudo install -m 0644$' "$work/install-args")" -eq 4
     fi
     printf 'ok - installs executable binaries and readable adapters as %s\n' "$mode"
 done

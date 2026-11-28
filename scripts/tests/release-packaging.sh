@@ -19,6 +19,82 @@ exec "$TEST_PACKAGING_TAR" "$@"
 MOCK
 chmod +x "$work/bin/tar"
 
+test_signed_bundles() {
+    inputs="$work/inputs"
+    mkdir "$inputs"
+    export TEST_BUNDLE_MINISIGN=$(command -v minisign)
+    minisign -G -W -p "$work/bundle-key.pub" -s "$work/bundle-key.sec" >/dev/null
+    export TEST_BUNDLE_KEY=$(tail -n 1 "$work/bundle-key.pub")
+    mkdir "$work/signing-bin"
+    cat > "$work/signing-bin/minisign" <<'MOCK'
+#!/bin/sh
+set -eu
+if [ "$1" = -V ]; then
+    test "$2 $3 $4" = '-H -Q -P'
+    # Exercise the second pinned key after the first fails.
+    test "$5" = 'RWTuJOozYEG8Y1hYBqUF8CBncU1PUQgqfJ/hr6Zcwgt1cDwfeRrZh+q5'
+    shift 5
+    set -- -V -H -Q -P "$TEST_BUNDLE_KEY" "$@"
+elif [ "${TEST_BUNDLE_WRONG_COMMENT:-}" = 1 ]; then
+    test "$1 $8" = '-S -t'
+    set -- "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" 'wrong trusted comment'
+fi
+exec "$TEST_BUNDLE_MINISIGN" "$@"
+MOCK
+    chmod +x "$work/signing-bin/minisign"
+
+    for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+        input="$inputs/oxidepm-$target"
+        mkdir -p "$input/adapters"
+        for binary in oxidepm oxidepmd oxidepm-sandbox; do
+            printf '%s\n' "$binary for $target" > "$input/$binary"
+            chmod 0644 "$input/$binary"
+        done
+        touch "$input/LICENSE-MIT" "$input/LICENSE-APACHE"
+        printf '{"target":"%s"}\n' "$target" > "$input/adapters/index.json"
+        (cd "$input/adapters" && sha256sum index.json > SHA256SUMS)
+    done
+
+    package_bundles() {
+        PATH="$work/signing-bin:$PATH" GITHUB_REF_NAME="$tag" GITHUB_REPOSITORY=example/oxidepm \
+            bash "$root/scripts/package-release-bundles.sh" "$inputs" "$work/bundle-key.sec"
+    }
+    if TEST_BUNDLE_WRONG_COMMENT=1 package_bundles > "$work/signing.log" 2>&1; then
+        echo 'Packaged a bundle with an unexpected trusted comment' >&2
+        exit 1
+    fi
+    grep -Fq 'has an unexpected trusted comment' "$work/signing.log"
+    test ! -e "$inputs/oxidepm-x86_64-unknown-linux-gnu/oxidepm-x86_64-unknown-linux-gnu.tar.gz"
+    package_bundles
+
+    for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+        input="$inputs/oxidepm-$target"
+        case "$target" in x86_64-*) arch=amd64 ;; aarch64-*) arch=arm64 ;; esac
+        full="$work/full-$arch"
+        adapters="$work/adapters-$arch"
+        deb="$work/deb-$arch"
+        package="$input/oxidepm_1.2.3.rc.1_$arch.deb"
+        mkdir "$full" "$adapters" "$deb"
+        tar --no-same-owner -xzf "$input/oxidepm-$target.tar.gz" -C "$full"
+        tar --no-same-owner -xzf "$input/oxidepm-adapters-$target.tar.gz" -C "$adapters"
+        dpkg-deb -x "$package" "$deb"
+        test "$(dpkg-deb -f "$package" Architecture)" = "$arch"
+        for dir in "$full/share/oxidepm/adapters" "$adapters" "$deb/usr/share/oxidepm/adapters"; do
+            (cd "$dir" && sha256sum --check --strict SHA256SUMS)
+            comment=$(minisign -V -H -Q -P "$TEST_BUNDLE_KEY" \
+                -m "$dir/SHA256SUMS" -x "$dir/SHA256SUMS.minisig")
+            test "$comment" = "oxidepm release bundle tag=$tag target=$target"
+            test "$(stat -c %a "$dir/SHA256SUMS.minisig")" = 644
+        done
+        for dir in "$full" "$deb/usr/bin"; do
+            for binary in oxidepm oxidepmd oxidepm-sandbox; do
+                test "$(stat -c %a "$dir/$binary")" = 755
+            done
+        done
+    done
+    printf 'ok - packages a verified detached adapter signature for each release target\n'
+}
+
 test_pkgbuild() {
     if grep -Fq "'SKIP'" "$root/dist/aur/PKGBUILD"; then
         echo 'The package template skips source verification' >&2
@@ -72,10 +148,12 @@ test_pkgbuild() {
         "$src/target/release/oxidepm-sandbox" "$src/LICENSE-MIT" "$src/LICENSE-APACHE"
     printf '{}\n' > "$work/bundle/index.json"
     (cd "$work/bundle" && sha256sum index.json > SHA256SUMS)
+    printf '%s\n' 'test bundle signature' > "$work/bundle/SHA256SUMS.minisig"
     tar -czf "$work/assets/oxidepm-adapters-$tag-x86_64.tar.gz" -C "$work/bundle" .
     PATH="$work/bin:$PATH" CARCH=x86_64 srcdir="$work/assets" pkgdir="$work/pkg" \
         bash -eu -c 'source "$1"; cd "$2"; package' _ "$work/PKGBUILD" "$work"
     cmp "$work/bundle/index.json" "$work/pkg/usr/share/oxidepm/adapters/index.json"
+    cmp "$work/bundle/SHA256SUMS.minisig" "$work/pkg/usr/share/oxidepm/adapters/SHA256SUMS.minisig"
     printf 'ok - extracts the package adapter bundle without archive ownership\n'
 }
 
@@ -83,6 +161,7 @@ test_docker_bundle() {
     archive=oxidepm-adapters-x86_64-unknown-linux-gnu.tar.gz
     printf '{}\n' > "$work/bundle/index.json"
     (cd "$work/bundle" && sha256sum index.json > SHA256SUMS)
+    printf '%s\n' 'test bundle signature' > "$work/bundle/SHA256SUMS.minisig"
     tar -czf "$work/assets/$archive" -C "$work/bundle" .
     (cd "$work/assets" && sha256sum "$archive" > checksums.txt)
     cp "$work/assets/checksums.txt" "$work/original-checksums"
@@ -129,6 +208,7 @@ MOCK
     sign_checksums "$tag"
     ADAPTER_BUNDLE_URL="https://example.invalid/download/$tag" PATH="$work/bin:$PATH" sh "$work/docker-run"
     test -f "$work/extracted/index.json"
+    cmp "$work/bundle/SHA256SUMS.minisig" "$work/extracted/SHA256SUMS.minisig"
     printf 'ok - extracts an authenticated adapter bundle without archive ownership\n'
 
     for rejected in signature tag archive; do
@@ -157,8 +237,9 @@ MOCK
 }
 
 case "${1-}" in
+    bundle) test_signed_bundles ;;
     pkgbuild) test_pkgbuild ;;
     docker) test_docker_bundle ;;
-    '') test_pkgbuild; test_docker_bundle ;;
+    '') test_signed_bundles; test_pkgbuild; test_docker_bundle ;;
     *) exit 2 ;;
 esac
