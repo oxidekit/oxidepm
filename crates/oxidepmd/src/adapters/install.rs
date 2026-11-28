@@ -26,7 +26,10 @@ use nix::unistd::{geteuid, unlinkat, UnlinkatFlags};
 use oxidepm_adapter_proto::manifest::Rule;
 use oxidepm_adapter_proto::messages::method;
 use oxidepm_adapter_proto::permissions::{HostLevel, HostScope};
-use oxidepm_adapter_proto::signing::{is_official_release_trust, verify_bundle_checksums};
+use oxidepm_adapter_proto::signing::{
+    is_official_release_trust, verify_bundle_checksums, BUNDLED_UNVERIFIED_TRUST,
+    BUNDLED_VERIFIED_TRUST,
+};
 use oxidepm_adapter_proto::{
     host_target, Index, Invalid, Kind, Manifest, Permissions, ValidateCtx, VerifiedIndex,
     INDEX_MAX_BYTES,
@@ -596,7 +599,8 @@ impl Drop for Pending {
 fn describe_trust(trust: &str) -> String {
     match trust.strip_prefix("signed:") {
         Some(key) => format!("the index signed by key {key}"),
-        None if trust == "bundled" => "the installed release bundle".to_string(),
+        None if trust == BUNDLED_VERIFIED_TRUST => "the verified release bundle".to_string(),
+        None if trust == BUNDLED_UNVERIFIED_TRUST => "an unverified release bundle".to_string(),
         None => "a source you pinned by hand".to_string(),
     }
 }
@@ -1033,7 +1037,7 @@ impl AdapterHost {
                     let (bundle, index) = tokio::task::spawn_blocking(installed_release_bundle)
                         .await
                         .map_err(|e| Error::Internal(format!("the bundle check failed: {e}")))??;
-                    (index, "bundled".to_string(), Some(bundle))
+                    (index, BUNDLED_UNVERIFIED_TRUST.to_string(), Some(bundle))
                 } else {
                     let (Some(bytes), Some(sig)) = (&args.index_bytes, &args.index_sig) else {
                         return Err(Error::AdapterInvalid(
@@ -1157,6 +1161,11 @@ impl AdapterHost {
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("the staged file check failed: {e}")))??;
+                let trust = if matches!(signature, SourceSignature::Bundle(Ok(()))) {
+                    BUNDLED_VERIFIED_TRUST.to_string()
+                } else {
+                    trust
+                };
                 Ok((trust, args.source.clone(), signature))
             }
             other if other.starts_with("pinned:") => {
@@ -1656,8 +1665,10 @@ impl AdapterHost {
         let old_version = semver::Version::parse(&old.version)
             .map_err(|e| Error::AdapterInvalid(e.to_string()))?;
 
-        // the same source, or the user says so
-        if old.trust != trust && !args.switch_source {
+        // A verified bundle can update a bundle whose signature was unverified or unrecorded.
+        let same_source = old.trust == trust
+            || (old.trust == BUNDLED_UNVERIFIED_TRUST && trust == BUNDLED_VERIFIED_TRUST);
+        if !same_source && !args.switch_source {
             return Err(Error::AdapterInvalid(format!(
                 "'{name}' was installed from {} and this release comes from {}; a release must come from the same source. If you mean to change the source, pass --switch-source",
                 describe_trust(&old.trust),
@@ -1703,6 +1714,9 @@ impl AdapterHost {
                 .map_err(|e| io_error("bringing the adapter's files back", e))?;
             incoming.keep = true;
             let mut row = old.clone();
+            if same_source {
+                row.trust = trust;
+            }
             row.state_note = None;
             row.updated_at = now_text();
             store.repo().update(&row).await?;
@@ -1889,7 +1903,7 @@ impl AdapterHost {
                 )));
             }
         }
-        if old.trust != row.trust {
+        if !same_source {
             self.forget_previous_across_sources(store, paths, &row)
                 .await;
         }

@@ -89,8 +89,9 @@ fn bundle_signature_requires_a_trusted_key_and_prehashed_mode() {
 }
 
 #[test]
-fn official_release_trust_covers_the_bundle_and_embedded_keys() {
-    assert!(is_official_release_trust("bundled"));
+fn official_release_trust_requires_a_verified_bundle_or_embedded_key() {
+    assert!(is_official_release_trust("bundled:verified"));
+    assert!(!is_official_release_trust("bundled"));
     for key in official_keys() {
         assert!(is_official_release_trust(&format!("signed:{}", key.key_id)));
     }

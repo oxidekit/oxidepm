@@ -102,9 +102,15 @@ pub fn official_keys() -> Vec<IndexKey> {
         .collect()
 }
 
+/// Trust recorded for a bundle whose release signature could not be verified.
+/// Older installs also used this value without recording the verification result.
+pub const BUNDLED_UNVERIFIED_TRUST: &str = "bundled";
+/// Trust recorded after verifying a bundle's release signature.
+pub const BUNDLED_VERIFIED_TRUST: &str = "bundled:verified";
+
 /// Whether the trust recorded after install verification identifies an official release.
 pub fn is_official_release_trust(trust: &str) -> bool {
-    trust == "bundled"
+    trust == BUNDLED_VERIFIED_TRUST
         || trust
             .strip_prefix("signed:")
             .is_some_and(|id| official_keys().iter().any(|key| key.key_id == id))

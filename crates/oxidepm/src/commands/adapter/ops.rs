@@ -3,7 +3,9 @@
 
 use anyhow::{bail, Result};
 use colored::Colorize;
-use oxidepm_adapter_proto::signing::is_official_release_trust;
+use oxidepm_adapter_proto::signing::{
+    is_official_release_trust, BUNDLED_UNVERIFIED_TRUST, BUNDLED_VERIFIED_TRUST,
+};
 use oxidepm_adapter_proto::{Kind, Manifest, Permissions};
 use oxidepm_core::{Error, Paths};
 use oxidepm_ipc::{
@@ -184,10 +186,13 @@ fn trust_line(info: &AdapterInfo) -> String {
             info.exe_sha256
         ),
         Some(key) => format!("signed by key {key}. Program sha256 {}", info.exe_sha256),
-        None if info.trust == "bundled" => format!(
+        None if info.trust == BUNDLED_VERIFIED_TRUST => format!(
             "bundled with this release. Program sha256 {}",
             info.exe_sha256
         ),
+        None if info.trust == BUNDLED_UNVERIFIED_TRUST => {
+            format!("bundled, unverified. Program sha256 {}", info.exe_sha256)
+        }
         None => format!(
             "pinned by you. Program sha256 {}. No signature",
             info.exe_sha256
@@ -461,7 +466,8 @@ pub async fn list() -> Result<()> {
     for a in &adapters {
         let trust = match a.trust.strip_prefix("signed:") {
             Some(key) => format!("signed {key}"),
-            None if a.trust == "bundled" => "bundled with this release".to_string(),
+            None if a.trust == BUNDLED_VERIFIED_TRUST => "bundled with this release".to_string(),
+            None if a.trust == BUNDLED_UNVERIFIED_TRUST => "bundled, unverified".to_string(),
             None => "pinned by you".to_string(),
         };
         println!(

@@ -17,6 +17,19 @@ fn kit_with(pkgs: &[&Packaged]) -> Kit {
     kit
 }
 
+fn sign_bundle(kit: &Kit) {
+    let checksums = std::fs::read(kit.bundle.join("SHA256SUMS")).unwrap();
+    let comment = oxidepm_adapter_proto::signing::bundle_trusted_comment(
+        concat!("v", env!("CARGO_PKG_VERSION")),
+        &target(),
+    );
+    std::fs::write(
+        kit.bundle.join("SHA256SUMS.minisig"),
+        kit.key.sign(&checksums, &comment),
+    )
+    .unwrap();
+}
+
 fn enable_with_fingerprint(kit: &Kit, pkg: &Packaged) -> Run {
     kit.run(&[
         "adapter",
@@ -669,14 +682,7 @@ fn unsigned_release_bundle_installs_without_index_keys() {
         .cli()
         .env("OXIDEPM_TEST_INDEX_URL", "")
         .env_remove("OXIDEPM_TEST_INDEX_KEYS")
-        .args([
-            "adapter",
-            "import",
-            "--bundled",
-            "alpha",
-            "--enable",
-            "--yes",
-        ])
+        .args(["adapter", "import", "--bundled", "alpha"])
         .output()
         .unwrap();
     let output = format!(
@@ -685,12 +691,74 @@ fn unsigned_release_bundle_installs_without_index_keys() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "{output}");
+    let enabled = enable_with_fingerprint(&kit, &adapter);
+    assert_eq!(enabled.code, 0, "{}", enabled.all());
     let info = info_json(&kit, "alpha");
     assert_eq!(info["source"], "bundled");
     assert_eq!(info["trust"], "bundled");
     assert_eq!(info["enabled"], true);
     assert_eq!(kit.http.hits(), 0);
     stop(daemon);
+}
+
+#[test]
+fn unverified_bundled_runtimes_need_explicit_consent() {
+    let runtime = Pkg::tool("runtime-demo", "0.1.0")
+        .with(
+            "provides",
+            json!({"runtimes": ["demo"], "programs": ["demo"]}),
+        )
+        .package();
+    for mismatched_signature in [false, true] {
+        let kit = kit_with(&[&runtime]);
+        if mismatched_signature {
+            let comment = oxidepm_adapter_proto::signing::bundle_trusted_comment(
+                concat!("v", env!("CARGO_PKG_VERSION")),
+                &target(),
+            );
+            std::fs::write(
+                kit.bundle.join("SHA256SUMS.minisig"),
+                kit.key.sign(b"other checksums", &comment),
+            )
+            .unwrap();
+        }
+        let daemon = kit.daemon();
+        let import = kit.run(&["adapter", "import", "--bundled", "runtime-demo"]);
+        assert_eq!(import.code, 0, "{}", import.all());
+        let auto = kit.run(&["adapter", "enable", "runtime-demo", "--yes"]);
+        assert_eq!(auto.code, 2, "{}", auto.all());
+        assert!(
+            auto.stderr.contains("needs explicit consent"),
+            "{}",
+            auto.all()
+        );
+        let reply = daemon.rpc(json!({
+            "type": "adapter", "op": "enable", "name": "runtime-demo", "yes": true,
+        }));
+        assert_eq!(reply["code"], "E_ADAPTER_INVALID", "{reply}");
+        assert!(
+            reply["message"]
+                .as_str()
+                .unwrap()
+                .contains("requires explicit consent"),
+            "{reply}"
+        );
+        assert_eq!(info_json(&kit, "runtime-demo")["enabled"], false);
+        let info = kit.run(&["adapter", "info", "runtime-demo"]);
+        assert!(
+            info.stdout.contains("bundled, unverified"),
+            "{}",
+            info.all()
+        );
+        let list = kit.run(&["adapter", "list"]);
+        assert!(
+            list.stdout.contains("bundled, unverified"),
+            "{}",
+            list.all()
+        );
+        let explicit = enable_with_fingerprint(&kit, &runtime);
+        assert_eq!(explicit.code, 0, "{}", explicit.all());
+    }
 }
 
 #[test]
@@ -1945,6 +2013,7 @@ fn info_says_which_af_unix_services_the_self_test_reached() {
 fn a_bundled_adapter_can_enable_with_reachable_unix_services() {
     let a = alpha();
     let kit = kit_with(&[&a]);
+    sign_bundle(&kit);
     let state = oxidepm_core::Paths::new(kit.home.clone()).adapter_state("alpha");
     let _daemon = kit.daemon_with(&[("TMPDIR", state.to_str().unwrap())]);
     let run = kit.run(&[
@@ -1964,7 +2033,7 @@ fn a_bundled_adapter_can_enable_with_reachable_unix_services() {
     );
     let info = info_json(&kit, "alpha");
     assert_eq!(info["enabled"], true, "{info}");
-    assert_eq!(info["trust"], "bundled", "{info}");
+    assert_eq!(info["trust"], "bundled:verified", "{info}");
     assert_eq!(info["enforced"]["allow_unenforced"], false, "{info}");
 }
 
@@ -2284,6 +2353,7 @@ fn bundled_import_can_enable_the_pure_adapters_at_once() {
     let a = Pkg::tool("rt-a", "0.1.0").package();
     let b = Pkg::tool("rt-b", "0.1.0").package();
     let kit = kit_with(&[&a, &b]);
+    sign_bundle(&kit);
     let daemon = kit.daemon();
     let mut cmd = kit.cli();
     cmd.env("OXIDEPM_TEST_INDEX_URL", "").args([
@@ -2339,6 +2409,7 @@ fn bundled_runtime_import_can_enable_with_yes() {
             ..IndexOpts::default()
         },
     );
+    sign_bundle(&kit);
     let _daemon = kit.daemon();
     let run = kit.run(&[
         "adapter",
@@ -2351,7 +2422,7 @@ fn bundled_runtime_import_can_enable_with_yes() {
     ]);
     assert_eq!(run.code, 0, "{}", run.all());
     let info = info_json(&kit, "runtime-demo");
-    assert_eq!(info["trust"], "bundled", "{info}");
+    assert_eq!(info["trust"], "bundled:verified", "{info}");
     assert_eq!(info["enabled"], true, "{info}");
 }
 
@@ -2733,6 +2804,7 @@ fn bundled_update_by_name_keeps_an_enabled_adapter_enabled() {
     assert_eq!(enable.code, 0, "{}", enable.all());
 
     kit.publish(&[&new], &seq(2));
+    sign_bundle(&kit);
     let run = run_without_index(&kit, &["adapter", "update", "alpha"]);
     assert_eq!(run.code, 0, "{}", run.all());
     assert!(
@@ -2744,6 +2816,7 @@ fn bundled_update_by_name_keeps_an_enabled_adapter_enabled() {
     assert_eq!(info["version"], "0.2.0");
     assert_eq!(info["prev_version"], "0.1.0");
     assert_eq!(info["source"], "bundled");
+    assert_eq!(info["trust"], "bundled:verified");
     assert_eq!(info["enabled"], true);
 }
 
