@@ -438,12 +438,14 @@ fn relay_write_timeout_cancels_a_stuck_client() {
         ],
     );
     // a client that never reads (its receive buffer fills up)
-    let stuck = rig.send("flood", &rig.project, false);
+    let mut stuck = rig.send("flood", &rig.project, false);
     let pid = rig.recorded_pid();
     assert!(
         wait_for(30, || !pid_alive(pid)),
         "the tool of a client that stopped reading is killed"
     );
+    // The daemon closes the connection after the call has released its slot.
+    std::io::copy(&mut stuck, &mut std::io::sink()).expect("drain the cancelled connection to EOF");
     rig.kit.write_script(NAME, json!([]));
     let lines = read_all(&rig.send("flood", &rig.project, false));
     assert_eq!(
